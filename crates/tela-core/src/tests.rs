@@ -1132,3 +1132,43 @@ fn flex_column_stacks_children_vertically() {
     assert_eq!(frame.commands[1].geometry.w, 20.0);
     assert_eq!(frame.commands[1].geometry.h, 20.0);
 }
+
+// ---------- Code review 回归：Stack content/overlay 交错索引 ----------
+
+#[test]
+fn stack_content_overlay_interleaved_indices() {
+    // overlay 排在 content 之前（树序混合，见 006-4.5 统一排序）→ content 索引不错位。
+    let overlay_first = Primitive::rect()
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(40.0)),
+            height: Some(Size::fixed(20.0)),
+            stack_layer: StackLayer::FillOverlay,
+            stack_align: Some(StackAlign::TopRight),
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(Color::RED)),
+            ..VisualConcern::default()
+        });
+    let tree = UiTree::new(
+        LayoutContainer::stack([overlay_first.into(), rect(100.0, 50.0), rect(30.0, 80.0)]).layout(
+            LayoutConcern {
+                width: Some(Size::fixed(200.0)),
+                height: Some(Size::fixed(120.0)),
+                ..LayoutConcern::default()
+            },
+        ),
+    )
+    .unwrap();
+    let frame = resolve(&tree);
+    // 绘制序列：content 子（树序）在前，overlay 最后绘制（视觉在上）。
+    // content 子保留各自盒：100x50 与 30x80（叠放于原点），索引不错位。
+    assert_eq!(frame.commands[0].geometry.w, 100.0);
+    assert_eq!(frame.commands[0].geometry.h, 50.0);
+    assert_eq!(frame.commands[1].geometry.w, 30.0);
+    assert_eq!(frame.commands[1].geometry.h, 80.0);
+    // overlay（RED）在右上：x = 200-40 = 160。
+    assert_eq!(frame.commands[2].geometry.x, 160.0);
+    assert_eq!(frame.commands[2].geometry.y, 0.0);
+    assert_eq!(frame.commands[2].geometry.w, 40.0);
+}

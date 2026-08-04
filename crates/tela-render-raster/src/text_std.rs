@@ -37,7 +37,10 @@ pub(crate) fn draw_text_std(
         let glyph_id = scaled.glyph_id(ch);
         let glyph = glyph_id.with_scale_and_position(
             text.font_size * scale,
-            point(pen_x + region.x as f32, pen_y + region.y as f32),
+            point(
+                pen_x + region.x as f32,
+                pen_y + region.y as f32 + scaled.ascent(),
+            ),
         );
         let Some(outlined) = scaled.outline_glyph(glyph) else {
             // 缺失字形：实心方块（与 no_std 版一致的兜底，见 007-4.1/7.4）。
@@ -51,10 +54,17 @@ pub(crate) fn draw_text_std(
             let by = bounds.min.y.floor() as i32;
             outlined.draw(|x, y, coverage| {
                 let alpha = coverage * text.color.a;
-                if alpha > 0.0 {
+                let px = bx + x as i32;
+                let py = by + y as i32;
+                if alpha > 0.0
+                    && px >= region.x
+                    && py >= region.y
+                    && px < region.x + region.w
+                    && py < region.y + region.h
+                {
                     canvas.blend(
-                        bx + x as i32,
-                        by + y as i32,
+                        px,
+                        py,
                         tela_contract::Color {
                             r: text.color.r,
                             g: text.color.g,
@@ -77,8 +87,18 @@ fn draw_missing_glyph(canvas: &mut Canvas<'_>, region: &IRect, pen_x: f32, pen_y
     let w = size.round() as i32;
     for y in y0..y0 + w {
         for x in x0..x0 + w {
-            if x >= region.x && y >= region.y && x < region.x + region.w && y < region.y + region.h {
-                canvas.blend(x, y, tela_contract::Color { r: 0.7, g: 0.7, b: 0.7, a: 0.9 });
+            if x >= region.x && y >= region.y && x < region.x + region.w && y < region.y + region.h
+            {
+                canvas.blend(
+                    x,
+                    y,
+                    tela_contract::Color {
+                        r: 0.7,
+                        g: 0.7,
+                        b: 0.7,
+                        a: 0.9,
+                    },
+                );
             }
         }
     }

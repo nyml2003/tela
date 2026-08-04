@@ -115,21 +115,30 @@ impl<'a> Session<'a> {
         match event {
             PointerEvent::Down { position } => {
                 let hit = self.hit_test(position);
-                if let Some((node_id, node)) = hit {
+                // 命中 portal 外部区域 → 抛 TeleportClickOutside（关闭逻辑宿主实现，见 006-4.4）。
+                if let Some((node_id, node)) = &hit {
                     let interact = node.interact.as_ref();
                     if interact.is_some_and(|i| i.clickable) {
-                        self.actions.push(UiAction::Click { node_id });
+                        self.actions.push(UiAction::Click { node_id: *node_id });
                     }
                     if interact.is_some_and(|i| i.focusable) {
-                        self.request_focus(node_id);
+                        self.request_focus(*node_id);
                     }
+                }
+                if let Some(teleport_id) = self.teleport_hit_outside(&hit) {
+                    self.actions.push(UiAction::TeleportClickOutside {
+                        teleport_node_id: teleport_id,
+                    });
                 }
             }
             PointerEvent::Up { .. } => {}
             PointerEvent::Move { position } => {
                 let hit = self.hit_test(position);
                 let new_hover = hit.and_then(|(node_id, node)| {
-                    node.interact.as_ref().is_some_and(|i| i.hoverable).then_some(node_id)
+                    node.interact
+                        .as_ref()
+                        .is_some_and(|i| i.hoverable)
+                        .then_some(node_id)
                 });
                 // 进入/离开事件：悬停目标变化时先发离开再发进入（见 008-1）。
                 let new_key = new_hover.and_then(|id| self.keys.get(id.0 as usize).cloned());
@@ -144,7 +153,10 @@ impl<'a> Session<'a> {
                         });
                     }
                     if let Some(node_id) = new_hover {
-                        self.actions.push(UiAction::Hover { node_id, entered: true });
+                        self.actions.push(UiAction::Hover {
+                            node_id,
+                            entered: true,
+                        });
                     }
                     self.state.set_hover(new_key);
                 }
@@ -182,6 +194,33 @@ impl<'a> Session<'a> {
             return Some((region.node_id, node));
         }
         None
+    }
+
+    /// 命中点是否落在任意 Teleport 子树外：是则返回首个 Teleport 节点 id（portal 点击外部，见 006-4.4）。
+    fn teleport_hit_outside(&self, hit: &Option<(NodeId, &'a UiNode)>) -> Option<NodeId> {
+        let teleports: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| matches!(n.kind, tela_contract::NodeKind::Teleport(_)))
+            .map(|(i, _)| i)
+            .collect();
+        if teleports.is_empty() {
+            return None;
+        }
+        // 命中节点在任一 Teleport 子树内 → 不算外部。
+        if let Some((hit_id, _)) = hit {
+            let hit_idx = hit_id.0 as usize;
+            let parents = self.focus.as_ref().map(|f| &f.parents);
+            if let Some(parents) = parents {
+                for &tp in &teleports {
+                    if is_descendant_of(hit_idx, tp, parents) {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(NodeId(teleports[0] as u32))
     }
 
     /// 栈顶模态节点 id（视图状态仓库中的模态栈，见 008-3）。
@@ -314,10 +353,7 @@ impl<'a> Session<'a> {
             }
             if matches!(node.kind, tela_contract::NodeKind::FocusScope(_)) {
                 // 进入子 scope：按进入方向解析 entry 端口（方向端口 → 默认 → 首项）。
-                let scope_index = focus
-                    .scope_node_index
-                    .iter()
-                    .position(|&si| si == idx)?;
+                let scope_index = focus.scope_node_index.iter().position(|&si| si == idx)?;
                 let scope = &focus.scopes[scope_index];
                 return resolve_port(scope, &scope.entry, Some(dir), &focus.key_to_index);
             }

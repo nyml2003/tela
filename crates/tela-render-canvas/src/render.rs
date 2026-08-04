@@ -30,7 +30,12 @@ pub trait Canvas2D {
     /// 图片（宿主按纹理 id 绘制；本后端留宿主实现）。
     fn draw_image(&mut self, rect: Rect, texture: &tela_contract::TextureRef);
     /// 九宫格（宿主实现；本后端提供默认降级为整体拉伸）。
-    fn draw_nine_patch(&mut self, rect: Rect, texture: &tela_contract::TextureRef, border: &tela_contract::Insets);
+    fn draw_nine_patch(
+        &mut self,
+        rect: Rect,
+        texture: &tela_contract::TextureRef,
+        border: &tela_contract::Insets,
+    );
 }
 
 /// 渲染一帧：遍历有序命令（树序 = z 序，后画覆盖前），按能力集降级。
@@ -60,20 +65,30 @@ fn solid_or_degraded(fill: &Option<tela_contract::Fill>) -> Option<Color> {
 }
 
 /// 图元分发（各分支本地降级，见 007-3）。
-fn render_payload(canvas: &mut impl Canvas2D, payload: &DrawPayload, geometry: Rect, caps: &BackendCapabilities) {
+fn render_payload(
+    canvas: &mut impl Canvas2D,
+    payload: &DrawPayload,
+    geometry: Rect,
+    caps: &BackendCapabilities,
+) {
     match payload {
         DrawPayload::Rect { fill, border } => {
-            if let Some(color) = fill {
-                if caps.solid_rect {
-                    canvas.fill_rect(geometry, *color);
-                }
+            if let Some(color) = fill
+                && caps.solid_rect
+            {
+                canvas.fill_rect(geometry, *color);
             }
             if let Some(border) = border {
                 canvas.stroke_rect(geometry, border);
             }
         }
-        DrawPayload::RoundedRect { fill, border, radius } => {
-            let r = (radius.top_left + radius.top_right + radius.bottom_right + radius.bottom_left) / 4.0;
+        DrawPayload::RoundedRect {
+            fill,
+            border,
+            radius,
+        } => {
+            let r = (radius.top_left + radius.top_right + radius.bottom_right + radius.bottom_left)
+                / 4.0;
             if let Some(color) = fill {
                 if caps.rounded_rect {
                     canvas.fill_rounded_rect(geometry, r, *color);
@@ -121,7 +136,13 @@ fn render_payload(canvas: &mut impl Canvas2D, payload: &DrawPayload, geometry: R
         }
         DrawPayload::Text { text } => {
             if caps.text {
-                canvas.fill_text(&text.text, geometry.x, geometry.y + text.font_size, text.font_size, text.color);
+                canvas.fill_text(
+                    &text.text,
+                    geometry.x,
+                    geometry.y + text.font_size,
+                    text.font_size,
+                    text.color,
+                );
             }
         }
         DrawPayload::LinearGradient { gradient } => {

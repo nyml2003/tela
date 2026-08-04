@@ -87,21 +87,33 @@ fn in_rounded_rect(x: i32, y: i32, r: &IRect, corners: &Corners) -> bool {
     let dx_right = (r.x + r.w - 1 - x) as f32;
     let dy_top = (y - r.y) as f32;
     let dy_bottom = (r.y + r.h - 1 - y) as f32;
-    let (corner_dx, corner_dy, radius) = if dx_left < corners.tl && dy_top < corners.tl {
-        (dx_left, dy_top, corners.tl)
+    let (center_x, center_y, radius) = if dx_left < corners.tl && dy_top < corners.tl {
+        (r.x as f32 + corners.tl, r.y as f32 + corners.tl, corners.tl)
     } else if dx_right < corners.tr && dy_top < corners.tr {
-        (dx_right, dy_top, corners.tr)
+        (
+            r.x as f32 + r.w as f32 - corners.tr,
+            r.y as f32 + corners.tr,
+            corners.tr,
+        )
     } else if dx_right < corners.br && dy_bottom < corners.br {
-        (dx_right, dy_bottom, corners.br)
+        (
+            r.x as f32 + r.w as f32 - corners.br,
+            r.y as f32 + r.h as f32 - corners.br,
+            corners.br,
+        )
     } else if dx_left < corners.bl && dy_bottom < corners.bl {
-        (dx_left, dy_bottom, corners.bl)
+        (
+            r.x as f32 + corners.bl,
+            r.y as f32 + r.h as f32 - corners.bl,
+            corners.bl,
+        )
     } else {
         return true;
     };
     // 圆角内：距离圆心（半径）的平方 ≤ r²（含 0.5 亚像素补偿）。
-    let cx = corner_dx + 0.5;
-    let cy = corner_dy + 0.5;
-    (cx * cx + cy * cy) <= radius * radius
+    let dx = x as f32 + 0.5 - center_x;
+    let dy = y as f32 + 0.5 - center_y;
+    (dx * dx + dy * dy) <= radius * radius
 }
 
 /// 单一半径圆角测试（矩形描边圆角用）。

@@ -1,6 +1,8 @@
 //! 绘制结果：`UiFrame`、`DrawCommand`、`HitRegion`、`ClipRect` 与后端能力集（见 007-绘制与渲染后端）。
 
-use crate::{BorderRadius, Color, Fill, Gradient, Insets, NodeId, Rect, TextContent, TextureRef, Viewport};
+use crate::{
+    BorderRadius, Color, Fill, Gradient, Insets, NodeId, Rect, TextContent, TextureRef, Viewport,
+};
 use std::fmt::Debug;
 
 /// 绘制结果帧，自包含逻辑画布尺寸（见 003-场景树与节点模型 7）。

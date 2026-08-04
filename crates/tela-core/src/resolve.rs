@@ -15,7 +15,7 @@ use crate::layout::{DefaultLayoutEngine, LayoutEngine};
 use crate::tree::UiTree;
 use crate::update::{LayoutCache, measure_dirty};
 
-/// emit 上下文：命令/命中区域收集、滚动输入、结构 id 与 key 游标。
+/// emit 上下文：命令/命中区域收集、滚动输入、结构 id 与 key 游标、Teleport 顶层队列。
 struct EmitContext<'a> {
     commands: Vec<DrawCommand>,
     hit_regions: Vec<HitRegion>,
@@ -23,6 +23,15 @@ struct EmitContext<'a> {
     node_ids: &'a [NodeId],
     keys: &'a [SemanticKey],
     index: usize,
+    /// Teleport 提升队列：主遍历后按队列渲染（全局顶层，见 006-4.4）。
+    pending_teleports: Vec<TeleportEntry>,
+}
+
+/// Teleport 提升项（节点 + 布局盒 + 祖先平移；提升后视觉独立于父布局）。
+struct TeleportEntry {
+    node: usize,
+    box_: LayoutBox,
+    offset: (f32, f32),
 }
 
 impl EmitContext<'_> {
@@ -91,10 +100,17 @@ pub(crate) fn resolve_tree_dirty(
         .first()
         .cloned()
         .unwrap_or_else(|| SemanticKey("/".to_string()));
+    // 根生效模式 = 根节点声明的更新策略（默认 Full 全量，见 004-1）；Dirty 需显式声明。
+    let root_mode = tree
+        .root
+        .identity
+        .as_ref()
+        .map(|i| i.update_mode)
+        .unwrap_or(tela_contract::UpdateMode::Full);
     let root_box = measure_dirty(
         &tree.root,
         root_constraints,
-        tela_contract::UpdateMode::Dirty,
+        root_mode,
         &root_key,
         &mut engine,
         cache,
@@ -116,13 +132,42 @@ fn emit_frame_tree(
         node_ids: &tree.node_ids,
         keys: &tree.keys,
         index: 0,
+        pending_teleports: Vec::new(),
     };
-    emit_frame(&tree.root, root_box, &mut ctx, (0.0, 0.0), None);
+    emit_frame(&tree.root, root_box, &mut ctx, (0.0, 0.0), None, false);
+    // Teleport 提升：主遍历后按队列渲染（顶层，见 006-4.4）。
+    let teleports = std::mem::take(&mut ctx.pending_teleports);
+    for entry in teleports {
+        emit_frame_teleport(&tree.root, entry, &mut ctx);
+    }
     Ok(UiFrame {
         viewport,
         commands: ctx.commands,
         hit_regions: ctx.hit_regions,
     })
+}
+
+/// 渲染一个 Teleport 提升项（递归子树，clip 从顶层起算）。
+fn emit_frame_teleport(root: &UiNode, entry: TeleportEntry, ctx: &mut EmitContext<'_>) {
+    // 从根定位 Teleport 子树：DFS 索引同步（entry.node 为 DFS 序索引）。
+    let mut nodes = Vec::new();
+    collect_refs(root, &mut nodes);
+    let Some(node) = nodes.get(entry.node) else {
+        return;
+    };
+    let children = &node.children;
+    // 子树按原 layout box children 遍历（box 树与节点树对齐）。
+    let boxes = &entry.box_.children;
+    for (child_node, child_box) in children.iter().zip(boxes) {
+        emit_frame(child_node, child_box, ctx, entry.offset, None, true);
+    }
+}
+
+fn collect_refs<'a>(node: &'a UiNode, out: &mut Vec<&'a UiNode>) {
+    out.push(node);
+    for child in &node.children {
+        collect_refs(child, out);
+    }
 }
 
 /// 深度优先同步遍历：节点树 + 盒子树（DFS 序与构建期 id/key 对齐）。
@@ -134,9 +179,21 @@ fn emit_frame(
     ctx: &mut EmitContext<'_>,
     offset: (f32, f32),
     clip: Option<ClipRect>,
+    expanding_teleport: bool,
 ) {
     let (node_id, key) = ctx.next();
     let layout = node.layout.as_ref();
+
+    // Teleport 提升：主遍历遇到 Teleport 时收集到顶层队列（不原位递归）；展开模式不收集。
+    if matches!(node.kind, NodeKind::Teleport(_)) && !expanding_teleport {
+        ctx.pending_teleports.push(TeleportEntry {
+            node: node_id.0 as usize,
+            box_: box_.clone(),
+            offset,
+        });
+        // 自身无命令（逻辑容器）；命中区域不产生（Teleport 节点不可交互）。
+        return;
+    }
 
     let is_scroll_container = matches!(
         node.kind,
@@ -193,7 +250,14 @@ fn emit_frame(
     }
     for &i in &order {
         let (child_node, child_box) = (&node.children[i], &box_.children[i]);
-        emit_frame(child_node, child_box, ctx, child_offset, child_clip);
+        emit_frame(
+            child_node,
+            child_box,
+            ctx,
+            child_offset,
+            child_clip,
+            expanding_teleport,
+        );
     }
 }
 
@@ -284,8 +348,14 @@ fn emit_draw_command(
                 width: node.layout.as_ref().map(|l| l.border_width).unwrap_or(0.0),
             });
             match (&visual.fill, node.kind == NodeKind::Circle) {
-                (Some(fill), true) => DrawPayload::Circle { fill: Some(fill.clone()), border },
-                (Some(fill), false) => DrawPayload::Ellipse { fill: Some(fill.clone()), border },
+                (Some(fill), true) => DrawPayload::Circle {
+                    fill: Some(fill.clone()),
+                    border,
+                },
+                (Some(fill), false) => DrawPayload::Ellipse {
+                    fill: Some(fill.clone()),
+                    border,
+                },
                 (None, _) => return,
             }
         }

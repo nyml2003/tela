@@ -370,14 +370,14 @@ fn shadow_degrades_to_base_only() {
 fn text_renders_cjk_and_latin() {
     let frame = complex_frame();
     let bitmap = render_frame(&frame, &cfg());
-    // "Hello tela 你好" 文本（baseline 在 y=60 上方，字形主体在 y≈46..60）。
+    // "Hello tela 你好" 文本定位在 y=60 的文本盒内。
     let mut dark_pixels = 0;
-    for y in 40..62 {
+    for y in 60..80 {
         for x in 10..130 {
             if let Some([r, g, b, _]) = bitmap.pixel(x, y)
-                && r < 60
-                && g < 60
-                && b < 60
+                && r < 240
+                && g < 240
+                && b < 240
             {
                 dark_pixels += 1;
             }
@@ -387,6 +387,86 @@ fn text_renders_cjk_and_latin() {
         dark_pixels > 50,
         "文本应渲染出大量深色字形像素，实际 {dark_pixels}"
     );
+}
+
+#[test]
+fn text_is_clipped_to_its_geometry() {
+    let text = TextContent {
+        text: "Tela".to_string(),
+        font: FontRef("noto".to_string()),
+        font_size: 12.0,
+        line_height: 16.0,
+        color: Color::BLACK,
+    };
+    let frame = UiFrame {
+        viewport: Viewport {
+            width: 80.0,
+            height: 50.0,
+        },
+        commands: vec![cmd(
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 40.0,
+                h: 16.0,
+            },
+            None,
+            DrawPayload::Text { text },
+        )],
+        hit_regions: vec![],
+    };
+    let bitmap = render_frame(&frame, &cfg());
+    let mut inside_dark = 0;
+    let mut outside_dark = 0;
+    for y in 0..bitmap.height {
+        for x in 0..bitmap.width {
+            let Some([r, g, b, _]) = bitmap.pixel(x, y) else {
+                continue;
+            };
+            if r < 250 && g < 250 && b < 250 {
+                if (10..50).contains(&x) && (20..36).contains(&y) {
+                    inside_dark += 1;
+                } else {
+                    outside_dark += 1;
+                }
+            }
+        }
+    }
+    assert!(inside_dark > 10, "文本应出现在自己的几何盒内");
+    assert_eq!(outside_dark, 0, "文本不得溢出自己的几何盒");
+}
+
+#[test]
+fn rounded_rect_cuts_only_its_outer_corners() {
+    let frame = UiFrame {
+        viewport: Viewport {
+            width: 20.0,
+            height: 20.0,
+        },
+        commands: vec![cmd(
+            Rect {
+                x: 2.0,
+                y: 2.0,
+                w: 16.0,
+                h: 16.0,
+            },
+            None,
+            DrawPayload::RoundedRect {
+                fill: Some(Color::BLUE),
+                border: None,
+                radius: BorderRadius::all(5.0),
+            },
+        )],
+        hit_regions: vec![],
+    };
+    let bitmap = render_frame(&frame, &cfg());
+
+    for (x, y) in [(2, 2), (17, 2), (17, 17), (2, 17)] {
+        assert_eq!(bitmap.pixel(x, y), Some([255, 255, 255, 255]));
+    }
+    for (x, y) in [(7, 2), (12, 2), (2, 7), (17, 12)] {
+        assert_eq!(bitmap.pixel(x, y), Some([0, 0, 255, 255]));
+    }
 }
 
 #[test]

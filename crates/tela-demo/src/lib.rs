@@ -15,7 +15,7 @@ use std::cell::RefCell;
 
 use tela_contract::{
     Color, Fill, FontRef, IdentityConcern, InputEvent, Key, KeyCombo, KeyState, LayoutConcern,
-    Modifiers, PointerEvent, Point, RawKeyboardEvent, SemanticKey, ShortcutId, ShortcutMapping,
+    Modifiers, Point, PointerEvent, RawKeyboardEvent, SemanticKey, ShortcutId, ShortcutMapping,
     ShortcutScopeSpec, Size, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, UiAction,
     UiNode, Viewport, VirtualListSpec, VisualConcern,
 };
@@ -23,7 +23,10 @@ use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{IdentityAllocator, LayoutCache, UiTree, ViewStateStore, handle_input};
 
 /// 逻辑画布尺寸（布局与交互坐标，独立于像素密度）。
-pub const VIEWPORT: Viewport = Viewport { width: 480.0, height: 360.0 };
+pub const VIEWPORT: Viewport = Viewport {
+    width: 480.0,
+    height: 360.0,
+};
 
 /// 渲染缩放：位图像素 = 逻辑坐标 × DPI_SCALE（与 HTML canvas 像素一一对应）。
 pub const DPI_SCALE: f32 = 2.0;
@@ -81,13 +84,23 @@ impl App {
         let tree = UiTree::new_with_allocator(root, &mut self.allocator).expect("树合法");
         self.last_keys = tree.keys().to_vec();
         let scrolls = std::collections::HashMap::from([
-            (SemanticKey(SCROLL_KEY.to_string()), self.state.scroll(&SemanticKey(SCROLL_KEY.to_string()))),
-            (SemanticKey(VIRTUAL_KEY.to_string()), tela_contract::ScrollState { offset_x: 0.0, offset_y: self.virtual_offset }),
+            (
+                SemanticKey(SCROLL_KEY.to_string()),
+                self.state.scroll(&SemanticKey(SCROLL_KEY.to_string())),
+            ),
+            (
+                SemanticKey(VIRTUAL_KEY.to_string()),
+                tela_contract::ScrollState {
+                    offset_x: 0.0,
+                    offset_y: self.virtual_offset,
+                },
+            ),
         ]);
         let frame = tree
             .resolve_dirty(VIEWPORT, &self.measurer, &scrolls, &mut self.cache)
             .expect("resolve 成功");
-        let mut config = tela_render_raster::RasterConfig::default_with(Color::rgba(0.07, 0.08, 0.10, 1.0));
+        let mut config =
+            tela_render_raster::RasterConfig::default_with(Color::rgba(0.07, 0.08, 0.10, 1.0));
         config.dpi_scale = DPI_SCALE;
         let bitmap = tela_render_raster::render_frame(&frame, &config);
         self.bitmap = bitmap.pixels;
@@ -104,14 +117,24 @@ impl App {
         let tree = UiTree::new_with_allocator(root, &mut self.allocator).expect("树合法");
         self.last_keys = tree.keys().to_vec();
         let scrolls = std::collections::HashMap::from([
-            (SemanticKey(SCROLL_KEY.to_string()), self.state.scroll(&SemanticKey(SCROLL_KEY.to_string()))),
-            (SemanticKey(VIRTUAL_KEY.to_string()), tela_contract::ScrollState { offset_x: 0.0, offset_y: self.virtual_offset }),
+            (
+                SemanticKey(SCROLL_KEY.to_string()),
+                self.state.scroll(&SemanticKey(SCROLL_KEY.to_string())),
+            ),
+            (
+                SemanticKey(VIRTUAL_KEY.to_string()),
+                tela_contract::ScrollState {
+                    offset_x: 0.0,
+                    offset_y: self.virtual_offset,
+                },
+            ),
         ]);
         let frame = tree
             .resolve_dirty(VIEWPORT, &self.measurer, &scrolls, &mut self.cache)
             .expect("resolve 成功");
         self.pending_actions = handle_input(&tree, &frame, &mut self.state, &event);
-        let mut config = tela_render_raster::RasterConfig::default_with(Color::rgba(0.07, 0.08, 0.10, 1.0));
+        let mut config =
+            tela_render_raster::RasterConfig::default_with(Color::rgba(0.07, 0.08, 0.10, 1.0));
         config.dpi_scale = DPI_SCALE;
         let bitmap = tela_render_raster::render_frame(&frame, &config);
         self.bitmap = bitmap.pixels;
@@ -133,15 +156,14 @@ impl App {
                             "btn-del" => {
                                 self.items.pop();
                             }
-                            "btn-shuffle" => {
-                                if self.items.len() > 1 {
-                                    let last = self.items.len() - 1;
-                                    self.items.swap(0, last);
-                                }
+                            "btn-shuffle" if self.items.len() > 1 => {
+                                let last = self.items.len() - 1;
+                                self.items.swap(0, last);
                             }
                             "btn-modal" => {
                                 self.modal_open = true;
-                                self.state.push_modal(SemanticKey("modal-layer".to_string()));
+                                self.state
+                                    .push_modal(SemanticKey("modal-layer".to_string()));
                             }
                             "btn-close" => {
                                 self.modal_open = false;
@@ -180,7 +202,11 @@ struct DemoMeasurer;
 impl TextMeasurer for DemoMeasurer {
     fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics {
         let width = request.text.chars().count() as f32 * request.font_size * 0.55;
-        TextMetrics { width, height: request.line_height, line_count: 1 }
+        TextMetrics {
+            width,
+            height: request.line_height,
+            line_count: 1,
+        }
     }
 }
 
@@ -199,7 +225,11 @@ fn text(text: &str, size: f32, color: Color) -> UiNode {
 
 fn card(width: f32, height: f32, fill: Color, radius: f32) -> UiNode {
     Primitive::rect()
-        .layout(LayoutConcern { width: Some(Size::fixed(width)), height: Some(Size::fixed(height)), ..LayoutConcern::default() })
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height)),
+            ..LayoutConcern::default()
+        })
         .visual(VisualConcern {
             fill: Some(Fill::Solid(fill)),
             border_radius: tela_contract::BorderRadius::all(radius),
@@ -209,17 +239,39 @@ fn card(width: f32, height: f32, fill: Color, radius: f32) -> UiNode {
 }
 
 /// 可聚焦可点击按钮（容器组件承载 key + interact）。
+///
+/// 背景 = 容器自身 visual（圆角卡片），label = 容器 children（Flex 居中排布）——
+/// 与"内容嵌套在容器内"的组件直觉一致；不依赖 Stack 浮层（FillOverlay 保留给真正
+/// 不参与尺寸的浮层，如卡片角标）。
 fn button(key: &str, label: &str, width: f32) -> UiNode {
-    LayoutContainer::flex([
-        card(width, 26.0, Color::rgba(0.16, 0.34, 0.6, 1.0), 6.0),
-        text(label, 12.0, Color::WHITE),
-    ])
+    LayoutContainer::flex([Primitive::text(TextContent {
+        text: label.to_string(),
+        font: FontRef("noto".to_string()),
+        font_size: 12.0,
+        line_height: 12.0 * 1.4,
+        color: Color::WHITE,
+    })])
+    .visual(VisualConcern {
+        fill: Some(Fill::Solid(Color::rgba(0.16, 0.34, 0.6, 1.0))),
+        border_radius: tela_contract::BorderRadius::all(6.0),
+        ..VisualConcern::default()
+    })
     .identity(IdentityConcern {
         semantic_key: Some(SemanticKey(key.to_string())),
         ..IdentityConcern::default()
     })
-    .interact(tela_contract::InteractConcern { clickable: true, focusable: true, ..Default::default() })
-    .layout(LayoutConcern { width: Some(Size::fixed(width)), height: Some(Size::fixed(26.0)), ..LayoutConcern::default() })
+    .interact(tela_contract::InteractConcern {
+        clickable: true,
+        focusable: true,
+        ..Default::default()
+    })
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(width)),
+        height: Some(Size::fixed(26.0)),
+        main_align: tela_contract::MainAlign::Center,
+        cross_align: tela_contract::CrossAlign::Center,
+        ..LayoutConcern::default()
+    })
     .into()
 }
 
@@ -269,8 +321,14 @@ fn build_tree(app: &App) -> UiNode {
                         end: Point { x: 300.0, y: 0.0 },
                     },
                     stops: vec![
-                        tela_contract::ColorStop { position: 0.0, color: Color::rgba(0.15, 0.35, 0.85, 1.0) },
-                        tela_contract::ColorStop { position: 1.0, color: Color::rgba(0.65, 0.2, 0.85, 1.0) },
+                        tela_contract::ColorStop {
+                            position: 0.0,
+                            color: Color::rgba(0.15, 0.35, 0.85, 1.0),
+                        },
+                        tela_contract::ColorStop {
+                            position: 1.0,
+                            color: Color::rgba(0.65, 0.2, 0.85, 1.0),
+                        },
                     ],
                 })),
                 border_radius: tela_contract::BorderRadius::all(12.0),
@@ -378,7 +436,11 @@ fn build_tree(app: &App) -> UiNode {
         })
         .collect();
     let virtual_list = LayoutContainer::virtual_list(
-        VirtualListSpec { item_height: item_h, item_spacing: spacing, overscan: 2 },
+        VirtualListSpec {
+            item_height: item_h,
+            item_spacing: spacing,
+            overscan: 2,
+        },
         virtual_items,
     )
     .layout(LayoutConcern {
@@ -397,19 +459,27 @@ fn build_tree(app: &App) -> UiNode {
         .into_node();
 
     // 状态栏（日志）。
-    let status_text = app.log.last().cloned().unwrap_or_else(|| "就绪".to_string());
-    let status = LayoutContainer::flex([text(&status_text, 11.0, Color::rgba(0.7, 0.7, 0.75, 1.0))])
-        .layout(LayoutConcern {
-            padding: tela_contract::Insets::all(6.0),
-            ..LayoutConcern::default()
-        })
-        .into_node();
+    let status_text = app
+        .log
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "就绪".to_string());
+    let status =
+        LayoutContainer::flex([text(&status_text, 11.0, Color::rgba(0.7, 0.7, 0.75, 1.0))])
+            .layout(LayoutConcern {
+                padding: tela_contract::Insets::all(6.0),
+                ..LayoutConcern::default()
+            })
+            .into_node();
 
     // ShortcutScope：Ctrl+S → SAVE（局部快捷键，见 008-2.11）。
     let shortcut_scope = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
         mappings: vec![ShortcutMapping {
             combo: KeyCombo {
-                modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
                 key: Key::Char('s'),
             },
             shortcut: ShortcutId::Save,
@@ -492,9 +562,15 @@ fn with_app<F: FnOnce(&mut App) -> R, R>(f: F) -> R {
 pub extern "C" fn demo_pointer(x: f32, y: f32, kind: u32, dx: f32, dy: f32) {
     with_app(|app| {
         let event = match kind {
-            0 => InputEvent::Pointer(PointerEvent::Down { position: Point { x, y } }),
-            1 => InputEvent::Pointer(PointerEvent::Up { position: Point { x, y } }),
-            2 => InputEvent::Pointer(PointerEvent::Move { position: Point { x, y } }),
+            0 => InputEvent::Pointer(PointerEvent::Down {
+                position: Point { x, y },
+            }),
+            1 => InputEvent::Pointer(PointerEvent::Up {
+                position: Point { x, y },
+            }),
+            2 => InputEvent::Pointer(PointerEvent::Move {
+                position: Point { x, y },
+            }),
             _ => InputEvent::Pointer(PointerEvent::Scroll {
                 position: Point { x, y },
                 delta: Point { x: dx, y: dy },
@@ -530,7 +606,11 @@ pub extern "C" fn demo_key(key_code: u32, shift: u32) {
         };
         let event = InputEvent::Key(RawKeyboardEvent {
             key,
-            modifiers: Modifiers { shift: shift != 0, ctrl: key_code == 7, ..Modifiers::default() },
+            modifiers: Modifiers {
+                shift: shift != 0,
+                ctrl: key_code == 7,
+                ..Modifiers::default()
+            },
             state: KeyState::Pressed,
             repeat: false,
         });
@@ -571,5 +651,47 @@ pub extern "C" fn demo_last_log_len() -> u32 {
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_last_log_ptr() -> *const u8 {
-    with_app(|app| app.log.last().map(|s| s.as_ptr()).unwrap_or(std::ptr::null()))
+    with_app(|app| {
+        app.log
+            .last()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use tela_contract::DrawPayload;
+
+    #[test]
+    fn button_label_overlays_its_background() {
+        let tree = UiTree::new(button("button", "添加条目", 80.0)).expect("button tree is valid");
+        let frame = tree
+            .resolve(VIEWPORT, &DemoMeasurer, &HashMap::new())
+            .expect("button resolves");
+
+        assert!(matches!(
+            frame.commands[0].payload,
+            DrawPayload::RoundedRect { .. }
+        ));
+        assert!(matches!(
+            frame.commands[1].payload,
+            DrawPayload::Text { .. }
+        ));
+
+        let background = frame.commands[0].geometry;
+        let label = frame.commands[1].geometry;
+        assert!(label.x >= background.x && label.y >= background.y);
+        assert!(label.x + label.w <= background.x + background.w);
+        assert!(label.y + label.h <= background.y + background.h);
+        assert!(
+            ((label.x + label.w / 2.0) - (background.x + background.w / 2.0)).abs() < f32::EPSILON
+        );
+        assert!(
+            ((label.y + label.h / 2.0) - (background.y + background.h / 2.0)).abs() < f32::EPSILON
+        );
+    }
 }

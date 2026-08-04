@@ -85,17 +85,6 @@ fn full_scope(children: Vec<UiNode>) -> UiNode {
         .into()
 }
 
-/// 未声明策略的普通容器（继承 resolve_dirty 的 Dirty 根模式）。
-fn plain_scope(children: Vec<UiNode>) -> UiNode {
-    LayoutContainer::flex(children)
-        .layout(LayoutConcern {
-            direction: tela_contract::FlexDirection::Column,
-            gap: 4.0,
-            ..LayoutConcern::default()
-        })
-        .into()
-}
-
 fn resolve_dirty(tree: &UiTree, cache: &mut LayoutCache) -> tela_contract::UiFrame {
     tree.resolve_dirty(VIEWPORT, &MockMeasurer, &HashMap::new(), cache)
         .unwrap()
@@ -108,7 +97,7 @@ fn dirty_measures_only_changed_subtree() {
     // 树：Full 根 → [Dirty A[textA], Dirty B[textB]]。
     // 帧 1 全量；帧 2 只改 textB → 仅 textB、容器 B、根重算（3 次），A 子树缓存命中（0 次）。
     let mut cache = LayoutCache::new();
-    let mut tree = UiTree::new(plain_scope(vec![
+    let mut tree = UiTree::new(dirty_scope(vec![
         dirty_scope(vec![text("A")]),
         dirty_scope(vec![text("B")]),
     ]))
@@ -118,7 +107,7 @@ fn dirty_measures_only_changed_subtree() {
     assert_eq!(frame1_measures, 5, "帧 1 全量：根 + 2 容器 + 2 文本");
 
     // 只改 textB。
-    tree = UiTree::new(plain_scope(vec![
+    tree = UiTree::new(dirty_scope(vec![
         dirty_scope(vec![text("A")]),
         dirty_scope(vec![text("B changed")]),
     ]))
@@ -179,4 +168,29 @@ fn clear_cache_does_not_change_result() {
     cache.clear();
     let cold = resolve_dirty(&tree, &mut cache);
     assert_eq!(warm, cold, "清缓存后结果不变（缓存只是加速）");
+}
+
+#[test]
+fn dirty_cache_invalidates_on_layout_field_change() {
+    // 回归：修改 padding（非文本内容）也必须使 Dirty 缓存作废（见 004-7.1）。
+    let mut cache = LayoutCache::new();
+    let mut tree = UiTree::new(dirty_scope(vec![text("A"), text("B")])).unwrap();
+    let frame1 = resolve_dirty(&tree, &mut cache);
+    // 只改容器 padding。
+    tree = UiTree::new(
+        LayoutContainer::flex([text("A"), text("B")])
+            .identity(IdentityConcern {
+                update_mode: UpdateMode::Dirty,
+                ..IdentityConcern::default()
+            })
+            .layout(LayoutConcern {
+                direction: tela_contract::FlexDirection::Column,
+                gap: 4.0,
+                padding: tela_contract::Insets::all(12.0),
+                ..LayoutConcern::default()
+            }),
+    )
+    .unwrap();
+    let frame2 = resolve_dirty(&tree, &mut cache);
+    assert_ne!(frame1, frame2, "padding 变更必须使缓存作废");
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tela_contract::{FocusPort, FocusRef, Key, NodeId, NodeKind, SemanticKey, UiNode};
 
 /// 焦点图上下文：本帧从树构建（见 008-2.1）。
-pub(crate) struct FocusContext<'a> {
+pub(crate) struct FocusContext {
     /// DFS 序的 FocusScope 列表（index 0 = 全局根作用域）。
     pub scopes: Vec<ScopeInfo>,
     /// 按 DFS 序索引的所属 scope（`node_scope[id.0 as usize]`，O(1)）。
@@ -26,8 +26,8 @@ pub(crate) struct FocusContext<'a> {
     pub scope_node_index: Vec<usize>,
     /// 全局可聚焦节点（树序，含 Teleport 迁移后的重挂载）。
     pub focusables: Vec<NodeId>,
-    /// DFS 序节点表（图边目标为 FocusScope 时解析其 entry 端口）。
-    pub nodes: &'a [&'a UiNode],
+    /// 节点索引 → 其开启的 scope 索引（图边目标为 FocusScope 时解析其 entry 端口）。
+    pub scope_by_node: Vec<Option<usize>>,
 }
 
 /// 单个焦点作用域（见 008-2.9 端口契约）。
@@ -65,11 +65,11 @@ pub(crate) enum NavInput {
 /// 构建焦点图：DFS 树，收集可聚焦节点与作用域（纯函数，每帧交互时构建）。
 ///
 /// `nodes`/`ids`/`keys` 为 DFS 序对齐表（`UiTree` 构建期产物）。
-pub(crate) fn build_focus_context<'a>(
-    nodes: &'a [&'a UiNode],
+pub(crate) fn build_focus_context(
+    nodes: &[&UiNode],
     ids: &[NodeId],
     keys: &[SemanticKey],
-) -> FocusContext<'a> {
+) -> FocusContext {
     let _ = ids;
     let mut ctx = FocusContext {
         scopes: vec![ScopeInfo {
@@ -89,7 +89,7 @@ pub(crate) fn build_focus_context<'a>(
             .collect(),
         scope_node_index: vec![0],
         focusables: Vec::new(),
-        nodes,
+        scope_by_node: Vec::new(),
     };
     // 作用域栈 + ModalHost 作用域栈（Teleport 迁移目标）。
     let mut scope_stack: Vec<usize> = vec![0];
@@ -133,18 +133,20 @@ fn walk(
     // 结构 id = DFS 索引（id.0 == index，见模块头约定）。
     let id = NodeId(index as u32);
 
-    // Teleport 焦点迁移：子树焦点链重挂载到最近 ModalHost 作用域（见 008-2.10）。
-    let teleport_override =
-        matches!(node.kind, NodeKind::Teleport(_)).then(|| modal_stack.last().copied());
-    let child_scope = match teleport_override {
-        Some(Some(scope)) => scope,
-        _ => *scope_stack.last().unwrap_or(&0),
-    };
+    // Teleport 焦点迁移：子树焦点链重挂载到最近 ModalHost 作用域，scope 父链同步迁移
+    // （脱离原始逻辑树，见 008-2.10）。
+    let teleport_entered =
+        matches!(node.kind, NodeKind::Teleport(_)) && modal_stack.last().is_some();
+    if teleport_entered {
+        scope_stack.push(modal_stack.last().copied().unwrap_or(0));
+    }
+    let child_scope = *scope_stack.last().unwrap_or(&0);
 
     // DFS 前序：索引顺序 = 分配顺序，直接 push 对齐（id.0 == index）。
     // parents 先占位，递归子节点返回后回填真实树父。
     ctx.node_scope.push(child_scope);
     ctx.parents.push(0);
+    ctx.scope_by_node.push(None);
     if node.interact.as_ref().is_some_and(|i| i.focusable) {
         ctx.scopes[child_scope].focusables.push(id);
         ctx.focusables.push(id);
@@ -174,6 +176,7 @@ fn walk(
         });
         ctx.scope_parent.push(*scope_stack.last().unwrap_or(&0));
         ctx.scope_node_index.push(index);
+        ctx.scope_by_node[index] = Some(new_scope);
         scope_stack.push(new_scope);
         true
     } else {
@@ -189,6 +192,9 @@ fn walk(
     }
 
     if entered_scope {
+        scope_stack.pop();
+    }
+    if teleport_entered {
         scope_stack.pop();
     }
     if entered_modal {
@@ -261,19 +267,13 @@ pub(crate) fn next_direction(
         && let Some(&target) = targets.first()
     {
         // 目标是子 FocusScope（端口连线）：解析其 entry 落点（见 008-2.9 解析顺序）。
-        if ctx.nodes.get(target.0 as usize).is_some_and(|n| matches!(n.kind, NodeKind::FocusScope(_))) {
-            let sub = ctx
-                .scope_node_index
-                .iter()
-                .position(|&si| si == target.0 as usize);
-            if let Some(sub) = sub {
-                return resolve_port(
-                    &ctx.scopes[sub],
-                    &ctx.scopes[sub].entry,
-                    None,
-                    &ctx.key_to_index,
-                );
-            }
+        if let Some(Some(sub)) = ctx.scope_by_node.get(target.0 as usize) {
+            return resolve_port(
+                &ctx.scopes[*sub],
+                &ctx.scopes[*sub].entry,
+                None,
+                &ctx.key_to_index,
+            );
         }
         return Some(target);
     }

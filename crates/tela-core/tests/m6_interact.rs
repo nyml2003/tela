@@ -599,3 +599,191 @@ fn draw_order_does_not_change_tab_order() {
     // 第二个 Tab 落在树序第二个（bottom），与绘制层级无关。
     assert!(state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[3]));
 }
+
+// ---------- Code review 回归测试 ----------
+
+#[test]
+fn entry_port_binding_lands_on_target() {
+    // 父 scope 的 btn-a 按 Down → 进入子 scope → entry_down 绑定 "inner-target" 落点（见 008-2.9）。
+    let inner = LogicalContainer::focus_scope(FocusScopeSpec {
+        entry: FocusPort {
+            down: Some(FocusRef(SemanticKey("inner-target".to_string()))),
+            ..FocusPort::none()
+        },
+        ..FocusScopeSpec::default()
+    })
+    .children([
+        focusable_item("inner-target", 50.0, 20.0),
+        focusable_item("inner-2", 50.0, 20.0),
+    ])
+    .into_node();
+    let outer = LogicalContainer::focus_scope(FocusScopeSpec::default())
+        .children([focusable_item("a", 50.0, 20.0), inner]);
+    let tree = UiTree::new(outer).unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    // 聚焦 a（树序第一个可聚焦 = inner-target？—— 父 scope focusables 只有 a；子 scope 的在其内）。
+    // 先 Tab（首个可聚焦 = a），再 Down（越界 → 默认回退 → 进入子 scope entry_down）。
+    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    assert!(
+        state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[1]),
+        "焦点在 a"
+    );
+    handle_input(&tree, &frame, &mut state, &key(Key::ArrowDown, false));
+    // entry_down 绑定 inner-target。
+    let target_key = SemanticKey("inner-target".to_string());
+    let target_idx = tree.keys().iter().position(|k| *k == target_key).unwrap();
+    assert!(
+        state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[target_idx]),
+        "方向键进入子 scope 落点在 entry_down 绑定节点"
+    );
+}
+
+#[test]
+fn parent_graph_may_target_child_scope_itself() {
+    // 父图边 to = 子 scope 自身 key（端口连线，合法）；to = 子内部 key（非法）。
+    let inner = LogicalContainer::focus_scope(FocusScopeSpec {
+        entry: FocusPort::uniform(FocusRef(SemanticKey("inner-btn".to_string()))),
+        ..FocusScopeSpec::default()
+    })
+    .identity(tela_contract::IdentityConcern {
+        semantic_key: Some(SemanticKey("inner".to_string())),
+        ..tela_contract::IdentityConcern::default()
+    })
+    .children([focusable_item("inner-btn", 50.0, 20.0)])
+    .into_node();
+    let ok = LogicalContainer::focus_scope(FocusScopeSpec {
+        focus_graph: FocusGraph {
+            edges: vec![FocusEdge {
+                from: FocusRef(SemanticKey("a".to_string())),
+                to: FocusRef(SemanticKey("inner".to_string())), // 子 scope 自身 key
+            }],
+        },
+        ..FocusScopeSpec::default()
+    })
+    .children([focusable_item("a", 50.0, 20.0), inner]);
+    let tree = UiTree::new(ok.clone()).expect("父图可连接子 scope 自身（端口连线）");
+    // 图边转移：a → 子 scope entry（inner-btn）。
+    let _ = ok;
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(Key::ArrowDown, false));
+    let target_key = SemanticKey("inner-btn".to_string());
+    let target_idx = tree.keys().iter().position(|k| *k == target_key).unwrap();
+    assert!(state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[target_idx]));
+}
+
+#[test]
+fn hover_emits_enter_and_leave() {
+    let tree = UiTree::new(LayoutContainer::flex([
+        hoverable_rect(50.0, 20.0),
+        hoverable_rect(50.0, 20.0),
+    ]))
+    .unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    // 移入第一个。
+    let a = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(tela_contract::PointerEvent::Move {
+            position: Point { x: 10.0, y: 10.0 },
+        }),
+    );
+    assert!(
+        a.iter()
+            .any(|x| matches!(x, UiAction::Hover { entered: true, .. }))
+    );
+    // 移入第二个：先发第一个的离开。
+    let b = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(tela_contract::PointerEvent::Move {
+            position: Point { x: 60.0, y: 10.0 },
+        }),
+    );
+    assert!(
+        b.iter()
+            .any(|x| matches!(x, UiAction::Hover { entered: false, .. })),
+        "应发离开事件"
+    );
+    assert!(
+        b.iter()
+            .any(|x| matches!(x, UiAction::Hover { entered: true, .. })),
+        "应发进入事件"
+    );
+    // 移出全部：发离开。
+    let c = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(tela_contract::PointerEvent::Move {
+            position: Point { x: 190.0, y: 90.0 },
+        }),
+    );
+    assert!(
+        c.iter()
+            .any(|x| matches!(x, UiAction::Hover { entered: false, .. })),
+        "移出应发离开"
+    );
+}
+
+fn hoverable_rect(width: f32, height: f32) -> tela_contract::UiNode {
+    let mut node = rect(width, height);
+    node.interact = Some(InteractConcern {
+        hoverable: true,
+        ..InteractConcern::default()
+    });
+    node
+}
+
+// ---------- Code review 回归：Teleport 渲染提升 / 点击外部 ----------
+
+#[test]
+fn teleport_renders_on_top_layer() {
+    // Teleport 子树绘制在普通内容之后（提升至顶层，见 006-4.4）。
+    let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Node(tela_contract::NodeId(0)),
+    })
+    .children([clickable_rect(50.0, 20.0)])
+    .into_node();
+    let host = LogicalContainer::modal_host().children([clickable_rect(100.0, 40.0), teleported]);
+    let tree = UiTree::new(host).unwrap();
+    let frame = frame(&tree);
+    // Teleport 内按钮命令在普通内容之后（后绘制者在上）。
+    assert_eq!(frame.commands.len(), 2);
+    assert!(matches!(
+        frame.commands[1].payload,
+        tela_contract::DrawPayload::Rect { .. }
+    ));
+}
+
+#[test]
+fn teleport_click_outside_emits_action() {
+    let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::MouseFollow,
+    })
+    .children([clickable_rect(50.0, 20.0)])
+    .into_node();
+    let host = LogicalContainer::modal_host().children([clickable_rect(100.0, 40.0), teleported]);
+    let tree = UiTree::new(host).unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    // 点击 Teleport 外区域 → TeleportClickOutside。
+    let actions = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
+            position: Point { x: 190.0, y: 90.0 },
+        }),
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, UiAction::TeleportClickOutside { .. }))
+    );
+}
