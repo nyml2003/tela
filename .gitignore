@@ -1,0 +1,33 @@
+# Rust
+/target
+Cargo.lock.orig
+
+# Nix
+/.direnv
+/result
+
+# Node（demo 冒烟测试 / 服务器脚本）
+node_modules/
+
+# opencode 会话状态
+.opencode/goals/
+
+# 构建产物
+/demo/tela_demo.wasm
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*~
+
+# 日志与临时文件
+*.log
+/tmp/
+
+# 敏感数据（禁止入库）
+.env
+.env.*
+*.pem
+*.key

@@ -1,0 +1,18 @@
+[package]
+name = "tela-demo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "tela 演示：浏览器 canvas 复杂页面（覆盖 80% 库能力）"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tela-contract = { path = "../tela-contract" }
+tela-core = { path = "../tela-core" }
+tela-render-raster = { path = "../tela-render-raster" }
+tela-render-canvas = { path = "../tela-render-canvas" }
+
+[lints.rust]
+unsafe_code = "deny"

@@ -1,0 +1,461 @@
+//! 节点模型：`UiNode` 与五维度槽位、`NodeKind` 与容器配置（见 003-场景树与节点模型）。
+
+use crate::{
+    BorderRadius, Color, Fill, Insets, KeyCombo, PixelOffset, ShadowSpec, ShortcutId, Size,
+};
+
+/// 结构 id：基座内部构建期分配，本帧内唯一有效（见 003-场景树与节点模型 4）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeId(pub u32);
+
+/// 节点类别：解释哪些维度、影响范围是自身还是后代（见 003-场景树与节点模型 2）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum NodeKind {
+    /// 逻辑容器：纯分组，无几何、无行为。
+    Group,
+    /// 逻辑容器：key 身份策略与更新模式作用域（配置在 `IdentityConcern`，向下生效）。
+    IdentityScope,
+    /// 逻辑容器：焦点作用域，声明方向化 entry/exit 端口与焦点图（见 008-交互焦点与宿主接口 2.9）。
+    FocusScope(FocusScopeSpec),
+    /// 逻辑容器：局部快捷键映射 `KeyCombo → ShortcutId`（见 008-交互焦点与宿主接口 2.11）。
+    ShortcutScope(ShortcutScopeSpec),
+    /// 逻辑容器：模态宿主，栈顶子树天然全局最上（见 006-布局引擎 4.1）。
+    ModalHost,
+    /// 逻辑容器：portal，子树提升至 ModalHost 顶层队列渲染（见 006-布局引擎 4.4）。
+    Teleport(TeleportSpec),
+    /// 布局容器：弹性 Flex（含 wrap 换行开关）。
+    Flex,
+    /// 布局容器：同盒堆叠，Content / FillOverlay 语法分层（见 006-布局引擎 4.2）。
+    Stack,
+    /// 布局容器：滚动视口，偏移由外部 `scroll_inputs` 注入。
+    ScrollView,
+    /// 布局容器：虚拟列表，仅渲染可视区域，item 必须显式 `semantic-id`。
+    VirtualListView(VirtualListSpec),
+    /// 绘制原语：文本。
+    Text,
+    /// 绘制原语：图片。
+    Image,
+    /// 绘制原语：矩形（圆角经 `VisualConcern.border_radius`）。
+    Rect,
+    /// 绘制原语：圆形（外接矩形内切圆，见 007-绘制与渲染后端 1）。
+    Circle,
+    /// 绘制原语：椭圆（外接矩形内切椭圆）。
+    Ellipse,
+    /// 绘制原语：九宫格拉伸贴图。
+    NinePatch,
+    /// 绘制原语：多边形。
+    Polygon,
+}
+
+impl NodeKind {
+    /// 是否为逻辑容器（零几何、透明，影响后代）。
+    pub fn is_logical_container(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Group
+                | NodeKind::IdentityScope
+                | NodeKind::FocusScope(_)
+                | NodeKind::ShortcutScope(_)
+                | NodeKind::ModalHost
+                | NodeKind::Teleport(_)
+        )
+    }
+
+    /// 是否为布局容器（有盒，只谈排列）。
+    pub fn is_layout_container(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Flex | NodeKind::Stack | NodeKind::ScrollView | NodeKind::VirtualListView(_)
+        )
+    }
+
+    /// 是否为绘制原语（要求 `content`）。
+    pub fn is_primitive(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Text
+                | NodeKind::Image
+                | NodeKind::Rect
+                | NodeKind::Circle
+                | NodeKind::Ellipse
+                | NodeKind::NinePatch
+                | NodeKind::Polygon
+        )
+    }
+}
+
+/// 焦点图引用：绑定本 FocusScope 内部可聚焦节点的跨帧 key（见 008-交互焦点与宿主接口 2.9）。
+///
+/// 业务用符号 key 表达（如 `SemanticKey("confirm_btn")`，等价伪代码 `@confirm_btn`），
+/// 构建期解析为本帧 node_id；父 `focus_graph` 禁止引用子 Scope 内部 key（见 `UiBuildError::FocusGraphCrossScope`）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FocusRef(pub crate::SemanticKey);
+
+/// 方向化 entry/exit 端口（见 008-交互焦点与宿主接口 2.9）。
+///
+/// 方向 = 按键方向（键身份），不是屏幕几何；方向无关简写等价四方向同绑。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FocusPort {
+    /// 上方向。
+    pub up: Option<FocusRef>,
+    /// 下方向。
+    pub down: Option<FocusRef>,
+    /// 左方向。
+    pub left: Option<FocusRef>,
+    /// 右方向。
+    pub right: Option<FocusRef>,
+}
+
+impl FocusPort {
+    /// 空端口（可为 null）。
+    pub fn none() -> Self {
+        Self {
+            up: None,
+            down: None,
+            left: None,
+            right: None,
+        }
+    }
+
+    /// 方向无关简写：四方向绑定同一节点。
+    pub fn uniform(target: FocusRef) -> Self {
+        Self {
+            up: Some(target.clone()),
+            down: Some(target.clone()),
+            left: Some(target.clone()),
+            right: Some(target),
+        }
+    }
+}
+
+impl Default for FocusPort {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+/// 焦点图的一条边：输入按键 → 下一焦点节点。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FocusEdge {
+    /// 源焦点节点。
+    pub from: FocusRef,
+    /// 目标焦点节点。
+    pub to: FocusRef,
+}
+
+/// 焦点图：以可聚焦节点为顶点的有向图，边的生成与遍历建立在组件树关系上（见 008 2.1）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FocusGraph {
+    /// 边集合。
+    pub edges: Vec<FocusEdge>,
+}
+
+/// `FocusScope` 配置。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FocusScopeSpec {
+    /// 进入端口：外部焦点按方向进入本 Scope 的落点。
+    pub entry: FocusPort,
+    /// 逃逸端口：本 Scope 按方向逃逸时向外部输出的焦点跳转源。
+    pub exit: FocusPort,
+    /// 焦点陷阱：Tab/Shift+Tab 在 Scope 内循环，不能跳出（见 008 2.10）。
+    pub trap_focus: bool,
+    /// 声明式焦点图，只能连接本 Scope 内部焦点节点。
+    pub focus_graph: FocusGraph,
+}
+
+/// 快捷键映射：物理组合键 → 语义动作 id（见 008-交互焦点与宿主接口 2.11）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortcutMapping {
+    /// 物理组合键。
+    pub combo: KeyCombo,
+    /// 语义动作 id。
+    pub shortcut: ShortcutId,
+}
+
+/// `ShortcutScope` 配置：局部快捷键映射表。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShortcutScopeSpec {
+    /// 映射表，支持局部键位重写。
+    pub mappings: Vec<ShortcutMapping>,
+}
+
+/// Teleport source 锚点（见 006-布局引擎 4.4）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeleportSource {
+    /// 绑定自身内部源锚点节点。
+    Node(NodeId),
+    /// 鼠标跟随浮层（锚点偏移为纯视觉偏移）。
+    MouseFollow,
+}
+
+/// `Teleport` 配置。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TeleportSpec {
+    /// 源锚点。
+    pub source: TeleportSource,
+}
+
+/// 虚拟列表容器配置（见 006-布局引擎 6）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VirtualListSpec {
+    /// 定高 item 高度（首版仅支持定高）。
+    pub item_height: f32,
+    /// item 间距。
+    pub item_spacing: f32,
+    /// 可视区外预渲染数量。
+    pub overscan: u32,
+}
+
+/// 值语义 UI 树节点（见 003-场景树与节点模型 1.1）。
+///
+/// 按关注点维度拆成独立槽位：`layout`/`visual`/`interact`/`identity`/`content`。
+/// 树只描述"这帧该长什么样"；可变状态（焦点、光标、滚动、选中、弹窗）不放进树。
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiNode {
+    /// 节点类别：解释哪些维度、对后代产生什么影响。
+    pub kind: NodeKind,
+    /// 布局维度：尺寸/边距/对齐/flex/溢出/滚动。
+    pub layout: Option<LayoutConcern>,
+    /// 视觉维度：填充/圆角/边框色/阴影/裁剪/九宫格/局部绘制序。
+    pub visual: Option<VisualConcern>,
+    /// 交互维度：可点/可悬停/可聚焦/输入/模态/业务绑定/焦点序。
+    pub interact: Option<InteractConcern>,
+    /// 身份维度：key 策略/更新模式/语义 id（向下生效）。
+    pub identity: Option<crate::IdentityConcern>,
+    /// 内容维度：文本/纹理/几何。
+    pub content: Option<ContentConcern>,
+    /// 子节点。
+    pub children: Vec<UiNode>,
+}
+
+impl UiNode {
+    /// 构造指定 kind 的空节点（构建器约束在 M1 的专用构造 API 实现）。
+    pub fn new(kind: NodeKind) -> Self {
+        Self {
+            kind,
+            layout: None,
+            visual: None,
+            interact: None,
+            identity: None,
+            content: None,
+            children: Vec::new(),
+        }
+    }
+
+    /// 挂载子节点。
+    pub fn with_children(mut self, children: impl IntoIterator<Item = UiNode>) -> Self {
+        self.children = children.into_iter().collect();
+        self
+    }
+
+    /// 挂载布局槽位（正交性由构建器编译期约束 + 构建期校验兜底）。
+    pub fn with_layout(mut self, layout: LayoutConcern) -> Self {
+        self.layout = Some(layout);
+        self
+    }
+
+    /// 挂载视觉槽位。
+    pub fn with_visual(mut self, visual: VisualConcern) -> Self {
+        self.visual = Some(visual);
+        self
+    }
+
+    /// 挂载交互槽位。
+    pub fn with_interact(mut self, interact: InteractConcern) -> Self {
+        self.interact = Some(interact);
+        self
+    }
+
+    /// 挂载身份槽位。
+    pub fn with_identity(mut self, identity: crate::IdentityConcern) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// 挂载内容槽位。
+    pub fn with_content(mut self, content: ContentConcern) -> Self {
+        self.content = Some(content);
+        self
+    }
+}
+
+/// `LayoutConcern` 槽位：尺寸、盒模型、容器排版、裁剪与溢出、Stack 分层（见 003-3、006-3/4/5）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutConcern {
+    /// 宽度定义，`None` = 未声明。
+    pub width: Option<Size>,
+    /// 高度定义，`None` = 未声明。
+    pub height: Option<Size>,
+    /// 外边距：影响兄弟间距。
+    pub margin: crate::Insets,
+    /// 内边距：参与内容区域计算。
+    pub padding: crate::Insets,
+    /// 边框宽度：计入盒尺寸（颜色部分归 `visual`）。
+    pub border_width: f32,
+    /// Flex 主轴方向。
+    pub direction: crate::FlexDirection,
+    /// Flex 换行开关：`wrap=false` 单行全局 Fill；`wrap=true` 自动换行、Fill 仅单行内部。
+    pub wrap: bool,
+    /// 容器子节点间距。
+    pub gap: f32,
+    /// 主轴对齐。
+    pub main_align: crate::MainAlign,
+    /// 交叉轴对齐。
+    pub cross_align: crate::CrossAlign,
+    /// 裁剪容器开关（滚动/裁剪容器，命令级预合并 clip rect 表达）。
+    pub clip: bool,
+    /// 内容溢出控制。
+    pub overflow: crate::Overflow,
+    /// Stack 子节点层级：`Content` / `FillOverlay`（仅 Stack 内合法）。
+    pub stack_layer: crate::StackLayer,
+    /// Stack `FillOverlay` 对齐规则。
+    pub stack_align: Option<crate::StackAlign>,
+    /// Stack `FillOverlay` 边角偏移。
+    pub stack_offset: PixelOffset,
+}
+
+impl Default for LayoutConcern {
+    fn default() -> Self {
+        Self {
+            width: None,
+            height: None,
+            margin: Insets::default(),
+            padding: Insets::default(),
+            border_width: 0.0,
+            direction: crate::FlexDirection::Row,
+            wrap: false,
+            gap: 0.0,
+            main_align: crate::MainAlign::Start,
+            cross_align: crate::CrossAlign::Start,
+            clip: false,
+            overflow: crate::Overflow::Visible,
+            stack_layer: crate::StackLayer::Content,
+            stack_align: None,
+            stack_offset: PixelOffset::default(),
+        }
+    }
+}
+
+/// `VisualConcern` 槽位：纯外观，不影响盒尺寸（见 003-3、007-绘制与渲染后端）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisualConcern {
+    /// 填充（纯色或渐变）。
+    pub fill: Option<Fill>,
+    /// 边框颜色（宽度归 `layout`）。
+    pub border_color: Option<Color>,
+    /// 独立四角圆角半径。
+    pub border_radius: BorderRadius,
+    /// 阴影（外阴影/内阴影）。
+    pub shadow: Option<ShadowSpec>,
+    /// 局部绘制序：仅控制当前直接父布局容器内的绘制与命中顺序（见 006-布局引擎 4.5）。
+    pub draw_order: DrawOrder,
+    /// 不改变布局尺寸的微小视觉位移。
+    pub visual_offset: PixelOffset,
+}
+
+impl Default for VisualConcern {
+    fn default() -> Self {
+        Self {
+            fill: None,
+            border_color: None,
+            border_radius: BorderRadius::default(),
+            shadow: None,
+            draw_order: DrawOrder::normal(),
+            visual_offset: PixelOffset::default(),
+        }
+    }
+}
+
+/// 局部 DrawOrder：同父容器内分组 + 组内权重升序 + 树序兜底（见 006-布局引擎 4.5）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawOrder {
+    /// 底层绘制组，默认权重 0。
+    InnerBottom(i16),
+    /// 普通内容层，默认权重 0。
+    Normal(i16),
+    /// 顶层装饰组，默认权重 0。
+    InnerTop(i16),
+}
+
+impl DrawOrder {
+    /// 无权重 `InnerBottom(0)`。
+    pub fn inner_bottom() -> Self {
+        Self::InnerBottom(0)
+    }
+    /// 无权重 `Normal(0)`。
+    pub fn normal() -> Self {
+        Self::Normal(0)
+    }
+    /// 无权重 `InnerTop(0)`。
+    pub fn inner_top() -> Self {
+        Self::InnerTop(0)
+    }
+}
+
+/// `InteractConcern` 槽位：可点/可悬停/可聚焦/输入/模态/业务绑定/焦点序（见 008、012）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InteractConcern {
+    /// 可点击。
+    pub clickable: bool,
+    /// 可悬停。
+    pub hoverable: bool,
+    /// 可聚焦（进入焦点图）。
+    pub focusable: bool,
+    /// 焦点序：独立调 Tab 顺序，`-1` 移出 Tab 序列（见 008 2.10）。
+    pub tab_index: i16,
+    /// 文本输入节点（IME/文本走宿主端口）。
+    pub text_input: bool,
+    /// 模态节点：模态栈拦截下层输入。
+    pub modal: bool,
+    /// 业务绑定标识：唯一业务变更通道（见 012-业务数据绑定）。
+    pub bind_id: Option<crate::BindId>,
+}
+
+/// `ContentConcern` 槽位：文本/纹理/几何（见 003-1.1、007-1）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContentConcern {
+    /// 无内容。
+    Empty,
+    /// 文本内容。
+    Text(TextContent),
+    /// 图片内容（纹理引用）。
+    Image(ImageContent),
+    /// 九宫格内容（3×3 切分的可拉伸贴图）。
+    NinePatch(NinePatchContent),
+    /// 几何内容：多边形顶点列表。
+    Polygon {
+        /// 顶点列表。
+        points: Vec<crate::Point>,
+    },
+}
+
+/// 文本内容：字形引用 + 文本 + 字号 + 行间距（单样式块，富文本后置）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextContent {
+    /// 文本（一律 UTF-8，构建期校验）。
+    pub text: String,
+    /// 字体引用。
+    pub font: crate::FontRef,
+    /// 字号。
+    pub font_size: f32,
+    /// 行间距（行高）。
+    pub line_height: f32,
+    /// 文本颜色。
+    pub color: Color,
+}
+
+/// 图片内容。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageContent {
+    /// 纹理引用。
+    pub texture: crate::TextureRef,
+}
+
+/// 九宫格内容。
+#[derive(Clone, Debug, PartialEq)]
+pub struct NinePatchContent {
+    /// 纹理引用。
+    pub texture: crate::TextureRef,
+    /// 3×3 切分边框。
+    pub border: Insets,
+}
