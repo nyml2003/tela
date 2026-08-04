@@ -21,6 +21,7 @@ use tela_contract::{
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{IdentityAllocator, LayoutCache, UiTree, ViewStateStore, handle_input};
+use tela_widgets::{Button, ButtonVariant};
 
 /// 逻辑画布尺寸（布局与交互坐标，独立于像素密度）。
 pub const VIEWPORT: Viewport = Viewport {
@@ -64,7 +65,7 @@ impl App {
             allocator: IdentityAllocator::new(),
             cache: LayoutCache::new(),
             state: ViewStateStore::new(),
-            measurer: DemoMeasurer,
+            measurer: DemoMeasurer::new(),
             bitmap: Vec::new(),
             pending_actions: Vec::new(),
             last_keys: Vec::new(),
@@ -197,15 +198,52 @@ impl App {
 }
 
 /// 纯函数文本度量（近似规则，中英文同宽处理）。
-struct DemoMeasurer;
+/// 真实文本度量：与渲染同一字体（内嵌 Noto 子集，见 007-4.0"同一不可变字体数据"）。
+struct DemoMeasurer {
+    font: ab_glyph::FontArc,
+}
+
+impl DemoMeasurer {
+    fn new() -> Self {
+        Self {
+            font: ab_glyph::FontArc::try_from_slice(tela_render_raster::embedded_font_bytes())
+                .expect("内嵌字体必须可解析"),
+        }
+    }
+}
 
 impl TextMeasurer for DemoMeasurer {
     fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics {
-        let width = request.text.chars().count() as f32 * request.font_size * 0.55;
+        use ab_glyph::{Font as _, ScaleFont as _};
+        // 与渲染同一缩放（em：1em = font_size），保证度量与字形一致（见 007-4.0）。
+        let scaled = self.font.as_scaled(tela_render_raster::em_pixel_height(
+            &self.font,
+            request.font_size,
+        ));
+        let mut lines = 1u32;
+        let mut line_width = 0.0f32;
+        let mut max_width = 0.0f32;
+        for ch in request.text.chars() {
+            if ch == '\n' {
+                lines += 1;
+                line_width = 0.0;
+                continue;
+            }
+            let advance = scaled.h_advance(scaled.glyph_id(ch));
+            if let Some(max) = request.max_width
+                && line_width > 0.0
+                && line_width + advance > max
+            {
+                lines += 1;
+                line_width = 0.0;
+            }
+            line_width += advance;
+            max_width = max_width.max(line_width);
+        }
         TextMetrics {
-            width,
-            height: request.line_height,
-            line_count: 1,
+            width: max_width,
+            height: lines as f32 * request.line_height,
+            line_count: lines,
         }
     }
 }
@@ -223,56 +261,22 @@ fn text(text: &str, size: f32, color: Color) -> UiNode {
     .into()
 }
 
-fn card(width: f32, height: f32, fill: Color, radius: f32) -> UiNode {
-    Primitive::rect()
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            height: Some(Size::fixed(height)),
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(fill)),
-            border_radius: tela_contract::BorderRadius::all(radius),
-            ..VisualConcern::default()
-        })
-        .into()
-}
-
-/// 可聚焦可点击按钮（容器组件承载 key + interact）。
-///
-/// 背景 = 容器自身 visual（圆角卡片），label = 容器 children（Flex 居中排布）——
-/// 与"内容嵌套在容器内"的组件直觉一致；不依赖 Stack 浮层（FillOverlay 保留给真正
-/// 不参与尺寸的浮层，如卡片角标）。
-fn button(key: &str, label: &str, width: f32) -> UiNode {
-    LayoutContainer::flex([Primitive::text(TextContent {
-        text: label.to_string(),
-        font: FontRef("noto".to_string()),
-        font_size: 12.0,
-        line_height: 12.0 * 1.4,
-        color: Color::WHITE,
-    })])
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(Color::rgba(0.16, 0.34, 0.6, 1.0))),
-        border_radius: tela_contract::BorderRadius::all(6.0),
-        ..VisualConcern::default()
-    })
-    .identity(IdentityConcern {
-        semantic_key: Some(SemanticKey(key.to_string())),
-        ..IdentityConcern::default()
-    })
-    .interact(tela_contract::InteractConcern {
-        clickable: true,
-        focusable: true,
-        ..Default::default()
-    })
-    .layout(LayoutConcern {
-        width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(26.0)),
-        main_align: tela_contract::MainAlign::Center,
-        cross_align: tela_contract::CrossAlign::Center,
+/// Stack 内不参与尺寸推导、按指定位置叠放的文本。
+fn overlay_text(
+    label: &str,
+    size: f32,
+    color: Color,
+    align: tela_contract::StackAlign,
+    offset: tela_contract::PixelOffset,
+) -> UiNode {
+    let mut node = text(label, size, color);
+    node.layout = Some(LayoutConcern {
+        stack_layer: tela_contract::StackLayer::FillOverlay,
+        stack_align: Some(align),
+        stack_offset: offset,
         ..LayoutConcern::default()
-    })
-    .into()
+    });
+    node
 }
 
 trait IntoNode: Into<UiNode> {
@@ -293,10 +297,27 @@ fn build_tree(app: &App) -> UiNode {
 
     // 工具栏。
     let toolbar = LayoutContainer::flex([
-        button("btn-add", "添加条目", 80.0),
-        button("btn-del", "删除条目", 80.0),
-        button("btn-modal", "打开弹窗", 80.0),
-        button("btn-shuffle", "随机重排", 80.0),
+        Button::new("btn-add", "添加条目")
+            .variant(ButtonVariant::Primary)
+            .width(80.0)
+            .view_state(&app.state)
+            .into(),
+        Button::new("btn-del", "删除条目")
+            .variant(ButtonVariant::Danger)
+            .width(80.0)
+            .view_state(&app.state)
+            .into(),
+        Button::new("btn-modal", "打开弹窗")
+            .variant(ButtonVariant::Warning)
+            .width(80.0)
+            .view_state(&app.state)
+            .into(),
+        Button::new("btn-shuffle", "随机重排")
+            .variant(ButtonVariant::Primary)
+            .width(80.0)
+            .disabled(app.items.len() < 2)
+            .view_state(&app.state)
+            .into(),
         text("Ctrl+S 保存", 11.0, Color::rgba(0.55, 0.55, 0.6, 1.0)),
     ])
     .layout(LayoutConcern {
@@ -350,7 +371,13 @@ fn build_tree(app: &App) -> UiNode {
                 ..VisualConcern::default()
             })
             .into(),
-        text("数据面板", 16.0, Color::WHITE),
+        overlay_text(
+            "数据面板",
+            16.0,
+            Color::WHITE,
+            tela_contract::StackAlign::Center,
+            tela_contract::PixelOffset::default(),
+        ),
     ])
     .into_node();
 
@@ -367,7 +394,6 @@ fn build_tree(app: &App) -> UiNode {
                 Color::rgba(0.18, 0.19, 0.24, 1.0)
             };
             LayoutContainer::flex([
-                card(140.0, 20.0, bg, 5.0),
                 text(name, 12.0, Color::WHITE),
                 Primitive::circle()
                     .layout(LayoutConcern {
@@ -385,12 +411,21 @@ fn build_tree(app: &App) -> UiNode {
                     })
                     .into(),
             ])
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(bg)),
+                border_radius: tela_contract::BorderRadius::all(5.0),
+                ..VisualConcern::default()
+            })
             .identity(IdentityConcern {
                 semantic_key: Some(SemanticKey(format!("item-{i}"))),
                 ..IdentityConcern::default()
             })
             .layout(LayoutConcern {
+                width: Some(Size::fixed(140.0)),
                 height: Some(Size::fixed(26.0)),
+                gap: 6.0,
+                main_align: tela_contract::MainAlign::Center,
+                cross_align: tela_contract::CrossAlign::Center,
                 ..LayoutConcern::default()
             })
             .into()
@@ -420,19 +455,24 @@ fn build_tree(app: &App) -> UiNode {
     let visible_count = (150.0 / stride).ceil() as usize + 2;
     let virtual_items: Vec<UiNode> = (first_visible..(first_visible + visible_count).min(total))
         .map(|i| {
-            LayoutContainer::flex([
-                card(150.0, 18.0, Color::rgba(0.16, 0.3, 0.5, 1.0), 4.0),
-                text(&format!("虚拟项 #{i}"), 11.0, Color::WHITE),
-            ])
-            .identity(IdentityConcern {
-                semantic_key: Some(SemanticKey(format!("vitem-{i}"))),
-                ..IdentityConcern::default()
-            })
-            .layout(LayoutConcern {
-                height: Some(Size::fixed(item_h)),
-                ..LayoutConcern::default()
-            })
-            .into()
+            LayoutContainer::flex([text(&format!("虚拟项 #{i}"), 11.0, Color::WHITE)])
+                .visual(VisualConcern {
+                    fill: Some(Fill::Solid(Color::rgba(0.16, 0.3, 0.5, 1.0))),
+                    border_radius: tela_contract::BorderRadius::all(4.0),
+                    ..VisualConcern::default()
+                })
+                .identity(IdentityConcern {
+                    semantic_key: Some(SemanticKey(format!("vitem-{i}"))),
+                    ..IdentityConcern::default()
+                })
+                .layout(LayoutConcern {
+                    width: Some(Size::fixed(150.0)),
+                    height: Some(Size::fixed(item_h)),
+                    main_align: tela_contract::MainAlign::Center,
+                    cross_align: tela_contract::CrossAlign::Center,
+                    ..LayoutConcern::default()
+                })
+                .into()
         })
         .collect();
     let virtual_list = LayoutContainer::virtual_list(
@@ -513,14 +553,28 @@ fn build_tree(app: &App) -> UiNode {
                         ..VisualConcern::default()
                     })
                     .into(),
-                LayoutContainer::stack([
-                    card(240.0, 110.0, Color::rgba(0.14, 0.14, 0.17, 0.99), 10.0),
+                LayoutContainer::flex([
                     text("弹窗", 16.0, Color::WHITE),
-                    button("btn-close", "关闭弹窗", 96.0),
+                    Button::new("btn-close", "关闭弹窗")
+                        .variant(ButtonVariant::Danger)
+                        .width(96.0)
+                        .view_state(&app.state)
+                        .into(),
                 ])
+                .visual(VisualConcern {
+                    fill: Some(Fill::Solid(Color::rgba(0.14, 0.14, 0.17, 0.99))),
+                    border_radius: tela_contract::BorderRadius::all(10.0),
+                    ..VisualConcern::default()
+                })
                 .layout(LayoutConcern {
+                    width: Some(Size::fixed(240.0)),
+                    height: Some(Size::fixed(110.0)),
                     stack_layer: tela_contract::StackLayer::FillOverlay,
                     stack_align: Some(tela_contract::StackAlign::Center),
+                    direction: tela_contract::FlexDirection::Column,
+                    gap: 16.0,
+                    main_align: tela_contract::MainAlign::Center,
+                    cross_align: tela_contract::CrossAlign::Center,
                     ..LayoutConcern::default()
                 })
                 .into(),
@@ -657,41 +711,4 @@ pub extern "C" fn demo_last_log_ptr() -> *const u8 {
             .map(|s| s.as_ptr())
             .unwrap_or(std::ptr::null())
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-    use tela_contract::DrawPayload;
-
-    #[test]
-    fn button_label_overlays_its_background() {
-        let tree = UiTree::new(button("button", "添加条目", 80.0)).expect("button tree is valid");
-        let frame = tree
-            .resolve(VIEWPORT, &DemoMeasurer, &HashMap::new())
-            .expect("button resolves");
-
-        assert!(matches!(
-            frame.commands[0].payload,
-            DrawPayload::RoundedRect { .. }
-        ));
-        assert!(matches!(
-            frame.commands[1].payload,
-            DrawPayload::Text { .. }
-        ));
-
-        let background = frame.commands[0].geometry;
-        let label = frame.commands[1].geometry;
-        assert!(label.x >= background.x && label.y >= background.y);
-        assert!(label.x + label.w <= background.x + background.w);
-        assert!(label.y + label.h <= background.y + background.h);
-        assert!(
-            ((label.x + label.w / 2.0) - (background.x + background.w / 2.0)).abs() < f32::EPSILON
-        );
-        assert!(
-            ((label.y + label.h / 2.0) - (background.y + background.h / 2.0)).abs() < f32::EPSILON
-        );
-    }
 }

@@ -5,6 +5,7 @@ members = [
     "crates/tela-core",
     "crates/tela-render-raster",
     "crates/tela-render-canvas",
+    "crates/tela-widgets",
     "crates/tela-demo",
 ]
 

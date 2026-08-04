@@ -13,6 +13,8 @@ tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
 tela-render-raster = { path = "../tela-render-raster" }
 tela-render-canvas = { path = "../tela-render-canvas" }
+tela-widgets = { path = "../tela-widgets" }
+ab_glyph = "0.2"
 
 [lints.rust]
 unsafe_code = "deny"

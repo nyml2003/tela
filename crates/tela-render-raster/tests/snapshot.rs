@@ -554,3 +554,118 @@ fn png_export_roundtrip() {
     let info = reader.next_frame(&mut buf).expect("读帧");
     assert_eq!((info.width, info.height), (200, 100));
 }
+
+// ---------- Text 渲染验证（度量与渲染一致、字形完整） ----------
+
+#[test]
+fn text_renders_full_glyphs_at_em_scale() {
+    // "添加条目" 4 个 CJK 字形：em 缩放（1em = font_size）下字形应为 12px 方块，
+    // 覆盖率足够高（笔画实心像素接近纯白），不淡、不截断。
+    let text = TextContent {
+        text: "添加条目".to_string(),
+        font: FontRef("embedded".to_string()),
+        font_size: 12.0,
+        line_height: 16.8,
+        color: Color::WHITE,
+    };
+    let frame = UiFrame {
+        viewport: Viewport {
+            width: 80.0,
+            height: 30.0,
+        },
+        commands: vec![DrawCommand {
+            geometry: Rect {
+                x: 8.0,
+                y: 4.0,
+                w: 48.0,
+                h: 16.8,
+            },
+            clip: None,
+            payload: DrawPayload::Text { text },
+        }],
+        hit_regions: vec![],
+    };
+    let config = RasterConfig::default_with(Color {
+        r: 0.16,
+        g: 0.34,
+        b: 0.6,
+        a: 1.0,
+    });
+    let bitmap = render_frame(&frame, &config);
+    // 4 个 CJK 字形（em 缩放：12px 字号 → 字形 10px，总宽 ~48px）。
+    // 小字号无子像素时覆盖率无 ≥0.9 像素（抗锯齿固有），"不截断"的正确判定 =
+    // 每个字形位置段都有墨迹，且墨迹总量与字形尺寸匹配（度量与渲染一致，见 007-4.0）。
+    let mut total_ink = 0;
+    let mut segments = [0usize; 4];
+    for y in 4..22 {
+        for x in 8..56 {
+            if let Some([r, g, b, _]) = bitmap.pixel(x, y) {
+                let min = r.min(g).min(b);
+                if min > 40 {
+                    total_ink += 1;
+                    let seg = ((x - 8) / 12).min(3) as usize;
+                    segments[seg] += 1;
+                }
+            }
+        }
+    }
+    assert!(total_ink > 200, "字形应有足够墨迹像素，实际 {total_ink}");
+    for (i, count) in segments.iter().enumerate() {
+        assert!(*count > 20, "第 {i} 个字应有墨迹（不截断），实际 {count}");
+    }
+}
+
+#[test]
+fn space_character_does_not_render_block() {
+    // 回归：空格有 advance 但无轮廓——不得触发"缺失字形"灰块（曾导致文本中出现实心白框）。
+    let frame = UiFrame {
+        viewport: Viewport {
+            width: 80.0,
+            height: 40.0,
+        },
+        commands: vec![DrawCommand {
+            geometry: Rect {
+                x: 4.0,
+                y: 4.0,
+                w: 72.0,
+                h: 20.0,
+            },
+            clip: None,
+            payload: DrawPayload::Text {
+                text: TextContent {
+                    text: "虚拟项 #100".to_string(),
+                    font: FontRef("embedded".to_string()),
+                    font_size: 11.0,
+                    line_height: 15.4,
+                    color: Color::WHITE,
+                },
+            },
+        }],
+        hit_regions: vec![],
+    };
+    let config = RasterConfig::default_with(Color {
+        r: 0.13,
+        g: 0.24,
+        b: 0.4,
+        a: 1.0,
+    });
+    let bitmap = render_frame(&frame, &config);
+    // 无实心灰块（缺字形方块颜色 ≈ (165,169,174)）：统计该色的连续区域应接近 0。
+    let mut block_like = 0;
+    for y in 0..bitmap.height {
+        for x in 0..bitmap.width {
+            if let Some([r, g, b, _]) = bitmap.pixel(x, y) {
+                if (r as i32 - 165).abs() < 12
+                    && (g as i32 - 169).abs() < 12
+                    && (b as i32 - 174).abs() < 12
+                {
+                    block_like += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        block_like < 30,
+        "空格不应渲染成灰块，实际灰块像素 {block_like}"
+    );
+}

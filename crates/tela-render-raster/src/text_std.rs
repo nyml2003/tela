@@ -5,8 +5,23 @@ use tela_contract::TextContent;
 
 use crate::render::{Canvas, IRect};
 
-/// 内嵌 Noto CJK 子集字体（中英文 + 常用标点）。
-const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/NotoSansCJKsubset.ttf");
+/// 内嵌中文字体子集（wqy-zenhei 子集：中英文 + 常用标点，TrueType glyf 轮廓，度量标准）。
+pub const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/WQYZenhei-subset.ttf");
+
+/// 内嵌字体字节（宿主/上层据此构造与渲染同一字体的度量器，见 007-4.0"同一不可变字体数据"）。
+pub fn embedded_font_bytes() -> &'static [u8] {
+    FONT_BYTES
+}
+
+/// 按 em 缩放的像素行高：`as_scaled(pixel_height)` 的输入。
+///
+/// ab_glyph 的 `as_scaled(size)` 按行高（ascent - descent）缩放；而 CJK 字体
+/// 的 vertical metrics 与轮廓单位（units_per_em）不一致（如 Noto CJK：1448 vs 1000），
+/// 直接传 font_size 会把字形缩到 0.69em。按 em 缩放保证 1em = font_size
+/// （CSS 语义，CJK 方块字 12px 字号即 12px），度量与渲染统一使用本函数。
+pub fn em_pixel_height(font: &ab_glyph::FontArc, font_size: f32) -> f32 {
+    font_size * font.height_unscaled() / font.units_per_em().unwrap_or(1000.0)
+}
 
 /// 惰性解析的字体（首次使用初始化，结果确定不变）。
 fn font() -> &'static FontArc {
@@ -23,7 +38,8 @@ pub(crate) fn draw_text_std(
     scale: f32,
 ) {
     let font = font();
-    let scaled = font.as_scaled(text.font_size * scale);
+    // 按 em 缩放（1em = font_size），见 em_pixel_height；dpi 统一乘入。
+    let scaled = font.as_scaled(em_pixel_height(font, text.font_size) * scale);
     // 行高与布局侧对齐：布局行高 = TextMeasurer 返回的 line_height（见 007-4.0 同一度量）。
     let line_height = text.line_height * scale;
     let mut pen_x = 0.0f32;
@@ -35,17 +51,28 @@ pub(crate) fn draw_text_std(
             continue;
         }
         let glyph_id = scaled.glyph_id(ch);
+        // 按盒宽折行：与布局侧同一规则（逐字形 advance 累计，超盒宽换行），
+        // 保证布局行数与渲染行数一致（见 007-4.0 同一度量）。
+        let advance = scaled.h_advance(glyph_id);
+        if pen_x > 0.0 && pen_x + advance > region.w as f32 {
+            pen_x = 0.0;
+            pen_y += line_height;
+        }
+        // glyph 的 PxScale 必须与 scaled 一致（em 缩放），否则字形轮廓与度量错位。
         let glyph = glyph_id.with_scale_and_position(
-            text.font_size * scale,
+            em_pixel_height(font, text.font_size) * scale,
             point(
                 pen_x + region.x as f32,
                 pen_y + region.y as f32 + scaled.ascent(),
             ),
         );
         let Some(outlined) = scaled.outline_glyph(glyph) else {
-            // 缺失字形：实心方块（与 no_std 版一致的兜底，见 007-4.1/7.4）。
-            draw_missing_glyph(canvas, region, pen_x, pen_y, text.font_size * scale);
-            pen_x += text.font_size * scale * 1.0;
+            // 空白字符（如空格，无轮廓但有 advance）：不绘制，仅推进 pen。
+            // 缺失字形（notdef，未映射字符）：渲染实心方块（见 007-4.1）。
+            if glyph_id.0 == 0 {
+                draw_missing_glyph(canvas, region, pen_x, pen_y, text.font_size * scale);
+            }
+            pen_x += advance;
             continue;
         };
         {

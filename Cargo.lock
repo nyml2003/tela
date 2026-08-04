@@ -124,10 +124,12 @@ dependencies = [
 name = "tela-demo"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "tela-contract",
  "tela-core",
  "tela-render-canvas",
  "tela-render-raster",
+ "tela-widgets",
 ]
 
 [[package]]
@@ -146,6 +148,14 @@ dependencies = [
  "font8x8",
  "png",
  "tela-contract",
+]
+
+[[package]]
+name = "tela-widgets"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
 ]
 
 [[package]]

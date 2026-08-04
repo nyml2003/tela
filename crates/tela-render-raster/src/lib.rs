@@ -39,6 +39,8 @@ pub use render::render_frame;
 
 #[cfg(feature = "std")]
 pub use png_export::write_png;
+#[cfg(feature = "std")]
+pub use text_std::{em_pixel_height, embedded_font_bytes};
 
 #[cfg(feature = "std")]
 mod png_export {
