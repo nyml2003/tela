@@ -9,6 +9,7 @@
 mod button;
 mod checkbox;
 mod form;
+mod image_background;
 mod input;
 mod select;
 mod shared;
@@ -19,6 +20,7 @@ mod table;
 pub use button::{Button, ButtonPalette, ButtonState, ButtonVariant};
 pub use checkbox::{Checkbox, Radio};
 pub use form::{Form, FormItem};
+pub use image_background::ImageBackground;
 pub use input::{Input, InputNumber};
 pub use select::{CascadeOption, Cascader, OptionItem, Select};
 pub use signal::{Signal, SignalSubscription};

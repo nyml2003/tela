@@ -85,3 +85,27 @@ fn fs_rounded(in: RoundedOut) -> @location(0) vec4<f32> {
     let alpha = color.a * coverage(outer_distance);
     return vec4<f32>(color.rgb, alpha);
 }
+
+struct ImageOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@group(0) @binding(0) var image_texture: texture_2d<f32>;
+@group(0) @binding(1) var image_sampler: sampler;
+
+@vertex
+fn vs_image(
+    @location(0) pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+) -> ImageOut {
+    var out: ImageOut;
+    out.clip_position = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs_image(in: ImageOut) -> @location(0) vec4<f32> {
+    return textureSample(image_texture, image_sampler, in.uv);
+}

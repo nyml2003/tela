@@ -1,16 +1,17 @@
 //! 最小 WebGPU 渲染后端。
 //!
-//! 当前能力边界是纯色矩形、圆角矩形与矩形裁剪。后端仍然只消费 `UiFrame`；未声明能力的
-//! payload 在批次构建前跳过，不回读 `UiTree`，也不改变输入帧。
+//! 当前能力边界是纯色矩形、圆角矩形、图片、文字与矩形裁剪。后端仍然只消费
+//! `UiFrame`；未声明能力的 payload 在批次构建前跳过，不回读 `UiTree`，也不改变输入帧。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use tela_contract::{BackendCapabilities, ClipRect, Color, DrawPayload, Rect, UiFrame};
+use tela_contract::{BackendCapabilities, ClipRect, Color, DrawPayload, Rect, TextureRef, UiFrame};
 
 #[cfg(test)]
 use crate::batch::to_ndc;
-use crate::batch::{Batch, PreparedBatch, rounded_batch_for, solid_batch_for};
+use crate::batch::{Batch, PreparedBatch, image_batch_for, rounded_batch_for, solid_batch_for};
 use crate::pipeline::Pipelines;
+use crate::text;
 
 const IN_FLIGHT_FRAME_COUNT: usize = 3;
 
@@ -37,16 +38,54 @@ pub struct RenderStats {
     pub skipped_empty_clip: u32,
     /// 暂不支持的 payload 命令数。
     pub unsupported_commands: u32,
+    /// 帧中引用但尚未注册的图片数量。
+    pub missing_images: u32,
     /// 保留的兼容统计字段。当前 Rect/RoundedRect 路径已支持边框，因此正常为零。
     pub ignored_borders: u32,
 }
 
-/// 支持 Solid Rect、RoundedRect 与矩形 clip 的 WebGPU renderer。
+/// RGBA8 图片上传失败。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageUploadError {
+    /// 宽高不能为零。
+    InvalidDimensions,
+    /// 像素字节数不是 `width * height * 4`。
+    InvalidByteLength {
+        /// 由图片尺寸推导出的正确 RGBA8 字节数。
+        expected: usize,
+        /// 调用方实际提供的字节数。
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for ImageUploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDimensions => f.write_str("图片尺寸必须非零"),
+            Self::InvalidByteLength { expected, actual } => {
+                write!(f, "RGBA8 字节长度错误：期望 {expected}，实际 {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ImageUploadError {}
+
+struct GpuImage {
+    // BindGroup 不借用 Texture，但保留 Texture 字段，确保资源生命周期覆盖所有提交帧。
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
+/// 支持 Solid Rect、RoundedRect、Image 与矩形 clip 的 WebGPU renderer。
 pub struct WgpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
     pipelines: Pipelines,
+    images: BTreeMap<TextureRef, GpuImage>,
+    text_images: BTreeMap<TextureRef, String>,
     in_flight_frames: VecDeque<SubmittedFrame>,
     background: wgpu::Color,
     viewport: Rect,
@@ -58,7 +97,7 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    /// 创建 renderer 及其图元 pipeline。无字体或纹理资源。
+    /// 创建 renderer 及其图元 pipeline。图片资源通过 [`Self::upload_rgba8`] 注册。
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -71,6 +110,8 @@ impl WgpuRenderer {
             queue,
             format,
             pipelines,
+            images: BTreeMap::new(),
+            text_images: BTreeMap::new(),
             in_flight_frames: VecDeque::new(),
             background: wgpu::Color {
                 r: background.r as f64,
@@ -97,7 +138,7 @@ impl WgpuRenderer {
         self.format
     }
 
-    /// 当前后端能力：纯色矩形、圆角矩形和矩形裁剪。
+    /// 当前后端能力：纯色矩形、圆角矩形、图片、文字和矩形裁剪。
     pub fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             solid_rect: true,
@@ -107,10 +148,10 @@ impl WgpuRenderer {
             linear_gradient: false,
             radial_gradient: false,
             shadow: false,
-            text: false,
+            text: true,
             nine_patch: false,
             clip_rect: true,
-            image_texture: false,
+            image_texture: true,
             subpixel: false,
         }
     }
@@ -133,6 +174,108 @@ impl WgpuRenderer {
     /// 底层队列引用。
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// 注册或替换一张紧密排列的 RGBA8 图片。
+    ///
+    /// 资源来源（URL、base64、Android asset 等）必须由宿主适配器先解码；renderer
+    /// 只负责 GPU 上传。替换同一 `TextureRef` 会让后续帧使用新内容。
+    pub fn upload_rgba8(
+        &mut self,
+        texture_ref: TextureRef,
+        width: u32,
+        height: u32,
+        rgba8: &[u8],
+    ) -> Result<(), ImageUploadError> {
+        if width == 0 || height == 0 {
+            return Err(ImageUploadError::InvalidDimensions);
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(ImageUploadError::InvalidDimensions)?;
+        if rgba8.len() != expected {
+            return Err(ImageUploadError::InvalidByteLength {
+                expected,
+                actual: rgba8.len(),
+            });
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tela image texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba8,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tela image sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tela image bind group"),
+            layout: self.pipelines.image_bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        self.images.insert(
+            texture_ref,
+            GpuImage {
+                texture,
+                bind_group,
+            },
+        );
+        Ok(())
+    }
+
+    /// 移除一张已注册图片；后续引用会按缺失资源处理。
+    pub fn remove_image(&mut self, texture_ref: &TextureRef) -> bool {
+        self.images.remove(texture_ref).is_some()
+    }
+
+    /// 当前已注册图片数。
+    pub fn image_count(&self) -> usize {
+        self.images.len()
     }
 
     /// 提交 surface texture。
@@ -163,7 +306,8 @@ impl WgpuRenderer {
             ..RenderStats::default()
         };
         let mut batches = Vec::<Batch>::new();
-        for command in &frame.commands {
+        let mut used_textures = BTreeSet::new();
+        for (command_index, command) in frame.commands.iter().enumerate() {
             let scissor = self.scissor_for(command.clip);
             if scissor.2 == 0 || scissor.3 == 0 {
                 stats.skipped_empty_clip += 1;
@@ -188,10 +332,44 @@ impl WgpuRenderer {
                     let batch = rounded_batch_for(&mut batches, scissor);
                     batch.push_payload(command.geometry, *radius, *fill, *border, &self.viewport);
                 }
+                DrawPayload::Image { texture } => {
+                    if self.images.contains_key(texture) {
+                        let batch = image_batch_for(&mut batches, scissor, texture.clone());
+                        batch.push_rect(command.geometry, &self.viewport);
+                    } else {
+                        stats.missing_images += 1;
+                    }
+                }
+                DrawPayload::Text { text: content } => {
+                    let texture = TextureRef(format!("__tela.text.{command_index}"));
+                    let width = (command.geometry.w.max(1.0) * self.dpi).ceil() as u32;
+                    let height = (command.geometry.h.max(1.0) * self.dpi).ceil() as u32;
+                    let signature = format!("{content:?};{width}x{height};dpi={:.3}", self.dpi);
+                    if self.text_images.get(&texture) != Some(&signature) {
+                        let pixels = text::rasterize(content, width, height, self.dpi);
+                        self.upload_rgba8(texture.clone(), width, height, &pixels)
+                            .expect("文字纹理尺寸和 RGBA8 数据必须匹配");
+                        self.text_images.insert(texture.clone(), signature);
+                    }
+                    let batch = image_batch_for(&mut batches, scissor, texture.clone());
+                    batch.push_rect(command.geometry, &self.viewport);
+                    used_textures.insert(texture);
+                }
                 _ => {
                     stats.unsupported_commands += 1;
                 }
             }
+        }
+
+        let stale_textures: Vec<TextureRef> = self
+            .text_images
+            .keys()
+            .filter(|texture| !used_textures.contains(*texture))
+            .cloned()
+            .collect();
+        for texture in stale_textures {
+            self.text_images.remove(&texture);
+            self.images.remove(&texture);
         }
 
         stats.batches = batches.iter().filter(|batch| !batch.is_empty()).count() as u32;
@@ -229,7 +407,17 @@ impl WgpuRenderer {
             });
             pass.set_viewport(0.0, 0.0, self.pixel_w as f32, self.pixel_h as f32, 0.0, 1.0);
             for batch in &prepared {
-                self.pipelines.draw(&mut pass, batch);
+                let image_bind_group = match batch {
+                    PreparedBatch::Image { texture, .. } => Some(
+                        &self
+                            .images
+                            .get(texture)
+                            .expect("已准备的图片必须已注册")
+                            .bind_group,
+                    ),
+                    _ => None,
+                };
+                self.pipelines.draw(&mut pass, batch, image_bind_group);
                 stats.draw_calls += 1;
             }
         }
@@ -279,8 +467,8 @@ fn diagnostics_for(frame: &UiFrame, stats: &RenderStats, first_batch: Option<&Ba
         .map(Batch::diagnostics)
         .unwrap_or_else(|| "batch=<empty>".to_owned());
     format!(
-        "{input}; {batch}; unsupported={} ignored_borders={}",
-        stats.unsupported_commands, stats.ignored_borders
+        "{input}; {batch}; unsupported={} missing_images={} ignored_borders={}",
+        stats.unsupported_commands, stats.missing_images, stats.ignored_borders
     )
 }
 
@@ -298,14 +486,15 @@ mod tests {
             linear_gradient: false,
             radial_gradient: false,
             shadow: false,
-            text: false,
+            text: true,
             nine_patch: false,
             clip_rect: true,
-            image_texture: false,
+            image_texture: true,
             subpixel: false,
         };
         assert!(caps.solid_rect && caps.rounded_rect && caps.clip_rect);
-        assert!(!caps.text && !caps.linear_gradient);
+        assert!(caps.image_texture && caps.text);
+        assert!(!caps.linear_gradient);
     }
 
     #[test]

@@ -87,9 +87,27 @@ fn write_payload(output: &mut String, payload: &DrawPayload) {
             write_radius(output, *radius);
             output.push('}');
         }
+        DrawPayload::Image { texture } => {
+            output.push_str(r#"{"kind":"image","texture":"#);
+            write_json_string(output, &texture.0);
+            output.push('}');
+        }
+        DrawPayload::Text { text } => {
+            output.push_str(r#"{"kind":"text","text":"#);
+            write_json_string(output, &text.text);
+            output.push_str(r#","font":"#);
+            write_json_string(output, &text.font.0);
+            write!(
+                output,
+                r#","font_size":{},"line_height":{},"color":"#,
+                text.font_size, text.line_height
+            )
+            .expect("写入 String 不会失败");
+            write_color(output, text.color);
+            output.push('}');
+        }
         other => {
-            // 当前 demo 只投影 Rect / RoundedRect。保留完整 Debug 文本而不是静默丢弃
-            // 其他核心命令，以便场景扩展时观测立即暴露出来。
+            // 保留完整 Debug 文本而不是静默丢弃其他核心命令，以便场景扩展时立即暴露。
             output.push_str(r#"{"kind":"unprojected","debug":"#);
             write_json_string(output, &format!("{other:?}"));
             output.push('}');

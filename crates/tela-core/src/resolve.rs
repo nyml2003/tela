@@ -15,14 +15,14 @@ use crate::layout::{DefaultLayoutEngine, LayoutEngine};
 use crate::tree::UiTree;
 use crate::update::{LayoutCache, measure_dirty};
 
-/// emit 上下文：命令/命中区域收集、滚动输入、结构 id 与 key 游标、Teleport 顶层队列。
+/// emit 上下文：命令/命中区域收集、滚动输入、节点 id/key 映射、Teleport 顶层队列。
 struct EmitContext<'a> {
     commands: Vec<DrawCommand>,
     hit_regions: Vec<HitRegion>,
     scroll_inputs: &'a HashMap<SemanticKey, ScrollState>,
-    node_ids: &'a [NodeId],
-    keys: &'a [SemanticKey],
-    index: usize,
+    /// 节点地址 → 构建期分配的稳定 id/key。绘制顺序可以按 `draw_order` 改变，
+    /// 因此不能用 emit 次数与 DFS 序号关联。
+    node_meta: HashMap<usize, (NodeId, SemanticKey)>,
     /// Teleport 提升队列：主遍历后按队列渲染（全局顶层，见 006-4.4）。
     pending_teleports: Vec<TeleportEntry>,
 }
@@ -35,15 +35,11 @@ struct TeleportEntry {
 }
 
 impl EmitContext<'_> {
-    fn next(&mut self) -> (NodeId, Option<SemanticKey>) {
-        let node_id = self
-            .node_ids
-            .get(self.index)
-            .copied()
-            .unwrap_or(NodeId(self.index as u32));
-        let key = self.keys.get(self.index).cloned();
-        self.index += 1;
-        (node_id, key)
+    fn node_meta(&self, node: &UiNode) -> (NodeId, SemanticKey) {
+        self.node_meta
+            .get(&(node as *const UiNode as usize))
+            .cloned()
+            .expect("UiTree 节点必须拥有构建期 id/key")
     }
 }
 
@@ -125,13 +121,18 @@ fn emit_frame_tree(
     viewport: Viewport,
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
 ) -> Result<UiFrame, UiLayoutError> {
+    let (nodes, node_ids, keys) = tree.node_table();
+    let node_meta = nodes
+        .into_iter()
+        .zip(node_ids)
+        .zip(keys)
+        .map(|((node, node_id), key)| (node as *const UiNode as usize, (node_id, key)))
+        .collect();
     let mut ctx = EmitContext {
         commands: Vec::new(),
         hit_regions: Vec::new(),
         scroll_inputs,
-        node_ids: &tree.node_ids,
-        keys: &tree.keys,
-        index: 0,
+        node_meta,
         pending_teleports: Vec::new(),
     };
     emit_frame(&tree.root, root_box, &mut ctx, (0.0, 0.0), None, false);
@@ -181,7 +182,7 @@ fn emit_frame(
     clip: Option<ClipRect>,
     expanding_teleport: bool,
 ) {
-    let (node_id, key) = ctx.next();
+    let (node_id, key) = ctx.node_meta(node);
     let layout = node.layout.as_ref();
 
     // Teleport 提升：主遍历遇到 Teleport 时收集到顶层队列（不原位递归）；展开模式不收集。
@@ -224,10 +225,7 @@ fn emit_frame(
 
     // 滚动容器：内容平移 -offset，clip 与视口求交；裁剪容器：clip 与内容区求交。
     let child_offset = if is_scroll_container {
-        let scroll = key
-            .and_then(|k| ctx.scroll_inputs.get(&k))
-            .copied()
-            .unwrap_or_default();
+        let scroll = ctx.scroll_inputs.get(&key).copied().unwrap_or_default();
         (
             base_offset.0 - scroll.offset_x,
             base_offset.1 - scroll.offset_y,

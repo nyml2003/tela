@@ -531,7 +531,8 @@ fn draw_order_hit_regions_match_draw_order() {
         Color::GREEN,
     )
     .into_interactive();
-    let tree = UiTree::new(flex(200.0, false, vec![bottom, top])).unwrap();
+    // 故意让树序与 draw order 相反，覆盖 emit 时重排子节点的路径。
+    let tree = UiTree::new(flex(200.0, false, vec![top, bottom])).unwrap();
     let frame = resolve(&tree);
     // 命令顺序：Normal 在前，InnerTop 在后；命中区域同序（反向遍历选中最上层）。
     assert!(matches!(
@@ -542,10 +543,11 @@ fn draw_order_hit_regions_match_draw_order() {
         frame.commands[1].payload,
         tela_contract::DrawPayload::Rect { .. }
     ));
-    let hit_orders: Vec<bool> = frame.hit_regions.iter().map(|h| h.rect.y == 0.0).collect();
-    assert_eq!(hit_orders.len(), 2);
-    // 第二个命中区域（InnerTop 节点）与第二条命令（后绘制）对应。
-    assert_eq!(frame.hit_regions[1].node_id, frame.hit_regions[1].node_id);
+    assert_eq!(frame.hit_regions.len(), 2);
+    // 绘制顺序虽可重排，但 region 的 node id 仍须属于实际 interactive 节点，
+    // 不能随 emit 次数错配到其文本或图像子节点。
+    assert_eq!(frame.hit_regions[0].node_id, tree.node_ids()[2]);
+    assert_eq!(frame.hit_regions[1].node_id, tree.node_ids()[1]);
 }
 
 // ---------- M3：Circle / Ellipse / Shadow 命令 ----------

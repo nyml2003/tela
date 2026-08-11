@@ -59,6 +59,7 @@ test('render 后端禁止反向依赖 core', () => {
 test('完整合法 workspace 通过', () => {
   const crates: CrateInfo[] = [
     crate('tela-contract', []),
+    crate('tela-resource-protocol', [['tela-contract', 'normal']]),
     crate('tela-core', [
       ['tela-contract', 'normal'],
       ['tela-render-raster', 'dev'],

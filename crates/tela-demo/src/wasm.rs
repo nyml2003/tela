@@ -163,10 +163,68 @@ pub fn tick_gpu() -> u32 {
     u32::from(submitted)
 }
 
+/// 浏览器注入的逻辑坐标指针按下事件，实际命中测试统一走 tela-core。
+#[wasm_bindgen]
+pub fn pointer_down(x: f32, y: f32) -> u32 {
+    crate::with_app(|app| {
+        app.handle_pointer(tela_contract::PointerEvent::Down {
+            position: tela_contract::Point { x, y },
+        })
+    })
+}
+
+/// 浏览器注入的逻辑坐标指针移动事件，实际 hover 状态统一走 tela-core。
+#[wasm_bindgen]
+pub fn pointer_move(x: f32, y: f32) -> u32 {
+    crate::with_app(|app| {
+        app.handle_pointer(tela_contract::PointerEvent::Move {
+            position: tela_contract::Point { x, y },
+        })
+    })
+}
+
+/// 当前 Input 是否为 tela-core 焦点；浏览器据此接管原生键盘与 IME 输入。
+#[wasm_bindgen]
+pub fn input_focused() -> bool {
+    crate::with_app(|app| app.input_focused())
+}
+
+/// 当前 hover 目标的浏览器 cursor 意图：0=默认，1=文本，2=手型。
+#[wasm_bindgen]
+pub fn pointer_cursor() -> u32 {
+    crate::with_app(|app| app.pointer_cursor())
+}
+
+/// 浏览器输入适配层提交受控文本值；值变更由 demo 宿主按 `ValueChange` 应用。
+#[wasm_bindgen]
+pub fn set_input_value(value: String) -> u32 {
+    crate::with_app(|app| app.set_input_value(value))
+}
+
 /// 逻辑画布对应的浏览器 canvas 尺寸。
 #[wasm_bindgen]
 pub fn frame_size() -> u32 {
     VIEWPORT.width as u32 | ((VIEWPORT.height as u32) << 16)
+}
+
+/// 注册浏览器适配器已解码的 RGBA8 图片；URL/base64 解析不属于 WGPU 后端。
+#[wasm_bindgen]
+pub fn upload_image(
+    texture: String,
+    width: u32,
+    height: u32,
+    rgba8: Vec<u8>,
+) -> Result<(), JsValue> {
+    GPU.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let session = slot
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("GPU 会话未启动"))?;
+        session
+            .renderer
+            .upload_rgba8(tela_contract::TextureRef(texture), width, height, &rgba8)
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    })
 }
 
 /// 从缓存的共享 `UiFrame` 读取结构化 JSON；不重新构建场景。
@@ -190,7 +248,7 @@ pub fn gpu_diagnostics() -> String {
         };
         let stats = session.renderer.last_stats();
         format!(
-            "status={} commands={} batches={} draw_calls={} vertices={} indices={} unsupported={} ignored_borders={}; {}",
+            "status={} commands={} batches={} draw_calls={} vertices={} indices={} unsupported={} missing_images={} ignored_borders={}; {}",
             session.last_status,
             stats.commands,
             stats.batches,
@@ -198,6 +256,7 @@ pub fn gpu_diagnostics() -> String {
             stats.vertices,
             stats.indices,
             stats.unsupported_commands,
+            stats.missing_images,
             stats.ignored_borders,
             session.renderer.last_diagnostics(),
         )

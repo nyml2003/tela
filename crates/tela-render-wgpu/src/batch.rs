@@ -1,10 +1,10 @@
 //! 共享 `UiFrame` 到 GPU 图元批次的 CPU 侧展开。
 
 use bytemuck::cast_slice;
-use tela_contract::{BorderRadius, BorderStroke, Color, Rect};
+use tela_contract::{BorderRadius, BorderStroke, Color, Rect, TextureRef};
 use wgpu::util::DeviceExt;
 
-use crate::vertex::{VertexRounded, VertexSolid};
+use crate::vertex::{VertexImage, VertexRounded, VertexSolid};
 
 pub(crate) type Scissor = (u32, u32, u32, u32);
 
@@ -12,6 +12,7 @@ pub(crate) type Scissor = (u32, u32, u32, u32);
 pub(crate) enum Batch {
     Solid(SolidBatch),
     Rounded(RoundedBatch),
+    Image(ImageBatch),
 }
 
 impl Batch {
@@ -19,6 +20,7 @@ impl Batch {
         match self {
             Self::Solid(batch) => batch.indices.is_empty(),
             Self::Rounded(batch) => batch.indices.is_empty(),
+            Self::Image(batch) => batch.indices.is_empty(),
         }
     }
 
@@ -26,6 +28,7 @@ impl Batch {
         match self {
             Self::Solid(batch) => batch.vertices.len(),
             Self::Rounded(batch) => batch.vertices.len(),
+            Self::Image(batch) => batch.vertices.len(),
         }
     }
 
@@ -33,6 +36,7 @@ impl Batch {
         match self {
             Self::Solid(batch) => batch.indices.len(),
             Self::Rounded(batch) => batch.indices.len(),
+            Self::Image(batch) => batch.indices.len(),
         }
     }
 
@@ -66,6 +70,21 @@ impl Batch {
                 }),
                 index_count: batch.indices.len() as u32,
             },
+            Self::Image(batch) => PreparedBatch::Image {
+                scissor: batch.scissor,
+                texture: batch.texture.clone(),
+                vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tela image vertices"),
+                    contents: cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tela image indices"),
+                    contents: cast_slice(&batch.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+                index_count: batch.indices.len() as u32,
+            },
         }
     }
 
@@ -85,6 +104,14 @@ impl Batch {
                 batch.indices,
                 batch.vertices.len() * std::mem::size_of::<VertexRounded>(),
             ),
+            Self::Image(batch) => format!(
+                "batch=Image texture={:?} scissor={:?} first={:?} indices={:?} upload_bytes={}",
+                batch.texture,
+                batch.scissor,
+                batch.vertices.first(),
+                batch.indices,
+                batch.vertices.len() * std::mem::size_of::<VertexImage>(),
+            ),
         }
     }
 }
@@ -99,6 +126,13 @@ pub(crate) enum PreparedBatch {
     },
     Rounded {
         scissor: Scissor,
+        vertex_buffer: wgpu::Buffer,
+        index_buffer: wgpu::Buffer,
+        index_count: u32,
+    },
+    Image {
+        scissor: Scissor,
+        texture: TextureRef,
         vertex_buffer: wgpu::Buffer,
         index_buffer: wgpu::Buffer,
         index_count: u32,
@@ -197,6 +231,52 @@ pub(crate) struct RoundedBatch {
     scissor: Scissor,
     vertices: Vec<VertexRounded>,
     indices: Vec<u16>,
+}
+
+pub(crate) struct ImageBatch {
+    scissor: Scissor,
+    texture: TextureRef,
+    vertices: Vec<VertexImage>,
+    indices: Vec<u16>,
+}
+
+impl ImageBatch {
+    fn new(scissor: Scissor, texture: TextureRef) -> Self {
+        Self {
+            scissor,
+            texture,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_rect(&mut self, rect: Rect, viewport: &Rect) {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let base = self.vertices.len() as u16;
+        let ndc = to_ndc(rect.x, rect.y, rect.w, rect.h, viewport);
+        self.vertices.extend_from_slice(&[
+            VertexImage {
+                pos: [ndc[0], ndc[1]],
+                uv: [0.0, 0.0],
+            },
+            VertexImage {
+                pos: [ndc[2], ndc[3]],
+                uv: [1.0, 0.0],
+            },
+            VertexImage {
+                pos: [ndc[4], ndc[5]],
+                uv: [1.0, 1.0],
+            },
+            VertexImage {
+                pos: [ndc[6], ndc[7]],
+                uv: [0.0, 1.0],
+            },
+        ]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 }
 
 impl RoundedBatch {
@@ -312,7 +392,7 @@ pub(crate) fn solid_batch_for(batches: &mut Vec<Batch>, scissor: Scissor) -> &mu
     }
     match batches.last_mut().expect("刚创建的 Solid batch 必须存在") {
         Batch::Solid(batch) => batch,
-        Batch::Rounded(_) => unreachable!("Solid batch 类型必须匹配"),
+        Batch::Rounded(_) | Batch::Image(_) => unreachable!("Solid batch 类型必须匹配"),
     }
 }
 
@@ -323,7 +403,22 @@ pub(crate) fn rounded_batch_for(batches: &mut Vec<Batch>, scissor: Scissor) -> &
     }
     match batches.last_mut().expect("刚创建的 Rounded batch 必须存在") {
         Batch::Rounded(batch) => batch,
-        Batch::Solid(_) => unreachable!("Rounded batch 类型必须匹配"),
+        Batch::Solid(_) | Batch::Image(_) => unreachable!("Rounded batch 类型必须匹配"),
+    }
+}
+
+pub(crate) fn image_batch_for(
+    batches: &mut Vec<Batch>,
+    scissor: Scissor,
+    texture: TextureRef,
+) -> &mut ImageBatch {
+    let reuse = matches!(batches.last(), Some(Batch::Image(batch)) if batch.scissor == scissor && batch.texture == texture);
+    if !reuse {
+        batches.push(Batch::Image(ImageBatch::new(scissor, texture)));
+    }
+    match batches.last_mut().expect("刚创建的 Image batch 必须存在") {
+        Batch::Image(batch) => batch,
+        Batch::Solid(_) | Batch::Rounded(_) => unreachable!("Image batch 类型必须匹配"),
     }
 }
 
@@ -399,5 +494,29 @@ mod tests {
         assert_eq!(batch.vertices[0].fill_color, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(batch.vertices[0].border_color, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(batch.vertices[0].border_width, 4.0);
+    }
+
+    #[test]
+    fn image_payload_emits_a_textured_quad() {
+        let mut batch = ImageBatch::new((0, 0, 100, 100), TextureRef("photo".to_owned()));
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        batch.push_rect(
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 60.0,
+                h: 40.0,
+            },
+            &viewport,
+        );
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices, [0, 1, 2, 0, 2, 3]);
+        assert_eq!(batch.vertices[0].uv, [0.0, 0.0]);
+        assert_eq!(batch.vertices[2].uv, [1.0, 1.0]);
     }
 }

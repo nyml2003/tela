@@ -28,6 +28,19 @@ pub(crate) struct VertexRounded {
     pub(crate) border_width: f32,
 }
 
+/// 图片矩形的裁剪空间与完整 UV 顶点。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct VertexImage {
+    pub(crate) pos: [f32; 2],
+    pub(crate) uv: [f32; 2],
+}
+
+impl VertexImage {
+    pub(crate) const ATTRS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+}
+
 impl VertexRounded {
     pub(crate) const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
         0 => Float32x2,

@@ -1,0 +1,12 @@
+[package]
+name = "tela-resource-protocol"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "tela 图片与字体资源的跨宿主加载协议"
+
+[dependencies]
+tela-contract = { path = "../tela-contract" }
+
+[lints]
+workspace = true

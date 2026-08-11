@@ -7,8 +7,9 @@
 
 mod batch;
 mod pipeline;
+mod text;
 mod vertex;
 
 pub mod renderer;
 
-pub use renderer::WgpuRenderer;
+pub use renderer::{ImageUploadError, WgpuRenderer};

@@ -954,6 +954,7 @@ dependencies = [
  "tela-core",
  "tela-render-raster",
  "tela-render-wgpu",
+ "tela-widgets",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -986,12 +987,20 @@ dependencies = [
 name = "tela-render-wgpu"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "bytemuck",
  "naga 26.0.0",
  "pollster",
  "tela-contract",
  "tela-log",
  "wgpu",
+]
+
+[[package]]
+name = "tela-resource-protocol"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
 ]
 
 [[package]]

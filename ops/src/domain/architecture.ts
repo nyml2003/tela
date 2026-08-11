@@ -25,6 +25,7 @@ const ZERO_DEP_CRATES: readonly string[] = ['tela-contract', 'tela-log'];
 
 /** 允许的普通依赖白名单：<crate> 只允许依赖 <列出的包>。 */
 const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
+  ['tela-resource-protocol', ['tela-contract']],
   ['tela-core', ['tela-contract']],
   ['tela-render-raster', ['tela-contract', 'ab_glyph', 'ab_glyph_rasterizer', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],

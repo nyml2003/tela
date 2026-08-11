@@ -1,12 +1,14 @@
 //! WebGPU shader module 与图元 pipeline。
 
 use crate::batch::PreparedBatch;
-use crate::vertex::{VertexRounded, VertexSolid};
+use crate::vertex::{VertexImage, VertexRounded, VertexSolid};
 
 /// 已创建的后端图元 pipeline。
 pub(crate) struct Pipelines {
     solid: wgpu::RenderPipeline,
     rounded: wgpu::RenderPipeline,
+    image: wgpu::RenderPipeline,
+    image_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl Pipelines {
@@ -24,6 +26,7 @@ impl Pipelines {
             device,
             &shader,
             &targets,
+            None,
             PipelineSpec {
                 label: "tela solid pipeline",
                 vertex_entry: "vs_solid",
@@ -36,6 +39,7 @@ impl Pipelines {
             device,
             &shader,
             &targets,
+            None,
             PipelineSpec {
                 label: "tela rounded pipeline",
                 vertex_entry: "vs_rounded",
@@ -44,10 +48,64 @@ impl Pipelines {
                 attributes: &VertexRounded::ATTRS,
             },
         );
-        Self { solid, rounded }
+        let image_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tela image bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tela image pipeline layout"),
+            bind_group_layouts: &[Some(&image_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let image = create_pipeline(
+            device,
+            &shader,
+            &targets,
+            Some(&image_layout),
+            PipelineSpec {
+                label: "tela image pipeline",
+                vertex_entry: "vs_image",
+                fragment_entry: "fs_image",
+                array_stride: std::mem::size_of::<VertexImage>() as wgpu::BufferAddress,
+                attributes: &VertexImage::ATTRS,
+            },
+        );
+        Self {
+            solid,
+            rounded,
+            image,
+            image_bind_group_layout,
+        }
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, batch: &PreparedBatch) {
+    pub(crate) fn image_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.image_bind_group_layout
+    }
+
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        batch: &PreparedBatch,
+        image_bind_group: Option<&wgpu::BindGroup>,
+    ) {
         match batch {
             PreparedBatch::Solid {
                 scissor,
@@ -73,6 +131,24 @@ impl Pipelines {
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 pass.draw_indexed(0..*index_count, 0, 0..1);
             }
+            PreparedBatch::Image {
+                scissor,
+                vertex_buffer,
+                index_buffer,
+                index_count,
+                ..
+            } => {
+                pass.set_pipeline(&self.image);
+                pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
+                pass.set_bind_group(
+                    0,
+                    image_bind_group.expect("图片 batch 必须有对应已上传纹理"),
+                    &[],
+                );
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
         }
     }
 }
@@ -81,11 +157,12 @@ fn create_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     targets: &[Option<wgpu::ColorTargetState>],
+    layout: Option<&wgpu::PipelineLayout>,
     spec: PipelineSpec,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(spec.label),
-        layout: None,
+        layout,
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(spec.vertex_entry),
