@@ -204,11 +204,13 @@ pub fn gpu_diagnostics() -> String {
     })
 }
 
-/// 离屏 probe：渲染与页面完全相同的 tela 场景，并回读蓝色矩形中心像素。
+/// 离屏 probe：渲染与页面完全相同的 tela 场景，并回读主内容区域像素。
 #[wasm_bindgen]
 pub async fn gpu_probe() -> Result<u32, JsValue> {
     const PROBE_WIDTH: u32 = 512;
     const PROBE_HEIGHT: u32 = 384;
+    const MAIN_PROBE_X: u32 = 384;
+    const MAIN_PROBE_Y: u32 = 200;
     let (device, queue, format) = GPU.with(|slot| {
         let slot = slot.borrow();
         let session = slot
@@ -302,7 +304,7 @@ pub async fn gpu_probe() -> Result<u32, JsValue> {
     let range = slice
         .get_mapped_range()
         .map_err(|error| JsValue::from_str(&format!("probe 读取失败: {error:?}")))?;
-    let index = ((180 * PROBE_WIDTH + 240) * 4) as usize;
+    let index = ((MAIN_PROBE_Y * PROBE_WIDTH + MAIN_PROBE_X) * 4) as usize;
     let rgb = (range[index], range[index + 1], range[index + 2]);
     drop(range);
     buffer.unmap();

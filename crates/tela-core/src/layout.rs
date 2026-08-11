@@ -242,7 +242,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         // 容器自身声明了非内容推导尺寸时，子节点约束必须基于最终内容区重测
         // （如声明宽 120 的容器不能按父宽 200 分配 Fill）。
         if declared_non_auto(node, main_axis) || declared_non_auto(node, cross_axis) {
-            let inner_final = content_area_constraints(&layout, self_main, self_cross);
+            let inner_final = content_area_constraints(&layout, main_axis, self_main, self_cross);
             let re_measured = self.measure_children(node, inner_final)?;
             (measured, final_main, _, _) = self.flex_child_pipeline(
                 node,
@@ -1033,18 +1033,24 @@ fn fill_flags(node: &UiNode, axis: Axis) -> Vec<bool> {
 /// 由容器最终盒尺寸推导的子节点内容区约束（min 取 0，父 min 已在自身解析中应用）。
 fn content_area_constraints(
     layout: &tela_contract::LayoutConcern,
+    main_axis: Axis,
     self_main: f32,
     self_cross: f32,
 ) -> Constraints {
+    let width = match main_axis {
+        Axis::Width => self_main,
+        Axis::Height => self_cross,
+    };
+    let height = match main_axis {
+        Axis::Width => self_cross,
+        Axis::Height => self_main,
+    };
     Constraints {
         min_w: 0.0,
-        max_w: (self_main - 2.0 * layout.border_width - layout.padding.left - layout.padding.right)
+        max_w: (width - 2.0 * layout.border_width - layout.padding.left - layout.padding.right)
             .max(0.0),
         min_h: 0.0,
-        max_h: (self_cross
-            - 2.0 * layout.border_width
-            - layout.padding.top
-            - layout.padding.bottom)
+        max_h: (height - 2.0 * layout.border_width - layout.padding.top - layout.padding.bottom)
             .max(0.0),
     }
 }

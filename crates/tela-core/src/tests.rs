@@ -1133,6 +1133,31 @@ fn flex_column_stacks_children_vertically() {
     assert_eq!(frame.commands[1].geometry.h, 20.0);
 }
 
+#[test]
+fn flex_column_remeasures_children_with_width_as_cross_axis() {
+    let root =
+        LayoutContainer::flex([rect(480.0, 56.0), rect(480.0, 40.0)]).layout(LayoutConcern {
+            width: Some(Size::fixed(480.0)),
+            height: Some(Size::fixed(360.0)),
+            direction: tela_contract::FlexDirection::Column,
+            ..LayoutConcern::default()
+        });
+    let box_ = measure(
+        root,
+        Constraints {
+            min_w: 0.0,
+            max_w: 480.0,
+            min_h: 0.0,
+            max_h: 360.0,
+        },
+    )
+    .expect("Column 容器必须可测量");
+
+    assert_eq!((box_.w, box_.h), (480.0, 360.0));
+    assert_eq!((box_.children[0].w, box_.children[0].h), (480.0, 56.0));
+    assert_eq!((box_.children[1].w, box_.children[1].h), (480.0, 40.0));
+}
+
 // ---------- Code review 回归：Stack content/overlay 交错索引 ----------
 
 #[test]

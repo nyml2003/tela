@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use tela_contract::{
-    Color, CrossAlign, Fill, FlexDirection, LayoutConcern, MainAlign, Size, TextMeasureRequest,
-    TextMeasurer, TextMetrics, UiFrame, Viewport, VisualConcern,
+    Color, Fill, FlexDirection, LayoutConcern, Size, TextMeasureRequest, TextMeasurer, TextMetrics,
+    UiFrame, Viewport, VisualConcern,
 };
 use tela_core::UiTree;
 use tela_core::builder::{LayoutContainer, Primitive};
@@ -25,7 +25,10 @@ pub const VIEWPORT: Viewport = Viewport {
     height: 360.0,
 };
 
-const BLUE: Color = Color::rgba(0.10, 0.38, 0.90, 1.0);
+const HEADER: Color = Color::rgba(0.12, 0.31, 0.58, 1.0);
+const SIDEBAR: Color = Color::rgba(0.90, 0.36, 0.20, 1.0);
+const MAIN: Color = Color::rgba(0.16, 0.60, 0.43, 1.0);
+const FOOTER: Color = Color::rgba(0.22, 0.25, 0.31, 1.0);
 
 thread_local! {
     static APP: RefCell<App> = RefCell::new(App::new());
@@ -100,25 +103,40 @@ impl App {
     }
 }
 
-/// 共享 tela 场景：无视觉根 Flex + 居中的 320×200 蓝色矩形。
-fn scene_node() -> tela_contract::UiNode {
-    let rectangle = Primitive::rect()
+/// 单个无文字矩形，作为所有区域的唯一视觉原语。
+fn solid_rect(color: Color, width: Size, height: Size) -> tela_contract::UiNode {
+    Primitive::rect()
         .layout(LayoutConcern {
-            width: Some(Size::fixed(320.0)),
-            height: Some(Size::fixed(200.0)),
+            width: Some(width),
+            height: Some(height),
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
-            fill: Some(Fill::Solid(BLUE)),
+            fill: Some(Fill::Solid(color)),
             ..VisualConcern::default()
-        });
-    LayoutContainer::flex([rectangle])
+        })
+        .into()
+}
+
+/// 共享 tela 场景：header / 等宽侧栏与内容 / footer，全程只使用纯色矩形。
+fn scene_node() -> tela_contract::UiNode {
+    let header = solid_rect(HEADER, Size::fixed(480.0), Size::fixed(56.0));
+    let sidebar = solid_rect(SIDEBAR, Size::fixed(240.0), Size::fixed(264.0));
+    let main = solid_rect(MAIN, Size::fixed(240.0), Size::fixed(264.0));
+    let content = LayoutContainer::flex([sidebar, main])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(480.0)),
+            height: Some(Size::fixed(264.0)),
+            direction: FlexDirection::Row,
+            ..LayoutConcern::default()
+        })
+        .into();
+    let footer = solid_rect(FOOTER, Size::fixed(480.0), Size::fixed(40.0));
+    LayoutContainer::flex([header, content, footer])
         .layout(LayoutConcern {
             width: Some(Size::fixed(VIEWPORT.width)),
             height: Some(Size::fixed(VIEWPORT.height)),
-            direction: FlexDirection::Row,
-            main_align: MainAlign::Center,
-            cross_align: CrossAlign::Center,
+            direction: FlexDirection::Column,
             ..LayoutConcern::default()
         })
         .into()
@@ -197,23 +215,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_scene_resolves_to_one_centered_blue_rectangle() {
+    fn shared_scene_resolves_to_header_content_footer_rectangles() {
         let mut app = App::new();
         assert!(app.ensure_frame());
         let frame = app.frame();
-        assert_eq!(frame.commands.len(), 1);
-        let command = &frame.commands[0];
-        assert_eq!(command.geometry.x, 80.0);
-        assert_eq!(command.geometry.y, 80.0);
-        assert_eq!(command.geometry.w, 320.0);
-        assert_eq!(command.geometry.h, 200.0);
-        assert!(matches!(
-            command.payload,
-            tela_contract::DrawPayload::Rect {
-                fill: Some(color),
-                border: None,
-            } if color == BLUE
-        ));
+        assert_eq!(frame.commands.len(), 4);
+        let expected = [
+            (0.0, 0.0, 480.0, 56.0, HEADER),
+            (0.0, 56.0, 240.0, 264.0, SIDEBAR),
+            (240.0, 56.0, 240.0, 264.0, MAIN),
+            (0.0, 320.0, 480.0, 40.0, FOOTER),
+        ];
+        for (command, (x, y, w, h, color)) in frame.commands.iter().zip(expected) {
+            assert_eq!((command.geometry.x, command.geometry.y), (x, y));
+            assert_eq!((command.geometry.w, command.geometry.h), (w, h));
+            assert!(matches!(
+                command.payload,
+                tela_contract::DrawPayload::Rect {
+                    fill: Some(fill),
+                    border: None,
+                } if fill == color
+            ));
+        }
     }
 
     #[test]
@@ -231,7 +254,7 @@ mod tests {
         app.ensure_frame();
         assert_eq!(
             std::str::from_utf8(app.frame_trace()).expect("trace 必须是 UTF-8"),
-            "{\"viewport\":{\"width\":480,\"height\":360},\"commands\":[{\"geometry\":{\"x\":80,\"y\":80,\"w\":320,\"h\":200},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.1,\"g\":0.38,\"b\":0.9,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
+            "{\"viewport\":{\"width\":480,\"height\":360},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":480,\"h\":56},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.12,\"g\":0.31,\"b\":0.58,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":0,\"y\":56,\"w\":240,\"h\":264},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.9,\"g\":0.36,\"b\":0.2,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":240,\"y\":56,\"w\":240,\"h\":264},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.16,\"g\":0.6,\"b\":0.43,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":0,\"y\":320,\"w\":480,\"h\":40},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.22,\"g\":0.25,\"b\":0.31,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
         );
     }
 }
