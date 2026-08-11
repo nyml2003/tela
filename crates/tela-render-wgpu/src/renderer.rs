@@ -1,75 +1,18 @@
 //! 最小 WebGPU 渲染后端。
 //!
-//! 当前能力边界是纯色矩形与矩形裁剪。后端仍然只消费 `UiFrame`；未声明能力的
+//! 当前能力边界是纯色矩形、圆角矩形与矩形裁剪。后端仍然只消费 `UiFrame`；未声明能力的
 //! payload 在批次构建前跳过，不回读 `UiTree`，也不改变输入帧。
 
 use std::collections::VecDeque;
 
-use bytemuck::{Pod, Zeroable};
 use tela_contract::{BackendCapabilities, ClipRect, Color, DrawPayload, Rect, UiFrame};
-use wgpu::util::DeviceExt;
+
+#[cfg(test)]
+use crate::batch::to_ndc;
+use crate::batch::{Batch, PreparedBatch, rounded_batch_for, solid_batch_for};
+use crate::pipeline::Pipelines;
 
 const IN_FLIGHT_FRAME_COUNT: usize = 3;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct VertexSolid {
-    pos: [f32; 2],
-    color: [f32; 4],
-}
-
-impl VertexSolid {
-    const ATTRS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
-}
-
-struct Batch {
-    scissor: (u32, u32, u32, u32),
-    vertices: Vec<VertexSolid>,
-    indices: Vec<u16>,
-}
-
-impl Batch {
-    fn new(scissor: (u32, u32, u32, u32)) -> Self {
-        Self {
-            scissor,
-            vertices: Vec::new(),
-            indices: Vec::new(),
-        }
-    }
-
-    fn push_rect(&mut self, rect: [f32; 8], color: Color) {
-        let base = self.vertices.len() as u16;
-        let rgba = [color.r, color.g, color.b, color.a];
-        self.vertices.extend_from_slice(&[
-            VertexSolid {
-                pos: [rect[0], rect[1]],
-                color: rgba,
-            },
-            VertexSolid {
-                pos: [rect[2], rect[3]],
-                color: rgba,
-            },
-            VertexSolid {
-                pos: [rect[4], rect[5]],
-                color: rgba,
-            },
-            VertexSolid {
-                pos: [rect[6], rect[7]],
-                color: rgba,
-            },
-        ]);
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-}
-
-struct PreparedBatch {
-    scissor: (u32, u32, u32, u32),
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-}
 
 struct SubmittedFrame {
     // 这些 batch 的 buffer 必须活到 WebGPU 完成异步提交；字段本身不参与 CPU 读取。
@@ -82,7 +25,7 @@ struct SubmittedFrame {
 pub struct RenderStats {
     /// 输入命令数。
     pub commands: u32,
-    /// 产生的 Solid batch 数。
+    /// 产生的图元 batch 数。
     pub batches: u32,
     /// 实际 draw 调用数。
     pub draw_calls: u32,
@@ -94,16 +37,16 @@ pub struct RenderStats {
     pub skipped_empty_clip: u32,
     /// 暂不支持的 payload 命令数。
     pub unsupported_commands: u32,
-    /// Rect border 暂不支持的数量。
+    /// 保留的兼容统计字段。当前 Rect/RoundedRect 路径已支持边框，因此正常为零。
     pub ignored_borders: u32,
 }
 
-/// 只支持 Solid Rect + 矩形 clip 的 WebGPU renderer。
+/// 支持 Solid Rect、RoundedRect 与矩形 clip 的 WebGPU renderer。
 pub struct WgpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
-    pipeline: wgpu::RenderPipeline,
+    pipelines: Pipelines,
     in_flight_frames: VecDeque<SubmittedFrame>,
     background: wgpu::Color,
     viewport: Rect,
@@ -115,54 +58,19 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    /// 创建最小 Solid pipeline。无字体、纹理或其他图元资源。
+    /// 创建 renderer 及其图元 pipeline。无字体或纹理资源。
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
         background: Color,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("tela solid shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let targets = [Some(wgpu::ColorTargetState {
-            format,
-            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<VertexSolid>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &VertexSolid::ATTRS,
-        };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tela solid pipeline"),
-            // 无 bind group 的布局与已验证 MVP 保持一致。
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_solid"),
-                compilation_options: Default::default(),
-                buffers: &[Some(vertex_layout)],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_solid"),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipelines = Pipelines::new(&device, format);
         Self {
             device,
             queue,
             format,
-            pipeline,
+            pipelines,
             in_flight_frames: VecDeque::new(),
             background: wgpu::Color {
                 r: background.r as f64,
@@ -189,11 +97,11 @@ impl WgpuRenderer {
         self.format
     }
 
-    /// 当前后端能力：纯色矩形和矩形裁剪。
+    /// 当前后端能力：纯色矩形、圆角矩形和矩形裁剪。
     pub fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             solid_rect: true,
-            rounded_rect: false,
+            rounded_rect: true,
             line_segment: false,
             polygon: false,
             linear_gradient: false,
@@ -261,52 +169,39 @@ impl WgpuRenderer {
                 stats.skipped_empty_clip += 1;
                 continue;
             }
-            let DrawPayload::Rect { fill, border } = &command.payload else {
-                stats.unsupported_commands += 1;
-                continue;
-            };
-            if border.is_some() {
-                stats.ignored_borders += 1;
-            }
-            let Some(color) = fill else {
-                continue;
-            };
-            let batch = match batches.last_mut() {
-                Some(batch) if batch.scissor == scissor => batch,
-                _ => {
-                    batches.push(Batch::new(scissor));
-                    batches.last_mut().expect("刚创建的 batch 必须存在")
+            match &command.payload {
+                DrawPayload::Rect { fill, border } => {
+                    if fill.is_none() && border.is_none() {
+                        continue;
+                    }
+                    let batch = solid_batch_for(&mut batches, scissor);
+                    batch.push_payload(command.geometry, *fill, *border, &self.viewport);
                 }
-            };
-            batch.push_rect(
-                to_ndc(
-                    command.geometry.x,
-                    command.geometry.y,
-                    command.geometry.w,
-                    command.geometry.h,
-                    &self.viewport,
-                ),
-                *color,
-            );
+                DrawPayload::RoundedRect {
+                    fill,
+                    border,
+                    radius,
+                } => {
+                    if fill.is_none() && border.is_none() {
+                        continue;
+                    }
+                    let batch = rounded_batch_for(&mut batches, scissor);
+                    batch.push_payload(command.geometry, *radius, *fill, *border, &self.viewport);
+                }
+                _ => {
+                    stats.unsupported_commands += 1;
+                }
+            }
         }
 
-        stats.batches = batches
-            .iter()
-            .filter(|batch| !batch.indices.is_empty())
-            .count() as u32;
-        stats.vertices = batches
-            .iter()
-            .map(|batch| batch.vertices.len())
-            .sum::<usize>() as u32;
-        stats.indices = batches
-            .iter()
-            .map(|batch| batch.indices.len())
-            .sum::<usize>() as u32;
+        stats.batches = batches.iter().filter(|batch| !batch.is_empty()).count() as u32;
+        stats.vertices = batches.iter().map(Batch::vertex_count).sum::<usize>() as u32;
+        stats.indices = batches.iter().map(Batch::index_count).sum::<usize>() as u32;
 
         let prepared: Vec<PreparedBatch> = batches
             .iter()
-            .filter(|batch| !batch.indices.is_empty())
-            .map(|batch| self.prepare_batch(batch))
+            .filter(|batch| !batch.is_empty())
+            .map(|batch| batch.prepare(&self.device))
             .collect();
         self.last_diagnostics = diagnostics_for(frame, &stats, batches.first());
 
@@ -334,16 +229,7 @@ impl WgpuRenderer {
             });
             pass.set_viewport(0.0, 0.0, self.pixel_w as f32, self.pixel_h as f32, 0.0, 1.0);
             for batch in &prepared {
-                pass.set_scissor_rect(
-                    batch.scissor.0,
-                    batch.scissor.1,
-                    batch.scissor.2,
-                    batch.scissor.3,
-                );
-                pass.set_pipeline(&self.pipeline);
-                pass.set_vertex_buffer(0, batch.vertex_buffer.slice(..));
-                pass.set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                pass.draw_indexed(0..batch.index_count, 0, 0..1);
+                self.pipelines.draw(&mut pass, batch);
                 stats.draw_calls += 1;
             }
         }
@@ -354,29 +240,6 @@ impl WgpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.last_stats = stats;
-    }
-
-    fn prepare_batch(&self, batch: &Batch) -> PreparedBatch {
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("tela solid vertices"),
-                contents: bytemuck::cast_slice(&batch.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("tela solid indices"),
-                contents: bytemuck::cast_slice(&batch.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-        PreparedBatch {
-            scissor: batch.scissor,
-            vertex_buffer,
-            index_buffer,
-            index_count: batch.indices.len() as u32,
-        }
     }
 
     fn scissor_for(&self, clip: Option<ClipRect>) -> (u32, u32, u32, u32) {
@@ -396,19 +259,6 @@ impl WgpuRenderer {
     }
 }
 
-fn to_ndc(x: f32, y: f32, w: f32, h: f32, viewport: &Rect) -> [f32; 8] {
-    [
-        x / viewport.w * 2.0 - 1.0,
-        1.0 - y / viewport.h * 2.0,
-        (x + w) / viewport.w * 2.0 - 1.0,
-        1.0 - y / viewport.h * 2.0,
-        (x + w) / viewport.w * 2.0 - 1.0,
-        1.0 - (y + h) / viewport.h * 2.0,
-        x / viewport.w * 2.0 - 1.0,
-        1.0 - (y + h) / viewport.h * 2.0,
-    ]
-}
-
 fn diagnostics_for(frame: &UiFrame, stats: &RenderStats, first_batch: Option<&Batch>) -> String {
     let input = frame
         .commands
@@ -425,16 +275,8 @@ fn diagnostics_for(frame: &UiFrame, stats: &RenderStats, first_batch: Option<&Ba
         })
         .unwrap_or_else(|| "input=<empty>".to_owned());
     let batch = first_batch
-        .filter(|batch| !batch.indices.is_empty())
-        .map(|batch| {
-            format!(
-                "batch=Solid scissor={:?} first={:?} indices={:?} upload_bytes={}",
-                batch.scissor,
-                batch.vertices.first(),
-                batch.indices,
-                batch.vertices.len() * std::mem::size_of::<VertexSolid>(),
-            )
-        })
+        .filter(|batch| !batch.is_empty())
+        .map(Batch::diagnostics)
         .unwrap_or_else(|| "batch=<empty>".to_owned());
     format!(
         "{input}; {batch}; unsupported={} ignored_borders={}",
@@ -447,10 +289,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_are_solid_rect_and_clip_only() {
+    fn capabilities_include_solid_rounded_rect_and_clip() {
         let caps = BackendCapabilities {
             solid_rect: true,
-            rounded_rect: false,
+            rounded_rect: true,
             line_segment: false,
             polygon: false,
             linear_gradient: false,
@@ -462,8 +304,8 @@ mod tests {
             image_texture: false,
             subpixel: false,
         };
-        assert!(caps.solid_rect && caps.clip_rect);
-        assert!(!caps.rounded_rect && !caps.text && !caps.linear_gradient);
+        assert!(caps.solid_rect && caps.rounded_rect && caps.clip_rect);
+        assert!(!caps.text && !caps.linear_gradient);
     }
 
     #[test]

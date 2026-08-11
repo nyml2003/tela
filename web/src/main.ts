@@ -4,6 +4,7 @@ type BackendMode = 'auto' | 'raster' | 'wgpu';
 
 interface GpuGlue {
   default(options?: { module_or_path?: string }): Promise<unknown>;
+  frame_size(): number;
   start_gpu(canvas: HTMLCanvasElement): Promise<void>;
   tick_gpu(): number;
   frame_trace(): string;
@@ -20,14 +21,69 @@ interface CpuExports {
   memory: WebAssembly.Memory;
 }
 
+interface CanvasSurfaceSize {
+  logicalWidth: number;
+  logicalHeight: number;
+  cssWidth: number;
+  cssHeight: number;
+  pixelWidth: number;
+  pixelHeight: number;
+  pixelRatio: number;
+}
+
 function modeFromUrl(): BackendMode {
   const value = new URLSearchParams(location.search).get('backend');
   return value === 'raster' || value === 'wgpu' ? value : 'auto';
 }
 
 function setCanvasSize(canvas: HTMLCanvasElement, packed: number): void {
-  canvas.width = packed & 0xffff;
-  canvas.height = packed >>> 16;
+  const { width, height } = unpackCanvasSize(packed);
+  canvas.width = width;
+  canvas.height = height;
+}
+
+function unpackCanvasSize(packed: number): { width: number; height: number } {
+  return { width: packed & 0xffff, height: packed >>> 16 };
+}
+
+/** 逻辑画布维持不变，仅把 WGPU 的 backing store 提升到屏幕的实际像素密度。 */
+function syncGpuCanvasSize(canvas: HTMLCanvasElement, packed: number): CanvasSurfaceSize {
+  const { width: logicalWidth, height: logicalHeight } = unpackCanvasSize(packed);
+  const bounds = canvas.getBoundingClientRect();
+  const pixelRatio = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  const pixelWidth = Math.max(1, Math.round(bounds.width * pixelRatio));
+  const pixelHeight = Math.max(1, Math.round(bounds.height * pixelRatio));
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  return {
+    logicalWidth,
+    logicalHeight,
+    cssWidth: bounds.width,
+    cssHeight: bounds.height,
+    pixelWidth,
+    pixelHeight,
+    pixelRatio,
+  };
+}
+
+/** CSS 尺寸、窗口缩放或跨屏倍率变化时，更新 WGPU backing store。 */
+function observeGpuCanvasSize(canvas: HTMLCanvasElement, packed: number): void {
+  const sync = () => {
+    syncGpuCanvasSize(canvas, packed);
+  };
+  const observer = new ResizeObserver(sync);
+  observer.observe(canvas);
+  window.addEventListener('resize', sync);
+
+  let resolutionQuery: MediaQueryList;
+  const onResolutionChange = () => {
+    sync();
+    resolutionQuery.removeEventListener('change', onResolutionChange);
+    resolutionQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    resolutionQuery.addEventListener('change', onResolutionChange, { once: true });
+  };
+  resolutionQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  resolutionQuery.addEventListener('change', onResolutionChange, { once: true });
 }
 
 function presentRaster(canvas: HTMLCanvasElement, wasm: CpuExports): void {
@@ -80,16 +136,21 @@ async function startGpu(canvas: HTMLCanvasElement): Promise<() => void> {
   const glueUrl = '/tela_demo_gpu.js';
   const glue = (await import(/* webpackIgnore: true */ glueUrl)) as GpuGlue;
   await glue.default({ module_or_path: `/tela_demo_gpu_bg.wasm?v=${Date.now()}` });
+  const logicalSize = glue.frame_size();
+  // 先建立 4:3 逻辑宽高比，使 CSS `height: auto` 的初始测量正确。
+  setCanvasSize(canvas, logicalSize);
   // WebGPU surface 必须在 canvas 物理尺寸确定后创建。
-  setCanvasSize(canvas, (480 | (360 << 16)) >>> 0);
+  const surfaceSize = syncGpuCanvasSize(canvas, logicalSize);
   await glue.start_gpu(canvas);
+  observeGpuCanvasSize(canvas, logicalSize);
   const submitted = glue.tick_gpu();
   console.info('[tela/frame]', JSON.parse(glue.frame_trace()));
+  console.info('[tela/wgpu/surface]', surfaceSize);
   console.info('[tela/wgpu/backend]', { firstTick: submitted, diagnostics: glue.gpu_diagnostics() });
   void glue.gpu_probe().then(
     (rgb) => {
       const value = `#${rgb.toString(16).padStart(6, '0')}`;
-      console.info('[tela/wgpu/backend]', { sharedSceneProbe: value });
+      console.info('[tela/wgpu/backend]', { roundedCornerProbe: value });
     },
     (error: unknown) => console.error('[tela/wgpu] shared-scene probe failed:', error),
   );

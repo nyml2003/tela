@@ -204,13 +204,14 @@ pub fn gpu_diagnostics() -> String {
     })
 }
 
-/// 离屏 probe：渲染与页面完全相同的 tela 场景，并回读主内容区域像素。
+/// 离屏 probe：读取 main 左上圆角外侧像素，验证共享 RoundedRect 已由 WGPU 呈现。
 #[wasm_bindgen]
 pub async fn gpu_probe() -> Result<u32, JsValue> {
     const PROBE_WIDTH: u32 = 512;
     const PROBE_HEIGHT: u32 = 384;
-    const MAIN_PROBE_X: u32 = 384;
-    const MAIN_PROBE_Y: u32 = 200;
+    // 物理像素约对应逻辑坐标 (242, 57)，位于半径 18 的左上圆角外侧。
+    const ROUNDED_CORNER_PROBE_X: u32 = 258;
+    const ROUNDED_CORNER_PROBE_Y: u32 = 61;
     let (device, queue, format) = GPU.with(|slot| {
         let slot = slot.borrow();
         let session = slot
@@ -304,8 +305,15 @@ pub async fn gpu_probe() -> Result<u32, JsValue> {
     let range = slice
         .get_mapped_range()
         .map_err(|error| JsValue::from_str(&format!("probe 读取失败: {error:?}")))?;
-    let index = ((MAIN_PROBE_Y * PROBE_WIDTH + MAIN_PROBE_X) * 4) as usize;
-    let rgb = (range[index], range[index + 1], range[index + 2]);
+    let index = ((ROUNDED_CORNER_PROBE_Y * PROBE_WIDTH + ROUNDED_CORNER_PROBE_X) * 4) as usize;
+    // WebGPU 常用的 canvas 格式是 BGRA；readback 的内存顺序跟随 texture format，
+    // 这里统一向页面导出 RGB，保证 probe 与 tela_contract::Color 一致。
+    let rgb = match format {
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+            (range[index + 2], range[index + 1], range[index])
+        }
+        _ => (range[index], range[index + 1], range[index + 2]),
+    };
     drop(range);
     buffer.unmap();
     Ok(((rgb.0 as u32) << 16) | ((rgb.1 as u32) << 8) | rgb.2 as u32)

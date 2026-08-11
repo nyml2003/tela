@@ -6,7 +6,7 @@
 
 use std::fmt::Write;
 
-use tela_contract::{BorderStroke, ClipRect, Color, DrawPayload, Rect, UiFrame};
+use tela_contract::{BorderRadius, BorderStroke, ClipRect, Color, DrawPayload, Rect, UiFrame};
 
 pub(crate) fn to_json(frame: &UiFrame) -> String {
     let mut output = String::new();
@@ -74,8 +74,21 @@ fn write_payload(output: &mut String, payload: &DrawPayload) {
             write_border_option(output, *border);
             output.push('}');
         }
+        DrawPayload::RoundedRect {
+            fill,
+            border,
+            radius,
+        } => {
+            output.push_str(r#"{"kind":"rounded_rect","fill":"#);
+            write_color_option(output, *fill);
+            output.push_str(r#","border":"#);
+            write_border_option(output, *border);
+            output.push_str(r#","radius":"#);
+            write_radius(output, *radius);
+            output.push('}');
+        }
         other => {
-            // 当前 demo 的场景只含 Rect。保留完整 Debug 文本而不是静默丢弃
+            // 当前 demo 只投影 Rect / RoundedRect。保留完整 Debug 文本而不是静默丢弃
             // 其他核心命令，以便场景扩展时观测立即暴露出来。
             output.push_str(r#"{"kind":"unprojected","debug":"#);
             write_json_string(output, &format!("{other:?}"));
@@ -109,6 +122,15 @@ fn write_border_option(output: &mut String, border: Option<BorderStroke>) {
         }
         None => output.push_str("null"),
     }
+}
+
+fn write_radius(output: &mut String, radius: BorderRadius) {
+    write!(
+        output,
+        r#"{{"top_left":{},"top_right":{},"bottom_right":{},"bottom_left":{}}}"#,
+        radius.top_left, radius.top_right, radius.bottom_right, radius.bottom_left
+    )
+    .expect("写入 String 不会失败");
 }
 
 fn write_json_string(output: &mut String, value: &str) {

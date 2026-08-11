@@ -5,6 +5,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod batch;
+mod pipeline;
+mod vertex;
+
 pub mod renderer;
 
 pub use renderer::WgpuRenderer;

@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use tela_contract::{
-    Color, Fill, FlexDirection, LayoutConcern, Size, TextMeasureRequest, TextMeasurer, TextMetrics,
-    UiFrame, Viewport, VisualConcern,
+    BorderRadius, Color, Fill, FlexDirection, LayoutConcern, Size, TextMeasureRequest,
+    TextMeasurer, TextMetrics, UiFrame, Viewport, VisualConcern,
 };
 use tela_core::UiTree;
 use tela_core::builder::{LayoutContainer, Primitive};
@@ -27,7 +27,9 @@ pub const VIEWPORT: Viewport = Viewport {
 
 const HEADER: Color = Color::rgba(0.12, 0.31, 0.58, 1.0);
 const SIDEBAR: Color = Color::rgba(0.90, 0.36, 0.20, 1.0);
+const CLIP_OVERFLOW: Color = Color::rgba(0.95, 0.70, 0.18, 1.0);
 const MAIN: Color = Color::rgba(0.16, 0.60, 0.43, 1.0);
+const MAIN_BORDER: Color = Color::rgba(0.05, 0.24, 0.17, 1.0);
 const FOOTER: Color = Color::rgba(0.22, 0.25, 0.31, 1.0);
 
 thread_local! {
@@ -119,10 +121,45 @@ fn solid_rect(color: Color, width: Size, height: Size) -> tela_contract::UiNode 
 }
 
 /// 共享 tela 场景：header / 等宽侧栏与内容 / footer，全程只使用纯色矩形。
+/// header 左侧刻意包含累计溢出的子矩形，用 clip 验证后端 scissor。
 fn scene_node() -> tela_contract::UiNode {
-    let header = solid_rect(HEADER, Size::fixed(480.0), Size::fixed(56.0));
+    let header_clip: tela_contract::UiNode = LayoutContainer::flex([
+        solid_rect(SIDEBAR, Size::fixed(150.0), Size::fixed(56.0)),
+        solid_rect(CLIP_OVERFLOW, Size::fixed(150.0), Size::fixed(56.0)),
+    ])
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(240.0)),
+        height: Some(Size::fixed(56.0)),
+        clip: true,
+        ..LayoutConcern::default()
+    })
+    .into();
+    let header = LayoutContainer::flex([header_clip])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(480.0)),
+            height: Some(Size::fixed(56.0)),
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(HEADER)),
+            ..VisualConcern::default()
+        })
+        .into();
     let sidebar = solid_rect(SIDEBAR, Size::fixed(240.0), Size::fixed(264.0));
-    let main = solid_rect(MAIN, Size::fixed(240.0), Size::fixed(264.0));
+    let main = Primitive::rect()
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(240.0)),
+            height: Some(Size::fixed(264.0)),
+            border_width: 6.0,
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(MAIN)),
+            border_color: Some(MAIN_BORDER),
+            border_radius: BorderRadius::all(18.0),
+            ..VisualConcern::default()
+        })
+        .into();
     let content = LayoutContainer::flex([sidebar, main])
         .layout(LayoutConcern {
             width: Some(Size::fixed(480.0)),
@@ -219,24 +256,54 @@ mod tests {
         let mut app = App::new();
         assert!(app.ensure_frame());
         let frame = app.frame();
-        assert_eq!(frame.commands.len(), 4);
+        assert_eq!(frame.commands.len(), 6);
         let expected = [
             (0.0, 0.0, 480.0, 56.0, HEADER),
+            (0.0, 0.0, 150.0, 56.0, SIDEBAR),
+            (150.0, 0.0, 150.0, 56.0, CLIP_OVERFLOW),
             (0.0, 56.0, 240.0, 264.0, SIDEBAR),
             (240.0, 56.0, 240.0, 264.0, MAIN),
             (0.0, 320.0, 480.0, 40.0, FOOTER),
         ];
-        for (command, (x, y, w, h, color)) in frame.commands.iter().zip(expected) {
+        for (index, (command, (x, y, w, h, color))) in
+            frame.commands.iter().zip(expected).enumerate()
+        {
             assert_eq!((command.geometry.x, command.geometry.y), (x, y));
             assert_eq!((command.geometry.w, command.geometry.h), (w, h));
-            assert!(matches!(
-                command.payload,
-                tela_contract::DrawPayload::Rect {
-                    fill: Some(fill),
-                    border: None,
-                } if fill == color
-            ));
+            match &command.payload {
+                tela_contract::DrawPayload::Rect { fill, border } if index != 4 => {
+                    assert_eq!(*fill, Some(color));
+                    assert_eq!(*border, None);
+                }
+                tela_contract::DrawPayload::RoundedRect {
+                    fill,
+                    border,
+                    radius,
+                } if index == 4 => {
+                    assert_eq!(*fill, Some(color));
+                    assert_eq!(
+                        *border,
+                        Some(tela_contract::BorderStroke {
+                            color: MAIN_BORDER,
+                            width: 6.0,
+                        })
+                    );
+                    assert_eq!(*radius, BorderRadius::all(18.0));
+                }
+                payload => panic!("预期 Rect 命令，实际 {payload:?}"),
+            }
         }
+        assert_eq!(
+            frame.commands[2].clip,
+            Some(tela_contract::ClipRect {
+                rect: tela_contract::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 240.0,
+                    h: 56.0,
+                },
+            })
+        );
     }
 
     #[test]
@@ -254,7 +321,7 @@ mod tests {
         app.ensure_frame();
         assert_eq!(
             std::str::from_utf8(app.frame_trace()).expect("trace 必须是 UTF-8"),
-            "{\"viewport\":{\"width\":480,\"height\":360},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":480,\"h\":56},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.12,\"g\":0.31,\"b\":0.58,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":0,\"y\":56,\"w\":240,\"h\":264},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.9,\"g\":0.36,\"b\":0.2,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":240,\"y\":56,\"w\":240,\"h\":264},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.16,\"g\":0.6,\"b\":0.43,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":0,\"y\":320,\"w\":480,\"h\":40},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.22,\"g\":0.25,\"b\":0.31,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
+            "{\"viewport\":{\"width\":480,\"height\":360},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":480,\"h\":56},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.12,\"g\":0.31,\"b\":0.58,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":0,\"y\":0,\"w\":150,\"h\":56},\"clip\":{\"rect\":{\"x\":0,\"y\":0,\"w\":240,\"h\":56}},\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.9,\"g\":0.36,\"b\":0.2,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":150,\"y\":0,\"w\":150,\"h\":56},\"clip\":{\"rect\":{\"x\":0,\"y\":0,\"w\":240,\"h\":56}},\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.95,\"g\":0.7,\"b\":0.18,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":0,\"y\":56,\"w\":240,\"h\":264},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.9,\"g\":0.36,\"b\":0.2,\"a\":1},\"border\":null}},{\"geometry\":{\"x\":240,\"y\":56,\"w\":240,\"h\":264},\"clip\":null,\"payload\":{\"kind\":\"rounded_rect\",\"fill\":{\"r\":0.16,\"g\":0.6,\"b\":0.43,\"a\":1},\"border\":{\"color\":{\"r\":0.05,\"g\":0.24,\"b\":0.17,\"a\":1},\"width\":6},\"radius\":{\"top_left\":18,\"top_right\":18,\"bottom_right\":18,\"bottom_left\":18}}},{\"geometry\":{\"x\":0,\"y\":320,\"w\":480,\"h\":40},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.22,\"g\":0.25,\"b\":0.31,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
         );
     }
 }

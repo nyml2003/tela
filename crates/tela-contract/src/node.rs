@@ -290,7 +290,7 @@ pub struct LayoutConcern {
     pub margin: crate::Insets,
     /// 内边距：参与内容区域计算。
     pub padding: crate::Insets,
-    /// 边框宽度：计入盒尺寸（颜色部分归 `visual`）。
+    /// 边框宽度：仅支持 `border-box`，计入 `width` / `height`（颜色部分归 `visual`）。
     pub border_width: f32,
     /// Flex 主轴方向。
     pub direction: crate::FlexDirection,
