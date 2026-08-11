@@ -1,0 +1,4 @@
+# wasm 目标的 web-sys WebGPU API 需要 unstable cfg（WebGPU 未冻结，wasm-bindgen 要求显式开启）。
+# 只对 wasm32 目标生效，不影响 native 构建与测试。
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "web_sys_unstable_apis"]

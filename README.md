@@ -28,6 +28,24 @@
 | [012-业务数据绑定](docs/012-业务数据绑定.md) | 表单输入怎么跟宿主数据双向同步？BindId 是什么？ | 做表单、动态列表、绑定组件时 |
 | [013-决策日志](docs/013-决策日志.md) | 每个设计决策为什么这么定？被什么取代了？ | 回溯决策、评审设计时 |
 
+## 开发工作流（ops）
+
+日常开发统一走 [ops](ops/README.md)（DDD 分层 CLI，运行时零依赖，Node 24 直接跑 TS）。
+进入 nix dev shell（direnv/flake）后 `ops` 命令即可用；未在 nix 环境时用
+`node ops/src/interface/cli.ts`，或安装用户级入口：`cp` 包装脚本到 `~/.local/bin/ops`
+（见 ops/README.md「安装」）。
+
+```bash
+ops check                # 四道验证门（fmt/clippy/test/依赖方向）
+ops build all --gpu      # 构建 CPU/GPU wasm、glue 与浏览器宿主
+ops verify [demo|gpu]    # 冒烟测试（默认 demo）；gpu = 环境自检（原生 JS 三角形回读）
+ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
+```
+
+浏览器演示只保留一个共享场景：`?backend=raster` 使用 CPU 光栅，
+`?backend=wgpu` 使用 wgpu，`?backend=auto` 优先尝试 wgpu 后回退 CPU。三个模式都先由
+`UiTree` 解析出同一个 `UiFrame`，后端只负责最终绘制。
+
 ## 非需求（明确不在基座范围）
 
 - 不内置任何业务组件（按钮/输入框/表格等由上层组件套件实现）。

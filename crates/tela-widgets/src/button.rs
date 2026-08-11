@@ -206,7 +206,7 @@ impl Button {
             palette.text
         };
 
-        let mut node: UiNode = LayoutContainer::flex([Primitive::text(TextContent {
+        let mut node: UiNode = LayoutContainer::flex(vec![Primitive::text(TextContent {
             text: self.label,
             font: self.font,
             font_size: self.font_size,

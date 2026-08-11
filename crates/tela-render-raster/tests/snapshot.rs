@@ -654,13 +654,12 @@ fn space_character_does_not_render_block() {
     let mut block_like = 0;
     for y in 0..bitmap.height {
         for x in 0..bitmap.width {
-            if let Some([r, g, b, _]) = bitmap.pixel(x, y) {
-                if (r as i32 - 165).abs() < 12
-                    && (g as i32 - 169).abs() < 12
-                    && (b as i32 - 174).abs() < 12
-                {
-                    block_like += 1;
-                }
+            if let Some([r, g, b, _]) = bitmap.pixel(x, y)
+                && (r as i32 - 165).abs() < 12
+                && (g as i32 - 169).abs() < 12
+                && (b as i32 - 174).abs() < 12
+            {
+                block_like += 1;
             }
         }
     }

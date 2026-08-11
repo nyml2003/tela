@@ -1,714 +1,237 @@
-//! tela 演示应用：浏览器 canvas 复杂页面，覆盖 80% 库能力。
+//! tela 最小浏览器演示。
 //!
-//! 覆盖清单：
-//! - 布局：Flex row/column、Stack（Content + FillOverlay 角标）、ScrollView、虚拟列表
-//!   （定高 + semantic-id + 滚轮可视区）、margin/padding/gap、MinMax、对齐；
-//! - 绘制：圆角卡片、渐变、圆/椭圆、中文文字、draw_order；
-//! - 身份：auto-stable-identity 列表（增删/重排状态保持）、semantic-id 虚拟列表、
-//!   ViewStateStore（滚动位置随 key 保持）；
-//! - 更新：Dirty 布局缓存（LayoutCache，仅脏节点重算）；
-//! - 交互：指针命中 → UiAction、Tab/方向键焦点转移、确认/取消、模态栈拦截、
-//!   局部快捷键（Ctrl+S）、FocusChanged 高亮；
-//! - 渲染：软件光栅位图 → canvas ImageData 呈现（像素确定性基准）。
+//! 场景只包含一个居中的蓝色矩形，但 CPU 与 WebGPU 都必须消费同一个
+//! `UiNode -> UiTree -> UiFrame` 结果。后端差异只存在于最后的帧提交。
+
+#![cfg_attr(feature = "webgpu", allow(dead_code))]
+
+mod frame_trace;
+#[cfg(feature = "webgpu")]
+mod wasm;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use tela_contract::{
-    Color, Fill, FontRef, IdentityConcern, InputEvent, Key, KeyCombo, KeyState, LayoutConcern,
-    Modifiers, Point, PointerEvent, RawKeyboardEvent, SemanticKey, ShortcutId, ShortcutMapping,
-    ShortcutScopeSpec, Size, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, UiAction,
-    UiNode, Viewport, VirtualListSpec, VisualConcern,
+    Color, CrossAlign, Fill, FlexDirection, LayoutConcern, MainAlign, Size, TextMeasureRequest,
+    TextMeasurer, TextMetrics, UiFrame, Viewport, VisualConcern,
 };
-use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
-use tela_core::{IdentityAllocator, LayoutCache, UiTree, ViewStateStore, handle_input};
-use tela_widgets::{Button, ButtonVariant};
+use tela_core::UiTree;
+use tela_core::builder::{LayoutContainer, Primitive};
 
-/// 逻辑画布尺寸（布局与交互坐标，独立于像素密度）。
+/// 所有后端共享的逻辑画布尺寸。
 pub const VIEWPORT: Viewport = Viewport {
     width: 480.0,
     height: 360.0,
 };
 
-/// 渲染缩放：位图像素 = 逻辑坐标 × DPI_SCALE（与 HTML canvas 像素一一对应）。
-pub const DPI_SCALE: f32 = 2.0;
-
-/// 滚动列表与虚拟列表的 key（由树结构固定，见 build_tree 注释）。
-const SCROLL_KEY: &str = "/0/0/0/2/0/";
-const VIRTUAL_KEY: &str = "/0/0/0/2/1/";
+const BLUE: Color = Color::rgba(0.10, 0.38, 0.90, 1.0);
 
 thread_local! {
     static APP: RefCell<App> = RefCell::new(App::new());
 }
 
-/// 应用：宿主数据 + 基座跨帧状态。
+/// 无文字的最小场景仍要满足 layout 的 `TextMeasurer` 合约。
+struct EmptyTextMeasurer;
+
+impl TextMeasurer for EmptyTextMeasurer {
+    fn measure(&self, _request: &TextMeasureRequest<'_>) -> TextMetrics {
+        TextMetrics {
+            width: 0.0,
+            height: 0.0,
+            line_count: 0,
+        }
+    }
+}
+
+/// 最小 demo 运行时。逻辑帧缓存与 renderer 的呈现节奏独立。
 struct App {
-    items: Vec<String>,
-    virtual_offset: f32,
-    modal_open: bool,
-    log: Vec<String>,
-    allocator: IdentityAllocator,
-    cache: LayoutCache,
-    state: ViewStateStore,
-    measurer: DemoMeasurer,
-    bitmap: Vec<u8>,
-    pending_actions: Vec<UiAction>,
-    last_keys: Vec<SemanticKey>,
+    frame: Option<UiFrame>,
+    frame_trace: Vec<u8>,
+    cpu_rendered: bool,
+    cpu_bitmap: Vec<u8>,
 }
 
 impl App {
     fn new() -> Self {
-        App {
-            items: vec!["条目 A".into(), "条目 B".into(), "条目 C".into()],
-            virtual_offset: 0.0,
-            modal_open: false,
-            log: Vec::new(),
-            allocator: IdentityAllocator::new(),
-            cache: LayoutCache::new(),
-            state: ViewStateStore::new(),
-            measurer: DemoMeasurer::new(),
-            bitmap: Vec::new(),
-            pending_actions: Vec::new(),
-            last_keys: Vec::new(),
-        }
-    }
-
-    fn log(&mut self, msg: String) {
-        self.log.push(msg);
-        if self.log.len() > 6 {
-            self.log.remove(0);
-        }
-    }
-
-    /// 构建树 + Dirty resolve + 光栅渲染 → 位图像素。
-    fn render(&mut self) {
-        let root = build_tree(self);
-        let tree = UiTree::new_with_allocator(root, &mut self.allocator).expect("树合法");
-        self.last_keys = tree.keys().to_vec();
-        let scrolls = std::collections::HashMap::from([
-            (
-                SemanticKey(SCROLL_KEY.to_string()),
-                self.state.scroll(&SemanticKey(SCROLL_KEY.to_string())),
-            ),
-            (
-                SemanticKey(VIRTUAL_KEY.to_string()),
-                tela_contract::ScrollState {
-                    offset_x: 0.0,
-                    offset_y: self.virtual_offset,
-                },
-            ),
-        ]);
-        let frame = tree
-            .resolve_dirty(VIEWPORT, &self.measurer, &scrolls, &mut self.cache)
-            .expect("resolve 成功");
-        let mut config =
-            tela_render_raster::RasterConfig::default_with(Color::rgba(0.07, 0.08, 0.10, 1.0));
-        config.dpi_scale = DPI_SCALE;
-        let bitmap = tela_render_raster::render_frame(&frame, &config);
-        self.bitmap = bitmap.pixels;
-        // 滚动位置保持：写入视图状态仓库（宿主从仓库取 offset 组装 scroll_inputs）。
-        self.state.set_scroll(
-            SemanticKey(SCROLL_KEY.to_string()),
-            self.state.scroll(&SemanticKey(SCROLL_KEY.to_string())),
-        );
-    }
-
-    /// 处理输入事件（当前数据快照的树），暂存动作，渲染反馈帧。
-    fn handle(&mut self, event: InputEvent) {
-        let root = build_tree(self);
-        let tree = UiTree::new_with_allocator(root, &mut self.allocator).expect("树合法");
-        self.last_keys = tree.keys().to_vec();
-        let scrolls = std::collections::HashMap::from([
-            (
-                SemanticKey(SCROLL_KEY.to_string()),
-                self.state.scroll(&SemanticKey(SCROLL_KEY.to_string())),
-            ),
-            (
-                SemanticKey(VIRTUAL_KEY.to_string()),
-                tela_contract::ScrollState {
-                    offset_x: 0.0,
-                    offset_y: self.virtual_offset,
-                },
-            ),
-        ]);
-        let frame = tree
-            .resolve_dirty(VIEWPORT, &self.measurer, &scrolls, &mut self.cache)
-            .expect("resolve 成功");
-        self.pending_actions = handle_input(&tree, &frame, &mut self.state, &event);
-        let mut config =
-            tela_render_raster::RasterConfig::default_with(Color::rgba(0.07, 0.08, 0.10, 1.0));
-        config.dpi_scale = DPI_SCALE;
-        let bitmap = tela_render_raster::render_frame(&frame, &config);
-        self.bitmap = bitmap.pixels;
-    }
-
-    /// 应用挂起的动作（宿主执行业务意图）→ 渲染新帧。
-    fn apply_pending(&mut self) {
-        let actions = std::mem::take(&mut self.pending_actions);
-        for action in &actions {
-            match action {
-                UiAction::Click { node_id } => {
-                    let key = self.last_keys.get(node_id.0 as usize).cloned();
-                    if let Some(key) = key {
-                        match key.0.as_str() {
-                            "btn-add" => {
-                                let next = self.items.len() + 1;
-                                self.items.push(format!("条目 {next}"));
-                            }
-                            "btn-del" => {
-                                self.items.pop();
-                            }
-                            "btn-shuffle" if self.items.len() > 1 => {
-                                let last = self.items.len() - 1;
-                                self.items.swap(0, last);
-                            }
-                            "btn-modal" => {
-                                self.modal_open = true;
-                                self.state
-                                    .push_modal(SemanticKey("modal-layer".to_string()));
-                            }
-                            "btn-close" => {
-                                self.modal_open = false;
-                                self.state.pop_modal();
-                            }
-                            _ => {}
-                        }
-                        self.log(format!("点击 {}", key.0));
-                    }
-                }
-                UiAction::CloseModal { .. } => {
-                    self.modal_open = false;
-                    self.state.pop_modal();
-                    self.log("取消键关闭模态".into());
-                }
-                UiAction::ShortcutActivated { shortcut_id } => {
-                    self.log(format!("快捷键 {shortcut_id:?}"));
-                }
-                UiAction::FocusChanged { to, .. } => {
-                    if let Some(id) = to
-                        && let Some(key) = self.last_keys.get(id.0 as usize)
-                    {
-                        self.log(format!("焦点 {}", key.0));
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.render();
-    }
-}
-
-/// 纯函数文本度量（近似规则，中英文同宽处理）。
-/// 真实文本度量：与渲染同一字体（内嵌 Noto 子集，见 007-4.0"同一不可变字体数据"）。
-struct DemoMeasurer {
-    font: ab_glyph::FontArc,
-}
-
-impl DemoMeasurer {
-    fn new() -> Self {
         Self {
-            font: ab_glyph::FontArc::try_from_slice(tela_render_raster::embedded_font_bytes())
-                .expect("内嵌字体必须可解析"),
+            frame: None,
+            frame_trace: Vec::new(),
+            cpu_rendered: false,
+            cpu_bitmap: Vec::new(),
         }
     }
-}
 
-impl TextMeasurer for DemoMeasurer {
-    fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics {
-        use ab_glyph::{Font as _, ScaleFont as _};
-        // 与渲染同一缩放（em：1em = font_size），保证度量与字形一致（见 007-4.0）。
-        let scaled = self.font.as_scaled(tela_render_raster::em_pixel_height(
-            &self.font,
-            request.font_size,
-        ));
-        let mut lines = 1u32;
-        let mut line_width = 0.0f32;
-        let mut max_width = 0.0f32;
-        for ch in request.text.chars() {
-            if ch == '\n' {
-                lines += 1;
-                line_width = 0.0;
-                continue;
-            }
-            let advance = scaled.h_advance(scaled.glyph_id(ch));
-            if let Some(max) = request.max_width
-                && line_width > 0.0
-                && line_width + advance > max
-            {
-                lines += 1;
-                line_width = 0.0;
-            }
-            line_width += advance;
-            max_width = max_width.max(line_width);
-        }
-        TextMetrics {
-            width: max_width,
-            height: lines as f32 * request.line_height,
-            line_count: lines,
-        }
-    }
-}
-
-// ---------- 节点构造 helpers ----------
-
-fn text(text: &str, size: f32, color: Color) -> UiNode {
-    Primitive::text(TextContent {
-        text: text.to_string(),
-        font: FontRef("noto".to_string()),
-        font_size: size,
-        line_height: size * 1.4,
-        color,
-    })
-    .into()
-}
-
-/// Stack 内不参与尺寸推导、按指定位置叠放的文本。
-fn overlay_text(
-    label: &str,
-    size: f32,
-    color: Color,
-    align: tela_contract::StackAlign,
-    offset: tela_contract::PixelOffset,
-) -> UiNode {
-    let mut node = text(label, size, color);
-    node.layout = Some(LayoutConcern {
-        stack_layer: tela_contract::StackLayer::FillOverlay,
-        stack_align: Some(align),
-        stack_offset: offset,
-        ..LayoutConcern::default()
-    });
-    node
-}
-
-trait IntoNode: Into<UiNode> {
-    fn into_node(self) -> UiNode {
-        self.into()
-    }
-}
-impl<T: Into<UiNode>> IntoNode for T {}
-
-// ---------- 树构建（数据快照 → UiNode） ----------
-
-/// 树结构（DFS 序 key 约定）：
-/// ModalHost(/0/) → [ShortcutScope(/0/0/) → Flex(/0/0/0/) → [toolbar(/0/0/0/0/), 卡片(/0/0/0/1/),
-///   main(/0/0/0/2/) → [scroll(/0/0/0/2/0/), virtual(/0/0/0/2/1/)], status(/0/0/0/3/)],
-///   modal-layer(/0/1/)]
-fn build_tree(app: &App) -> UiNode {
-    let focused = app.state.current_focus_key().cloned();
-
-    // 工具栏。
-    let toolbar = LayoutContainer::flex([
-        Button::new("btn-add", "添加条目")
-            .variant(ButtonVariant::Primary)
-            .width(80.0)
-            .view_state(&app.state)
-            .into(),
-        Button::new("btn-del", "删除条目")
-            .variant(ButtonVariant::Danger)
-            .width(80.0)
-            .view_state(&app.state)
-            .into(),
-        Button::new("btn-modal", "打开弹窗")
-            .variant(ButtonVariant::Warning)
-            .width(80.0)
-            .view_state(&app.state)
-            .into(),
-        Button::new("btn-shuffle", "随机重排")
-            .variant(ButtonVariant::Primary)
-            .width(80.0)
-            .disabled(app.items.len() < 2)
-            .view_state(&app.state)
-            .into(),
-        text("Ctrl+S 保存", 11.0, Color::rgba(0.55, 0.55, 0.6, 1.0)),
-    ])
-    .layout(LayoutConcern {
-        gap: 8.0,
-        padding: tela_contract::Insets::all(8.0),
-        ..LayoutConcern::default()
-    })
-    .into_node();
-
-    // 渐变卡片（Stack：渐变底 + FillOverlay 角标 + 标题）。
-    let gradient_card = LayoutContainer::stack([
-        Primitive::rect()
-            .layout(LayoutConcern {
-                width: Some(Size::fixed(300.0)),
-                height: Some(Size::fixed(64.0)),
-                ..LayoutConcern::default()
-            })
-            .visual(VisualConcern {
-                fill: Some(Fill::Linear(tela_contract::Gradient {
-                    kind: tela_contract::GradientKind::Linear {
-                        start: Point { x: 0.0, y: 0.0 },
-                        end: Point { x: 300.0, y: 0.0 },
-                    },
-                    stops: vec![
-                        tela_contract::ColorStop {
-                            position: 0.0,
-                            color: Color::rgba(0.15, 0.35, 0.85, 1.0),
-                        },
-                        tela_contract::ColorStop {
-                            position: 1.0,
-                            color: Color::rgba(0.65, 0.2, 0.85, 1.0),
-                        },
-                    ],
-                })),
-                border_radius: tela_contract::BorderRadius::all(12.0),
-                ..VisualConcern::default()
-            })
-            .into(),
-        Primitive::rect()
-            .layout(LayoutConcern {
-                width: Some(Size::fixed(48.0)),
-                height: Some(Size::fixed(18.0)),
-                stack_layer: tela_contract::StackLayer::FillOverlay,
-                stack_align: Some(tela_contract::StackAlign::TopRight),
-                stack_offset: tela_contract::PixelOffset { x: -6.0, y: 6.0 },
-                ..LayoutConcern::default()
-            })
-            .visual(VisualConcern {
-                fill: Some(Fill::Solid(Color::rgba(0.95, 0.3, 0.3, 1.0))),
-                border_radius: tela_contract::BorderRadius::all(9.0),
-                ..VisualConcern::default()
-            })
-            .into(),
-        overlay_text(
-            "数据面板",
-            16.0,
-            Color::WHITE,
-            tela_contract::StackAlign::Center,
-            tela_contract::PixelOffset::default(),
-        ),
-    ])
-    .into_node();
-
-    // 滚动列表（auto-stable 身份 + 焦点高亮 + 圆点装饰）。
-    let stable_items: Vec<UiNode> = app
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let focused_here = focused.as_ref() == Some(&SemanticKey(format!("item-{i}")));
-            let bg = if focused_here {
-                Color::rgba(0.25, 0.5, 0.85, 1.0)
-            } else {
-                Color::rgba(0.18, 0.19, 0.24, 1.0)
-            };
-            LayoutContainer::flex([
-                text(name, 12.0, Color::WHITE),
-                Primitive::circle()
-                    .layout(LayoutConcern {
-                        width: Some(Size::fixed(10.0)),
-                        height: Some(Size::fixed(10.0)),
-                        ..LayoutConcern::default()
-                    })
-                    .visual(VisualConcern {
-                        fill: Some(Fill::Solid(if i % 2 == 0 {
-                            Color::rgba(0.3, 0.9, 0.4, 1.0)
-                        } else {
-                            Color::rgba(0.9, 0.7, 0.3, 1.0)
-                        })),
-                        ..VisualConcern::default()
-                    })
-                    .into(),
-            ])
-            .visual(VisualConcern {
-                fill: Some(Fill::Solid(bg)),
-                border_radius: tela_contract::BorderRadius::all(5.0),
-                ..VisualConcern::default()
-            })
-            .identity(IdentityConcern {
-                semantic_key: Some(SemanticKey(format!("item-{i}"))),
-                ..IdentityConcern::default()
-            })
-            .layout(LayoutConcern {
-                width: Some(Size::fixed(140.0)),
-                height: Some(Size::fixed(26.0)),
-                gap: 6.0,
-                main_align: tela_contract::MainAlign::Center,
-                cross_align: tela_contract::CrossAlign::Center,
-                ..LayoutConcern::default()
-            })
-            .into()
-        })
-        .collect();
-    let stable_scope = LogicalContainer::identity_scope()
-        .identity(IdentityConcern {
-            key_strategy: tela_contract::KeyStrategy::AutoStableIdentity,
-            ..IdentityConcern::default()
-        })
-        .children(stable_items)
-        .into_node();
-    let scroll = LayoutContainer::scroll_view([stable_scope])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(190.0)),
-            height: Some(Size::fixed(150.0)),
-            ..LayoutConcern::default()
-        })
-        .into_node();
-
-    // 虚拟列表：业务按 offset 构建可视范围 item（semantic-id 强制，见 006-6）。
-    let item_h = 22.0f32;
-    let spacing = 4.0f32;
-    let stride = item_h + spacing;
-    let total = 100usize;
-    let first_visible = (app.virtual_offset / stride).floor() as usize;
-    let visible_count = (150.0 / stride).ceil() as usize + 2;
-    let virtual_items: Vec<UiNode> = (first_visible..(first_visible + visible_count).min(total))
-        .map(|i| {
-            LayoutContainer::flex([text(&format!("虚拟项 #{i}"), 11.0, Color::WHITE)])
-                .visual(VisualConcern {
-                    fill: Some(Fill::Solid(Color::rgba(0.16, 0.3, 0.5, 1.0))),
-                    border_radius: tela_contract::BorderRadius::all(4.0),
-                    ..VisualConcern::default()
-                })
-                .identity(IdentityConcern {
-                    semantic_key: Some(SemanticKey(format!("vitem-{i}"))),
-                    ..IdentityConcern::default()
-                })
-                .layout(LayoutConcern {
-                    width: Some(Size::fixed(150.0)),
-                    height: Some(Size::fixed(item_h)),
-                    main_align: tela_contract::MainAlign::Center,
-                    cross_align: tela_contract::CrossAlign::Center,
-                    ..LayoutConcern::default()
-                })
-                .into()
-        })
-        .collect();
-    let virtual_list = LayoutContainer::virtual_list(
-        VirtualListSpec {
-            item_height: item_h,
-            item_spacing: spacing,
-            overscan: 2,
-        },
-        virtual_items,
-    )
-    .layout(LayoutConcern {
-        width: Some(Size::fixed(190.0)),
-        height: Some(Size::fixed(150.0)),
-        ..LayoutConcern::default()
-    })
-    .into_node();
-
-    let main = LayoutContainer::flex([scroll, virtual_list])
-        .layout(LayoutConcern {
-            gap: 12.0,
-            padding: tela_contract::Insets::all(8.0),
-            ..LayoutConcern::default()
-        })
-        .into_node();
-
-    // 状态栏（日志）。
-    let status_text = app
-        .log
-        .last()
-        .cloned()
-        .unwrap_or_else(|| "就绪".to_string());
-    let status =
-        LayoutContainer::flex([text(&status_text, 11.0, Color::rgba(0.7, 0.7, 0.75, 1.0))])
-            .layout(LayoutConcern {
-                padding: tela_contract::Insets::all(6.0),
-                ..LayoutConcern::default()
-            })
-            .into_node();
-
-    // ShortcutScope：Ctrl+S → SAVE（局部快捷键，见 008-2.11）。
-    let shortcut_scope = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
-        mappings: vec![ShortcutMapping {
-            combo: KeyCombo {
-                modifiers: Modifiers {
-                    ctrl: true,
-                    ..Modifiers::default()
-                },
-                key: Key::Char('s'),
-            },
-            shortcut: ShortcutId::Save,
-        }],
-    })
-    .children([
-        LayoutContainer::flex([toolbar, gradient_card, main, status])
-            .layout(LayoutConcern {
-                direction: tela_contract::FlexDirection::Column,
-                gap: 6.0,
-                ..LayoutConcern::default()
-            })
-            .into_node(),
-    ])
-    .into_node();
-
-    // 模态层：全屏遮罩（content，参与尺寸）+ 居中卡片（FillOverlay，不参与尺寸）。
-    // 弹窗自身是 ModalHost 的直接子（ModalHost 子层叠放），内部用 Stack 分层。
-    let modal_layer: Vec<UiNode> = if app.modal_open {
-        vec![
-            LayoutContainer::stack::<[UiNode; 2]>([
-                Primitive::rect()
-                    .layout(LayoutConcern {
-                        width: Some(Size::fill()),
-                        height: Some(Size::fill()),
-                        stack_layer: tela_contract::StackLayer::Content,
-                        ..LayoutConcern::default()
-                    })
-                    .visual(VisualConcern {
-                        fill: Some(Fill::Solid(Color::rgba(0.0, 0.0, 0.0, 0.55))),
-                        ..VisualConcern::default()
-                    })
-                    .into(),
-                LayoutContainer::flex([
-                    text("弹窗", 16.0, Color::WHITE),
-                    Button::new("btn-close", "关闭弹窗")
-                        .variant(ButtonVariant::Danger)
-                        .width(96.0)
-                        .view_state(&app.state)
-                        .into(),
-                ])
-                .visual(VisualConcern {
-                    fill: Some(Fill::Solid(Color::rgba(0.14, 0.14, 0.17, 0.99))),
-                    border_radius: tela_contract::BorderRadius::all(10.0),
-                    ..VisualConcern::default()
-                })
-                .layout(LayoutConcern {
-                    width: Some(Size::fixed(240.0)),
-                    height: Some(Size::fixed(110.0)),
-                    stack_layer: tela_contract::StackLayer::FillOverlay,
-                    stack_align: Some(tela_contract::StackAlign::Center),
-                    direction: tela_contract::FlexDirection::Column,
-                    gap: 16.0,
-                    main_align: tela_contract::MainAlign::Center,
-                    cross_align: tela_contract::CrossAlign::Center,
-                    ..LayoutConcern::default()
-                })
-                .into(),
-            ])
-            .layout(LayoutConcern {
-                width: Some(Size::fill()),
-                height: Some(Size::fill()),
-                ..LayoutConcern::default()
-            })
-            .into(),
-        ]
-    } else {
-        Vec::new()
-    };
-
-    LogicalContainer::modal_host()
-        .children([
-            shortcut_scope.into_node(),
-            LogicalContainer::group()
-                .identity(IdentityConcern {
-                    semantic_key: Some(SemanticKey("modal-layer".to_string())),
-                    ..IdentityConcern::default()
-                })
-                .children(modal_layer)
-                .into_node(),
-        ])
-        .into_node()
-}
-
-// ---------- wasm 导出（纯 extern ABI，无 wasm-bindgen） ----------
-
-fn with_app<F: FnOnce(&mut App) -> R, R>(f: F) -> R {
-    APP.with(|cell| f(&mut cell.borrow_mut()))
-}
-
-/// 指针事件：kind 0=down 1=up 2=move 3=scroll（dx/dy 为滚轮增量）。
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn demo_pointer(x: f32, y: f32, kind: u32, dx: f32, dy: f32) {
-    with_app(|app| {
-        let event = match kind {
-            0 => InputEvent::Pointer(PointerEvent::Down {
-                position: Point { x, y },
-            }),
-            1 => InputEvent::Pointer(PointerEvent::Up {
-                position: Point { x, y },
-            }),
-            2 => InputEvent::Pointer(PointerEvent::Move {
-                position: Point { x, y },
-            }),
-            _ => InputEvent::Pointer(PointerEvent::Scroll {
-                position: Point { x, y },
-                delta: Point { x: dx, y: dy },
-            }),
-        };
-        if kind == 3 {
-            // 滚轮：滚动列表与虚拟列表（宿主数据驱动）。
-            app.virtual_offset = (app.virtual_offset + dy).clamp(0.0, 90.0 * 26.0);
+    /// 确保共享逻辑帧存在；返回值表示本次是否发生了场景构建与布局。
+    fn ensure_frame(&mut self) -> bool {
+        if self.frame.is_none() {
+            let frame = scene_frame();
+            self.frame_trace = frame_trace::to_json(&frame).into_bytes();
+            self.frame = Some(frame);
+            self.cpu_rendered = false;
+            true
         } else {
-            app.handle(event);
-            app.apply_pending();
-            return;
+            false
         }
-        app.handle(event);
-        app.apply_pending();
-    })
+    }
+
+    /// 已缓存的唯一逻辑帧。调用方先经 `ensure_frame` 保证其存在。
+    fn frame(&self) -> &UiFrame {
+        self.frame.as_ref().expect("共享逻辑帧必须已构建")
+    }
+
+    /// 与 `frame` 同时缓存的、由同一 `UiFrame` 投影出的 UTF-8 调试 JSON。
+    fn frame_trace(&self) -> &[u8] {
+        debug_assert!(self.frame.is_some());
+        &self.frame_trace
+    }
+
+    /// CPU 仅在共享逻辑帧变更时重新光栅化。
+    fn render_cpu_if_needed(&mut self) -> bool {
+        self.ensure_frame();
+        if self.cpu_rendered {
+            return false;
+        }
+        let config =
+            tela_render_raster::RasterConfig::default_with(Color::rgba(1.0, 1.0, 1.0, 1.0));
+        self.cpu_bitmap = tela_render_raster::render_frame(self.frame(), &config).pixels;
+        self.cpu_rendered = true;
+        true
+    }
 }
 
-/// 键盘：0=Tab 1=Enter 2=Esc 3=Up 4=Down 5=Left 6=Right 7=Ctrl+S。
+/// 共享 tela 场景：无视觉根 Flex + 居中的 320×200 蓝色矩形。
+fn scene_node() -> tela_contract::UiNode {
+    let rectangle = Primitive::rect()
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(320.0)),
+            height: Some(Size::fixed(200.0)),
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(BLUE)),
+            ..VisualConcern::default()
+        });
+    LayoutContainer::flex([rectangle])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(VIEWPORT.width)),
+            height: Some(Size::fixed(VIEWPORT.height)),
+            direction: FlexDirection::Row,
+            main_align: MainAlign::Center,
+            cross_align: CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .into()
+}
+
+/// 所有 renderer 的唯一场景输入。
+pub(crate) fn scene_frame() -> UiFrame {
+    UiTree::new(scene_node())
+        .expect("最小 demo 场景必须合法")
+        .resolve(VIEWPORT, &EmptyTextMeasurer, &HashMap::new())
+        .expect("最小 demo 场景必须可布局")
+}
+
+pub(crate) fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
+    APP.with(|app| f(&mut app.borrow_mut()))
+}
+
+/// wasm WebGPU 路径的计时辅助。
+#[cfg(feature = "webgpu")]
+pub(crate) fn now_ms() -> f32 {
+    js_sys::Date::now() as f32
+}
+
+/// CPU 后端帧推进：仅在共享 `UiFrame` 更新时光栅化。
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn demo_key(key_code: u32, shift: u32) {
-    with_app(|app| {
-        let key = match key_code {
-            0 => Key::Tab,
-            1 => Key::Enter,
-            2 => Key::Escape,
-            3 => Key::ArrowUp,
-            4 => Key::ArrowDown,
-            5 => Key::ArrowLeft,
-            6 => Key::ArrowRight,
-            _ => Key::Char('s'),
-        };
-        let event = InputEvent::Key(RawKeyboardEvent {
-            key,
-            modifiers: Modifiers {
-                shift: shift != 0,
-                ctrl: key_code == 7,
-                ..Modifiers::default()
-            },
-            state: KeyState::Pressed,
-            repeat: false,
-        });
-        app.handle(event);
-        app.apply_pending();
-    })
+pub extern "C" fn demo_tick() -> u32 {
+    u32::from(with_app(App::render_cpu_if_needed))
 }
 
-/// 帧像素指针（RGBA8）。首次调用（或未渲染过）时先渲染首帧，
-/// 保证取到的缓冲区与 `demo_frame_size` 一致（HTML 首帧即 present）。
+/// CPU 位图指针。宿主必须先调用 `demo_tick` 提交共享帧。
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_frame_ptr() -> *const u8 {
-    with_app(|app| {
-        if app.bitmap.is_empty() {
-            app.render();
-        }
-        app.bitmap.as_ptr()
-    })
+    with_app(|app| app.cpu_bitmap.as_ptr())
 }
 
-/// 帧尺寸（位图像素）：width | (height << 16)。
+/// CPU 位图尺寸（RGBA8，逻辑像素与物理像素均为 480×360）。
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_frame_size() -> u32 {
-    let w = (VIEWPORT.width * DPI_SCALE) as u32;
-    let h = (VIEWPORT.height * DPI_SCALE) as u32;
-    w | (h << 16)
+    VIEWPORT.width as u32 | ((VIEWPORT.height as u32) << 16)
 }
 
-/// 最近日志（UTF-8 指针 + 长度）。
+/// 共享 `UiFrame` 的结构化 JSON 指针。长度由 `demo_frame_trace_len` 返回。
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn demo_last_log_len() -> u32 {
-    with_app(|app| app.log.last().map(|s| s.len() as u32).unwrap_or(0))
-}
-
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn demo_last_log_ptr() -> *const u8 {
+pub extern "C" fn demo_frame_trace_ptr() -> *const u8 {
     with_app(|app| {
-        app.log
-            .last()
-            .map(|s| s.as_ptr())
-            .unwrap_or(std::ptr::null())
+        app.ensure_frame();
+        app.frame_trace().as_ptr()
     })
+}
+
+/// 共享 `UiFrame` 的结构化 JSON 字节长度。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_frame_trace_len() -> u32 {
+    with_app(|app| {
+        app.ensure_frame();
+        u32::try_from(app.frame_trace().len()).expect("trace 长度必须可编码")
+    })
+}
+
+/// CPU WASM 构建标识。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_wasm_version() -> u32 {
+    option_env!("TELA_BUILD_TS")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_scene_resolves_to_one_centered_blue_rectangle() {
+        let mut app = App::new();
+        assert!(app.ensure_frame());
+        let frame = app.frame();
+        assert_eq!(frame.commands.len(), 1);
+        let command = &frame.commands[0];
+        assert_eq!(command.geometry.x, 80.0);
+        assert_eq!(command.geometry.y, 80.0);
+        assert_eq!(command.geometry.w, 320.0);
+        assert_eq!(command.geometry.h, 200.0);
+        assert!(matches!(
+            command.payload,
+            tela_contract::DrawPayload::Rect {
+                fill: Some(color),
+                border: None,
+            } if color == BLUE
+        ));
+    }
+
+    #[test]
+    fn cached_frame_is_not_recomputed() {
+        let mut app = App::new();
+        assert!(app.ensure_frame());
+        let frame = app.frame() as *const UiFrame;
+        assert!(!app.ensure_frame());
+        assert!(std::ptr::eq(frame, app.frame()));
+    }
+
+    #[test]
+    fn cached_trace_describes_the_shared_frame() {
+        let mut app = App::new();
+        app.ensure_frame();
+        assert_eq!(
+            std::str::from_utf8(app.frame_trace()).expect("trace 必须是 UTF-8"),
+            "{\"viewport\":{\"width\":480,\"height\":360},\"commands\":[{\"geometry\":{\"x\":80,\"y\":80,\"w\":320,\"h\":200},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0.1,\"g\":0.38,\"b\":0.9,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
+        );
+    }
 }

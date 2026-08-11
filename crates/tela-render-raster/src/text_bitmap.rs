@@ -16,6 +16,7 @@ pub(crate) fn draw_text_bitmap(
     region: &IRect,
     text: &TextContent,
     scale: f32,
+    _logical_width: f32,
 ) {
     let cell = (text.font_size * scale).max(1.0) / GLYPH_H as f32;
     let cell = if cell < 1.0 { 1.0 } else { cell };

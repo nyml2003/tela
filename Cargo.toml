@@ -2,11 +2,14 @@
 resolver = "3"
 members = [
     "crates/tela-contract",
+    "crates/tela-log",
     "crates/tela-core",
     "crates/tela-render-raster",
     "crates/tela-render-canvas",
+    "crates/tela-render-wgpu",
     "crates/tela-widgets",
     "crates/tela-demo",
+    "crates/wgpu-mvp",
 ]
 
 [workspace.package]

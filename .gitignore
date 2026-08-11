@@ -26,6 +26,9 @@ node_modules/
 *.log
 /tmp/
 
+# ops 调试会话日志（ops log 查询，见 docs/014 §13）
+/.ops-logs/
+
 # 敏感数据（禁止入库）
 .env
 .env.*

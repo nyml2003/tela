@@ -36,6 +36,7 @@ pub(crate) fn draw_text_std(
     region: &IRect,
     text: &TextContent,
     scale: f32,
+    logical_width: f32,
 ) {
     let font = font();
     // 按 em 缩放（1em = font_size），见 em_pixel_height；dpi 统一乘入。
@@ -51,10 +52,10 @@ pub(crate) fn draw_text_std(
             continue;
         }
         let glyph_id = scaled.glyph_id(ch);
-        // 按盒宽折行：与布局侧同一规则（逐字形 advance 累计，超盒宽换行），
-        // 保证布局行数与渲染行数一致（见 007-4.0 同一度量）。
+        // 按逻辑盒宽折行：与布局侧同一规则（逐字形 advance 累计，超盒宽换行），
+        // 使用未取整宽度避免最后一个字符被像素取整误折到下一行（见 007-4.0）。
         let advance = scaled.h_advance(glyph_id);
-        if pen_x > 0.0 && pen_x + advance > region.w as f32 {
+        if pen_x > 0.0 && pen_x + advance > logical_width {
             pen_x = 0.0;
             pen_y += line_height;
         }
@@ -86,8 +87,8 @@ pub(crate) fn draw_text_std(
                 if alpha > 0.0
                     && px >= region.x
                     && py >= region.y
-                    && px < region.x + region.w
-                    && py < region.y + region.h
+                    && px < region.x + region.w + 1
+                    && py < region.y + region.h + 1
                 {
                     canvas.blend(
                         px,

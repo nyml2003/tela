@@ -99,6 +99,7 @@ fn render_command(canvas: &mut Canvas<'_>, command: &DrawCommand, cfg: &RasterCo
         canvas,
         &command.payload,
         to_px_rect(command.geometry, scale),
+        command.geometry,
         &clip_px,
         cfg,
         scale,
@@ -110,6 +111,7 @@ fn render_payload(
     canvas: &mut Canvas<'_>,
     payload: &DrawPayload,
     geometry: IRect,
+    logical: Rect,
     clip: &IRect,
     cfg: &RasterConfig,
     scale: f32,
@@ -180,7 +182,7 @@ fn render_payload(
         }
         DrawPayload::Text { text } => {
             if cfg.backend_caps.text {
-                text::draw_text(canvas, &geometry, clip, text, scale, cfg);
+                text::draw_text(canvas, &geometry, clip, text, scale, cfg, logical);
             }
         }
         DrawPayload::LinearGradient { gradient } => {
@@ -206,7 +208,7 @@ fn render_payload(
                 shapes::draw_shadow(canvas, &geometry, clip, spec, scale);
             }
             // 降级：丢弃阴影，仅绘制本体（见 007-3）。
-            render_payload(canvas, target, geometry, clip, cfg, scale);
+            render_payload(canvas, target, geometry, logical, clip, cfg, scale);
         }
         DrawPayload::Custom(_) => {
             // 自定义命令：按能力集跳过（不支持的扩展命令兜底为跳过）。

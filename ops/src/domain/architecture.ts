@@ -1,0 +1,85 @@
+// 领域层：依赖方向规则（把 scripts/check-architecture.sh 的规则模型化，纯函数可测）。
+// 规则来源：002-架构总览与分层 §5 + 007-绘制与渲染后端 §7.1。
+// 与旧 bash 脚本等价但更严格：用 cargo metadata 的真实依赖（含 feature/构建依赖），
+// 不再用正则解析 Cargo.toml。
+
+export type DepKind = 'normal' | 'dev' | 'build';
+
+export interface CrateDependency {
+  name: string;
+  kind: DepKind;
+}
+
+export interface CrateInfo {
+  name: string;
+  deps: readonly CrateDependency[];
+}
+
+export interface ArchViolation {
+  crate: string;
+  message: string;
+}
+
+/** 零依赖 crate（含 dev/build 依赖都算）。 */
+const ZERO_DEP_CRATES: readonly string[] = ['tela-contract', 'tela-log'];
+
+/** 允许的普通依赖白名单：<crate> 只允许依赖 <列出的包>。 */
+const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
+  ['tela-core', ['tela-contract']],
+  ['tela-render-raster', ['tela-contract', 'ab_glyph', 'ab_glyph_rasterizer', 'png', 'font8x8']],
+  ['tela-render-canvas', ['tela-contract']],
+  ['tela-render-wgpu', ['tela-contract', 'tela-log', 'ab_glyph', 'bytemuck', 'wgpu']],
+];
+
+/** dev-dependencies 白名单：core 的 dev 依赖仅限测试专用后端（集成测试，不进入运行时）。 */
+const ALLOWED_DEV: readonly (readonly [string, readonly string[]])[] = [
+  ['tela-core', ['tela-render-raster']],
+];
+
+/** 校验依赖方向，返回违规列表（空 = 通过）。 */
+export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[] {
+  const violations: ArchViolation[] = [];
+  const byName = new Map(crates.map((c) => [c.name, c]));
+
+  // 1. 零依赖 crate。
+  for (const name of ZERO_DEP_CRATES) {
+    const info = byName.get(name);
+    if (!info) {
+      violations.push({ crate: name, message: '缺少 crate 定义（cargo metadata 未包含）' });
+      continue;
+    }
+    if (info.deps.length > 0) {
+      violations.push({
+        crate: name,
+        message: `必须零依赖，实际依赖: ${info.deps.map((d) => d.name).join(', ')}`,
+      });
+    }
+  }
+
+  // 2. 白名单依赖（normal 与 dev 分开校验）。
+  const checkList = (list: readonly (readonly [string, readonly string[]])[], kind: DepKind) => {
+    for (const [crate, allowed] of list) {
+      const info = byName.get(crate);
+      if (!info) continue;
+      for (const dep of info.deps.filter((d) => d.kind === kind)) {
+        if (!allowed.includes(dep.name)) {
+          violations.push({
+            crate,
+            message: `[${kind}] 依赖了未允许的 crate: ${dep.name}（允许: ${allowed.join(' ')}）`,
+          });
+        }
+      }
+    }
+  };
+  checkList(ALLOWED_NORMAL, 'normal');
+  checkList(ALLOWED_DEV, 'dev');
+
+  // 3. render 后端禁止反向依赖 tela-core（含 dev/build）。
+  for (const info of crates) {
+    if (info.name.startsWith('tela-render-') && info.deps.some((d) => d.name === 'tela-core')) {
+      violations.push({ crate: info.name, message: 'render 后端禁止反向依赖 tela-core' });
+    }
+  }
+
+  return violations;
+}

@@ -1,0 +1,29 @@
+{
+  "name": "tela-ops",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "tela 开发运维工作流（DDD 分层，运行时零第三方依赖）",
+  "packageManager": "pnpm@11.15.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "ops": "./src/interface/cli.ts"
+  },
+  "scripts": {
+    "dev": "node src/interface/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "check": "tsc --noEmit && eslint . && node --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "eslint": "^10.8.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.66.0",
+    "typescript-native": "npm:typescript@7.0.2"
+  }
+}

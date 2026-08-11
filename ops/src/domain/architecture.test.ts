@@ -1,0 +1,95 @@
+// domain/architecture 纯函数单测：依赖方向规则（node:test，零依赖）。
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { checkArchitecture, type CrateInfo } from './architecture.ts';
+
+const crate = (name: string, deps: [string, string][]): CrateInfo => ({
+  name,
+  deps: deps.map(([n, k]) => ({ name: n, kind: k as CrateInfo['deps'][number]['kind'] })),
+});
+
+/** 合法基线：tela-contract 零依赖（其他用例基于它叠加违规）。 */
+const base = (): CrateInfo[] => [crate('tela-contract', []), crate('tela-log', [])];
+
+test('零依赖 crate 有依赖时报违规', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-contract', [['tela-core', 'normal']]),
+  ]);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /零依赖/);
+});
+
+test('tela-contract 零依赖时通过', () => {
+  assert.deepEqual(checkArchitecture(base()), []);
+});
+
+test('core 依赖白名单之外的 crate 报违规', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-core', [
+      ['tela-contract', 'normal'],
+      ['tela-render-raster', 'normal'], // 运行时反向依赖后端，不允许
+    ]),
+  ]);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /tela-render-raster/);
+});
+
+test('core 的 dev 依赖仅允许测试后端', () => {
+  const ok = checkArchitecture([...base(), crate('tela-core', [['tela-render-raster', 'dev']])]);
+  assert.deepEqual(ok, []);
+  const bad = checkArchitecture([...base(), crate('tela-core', [['tela-widgets', 'dev']])]);
+  assert.equal(bad.length, 1);
+});
+
+test('render 后端禁止反向依赖 core', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-render-raster', [
+      ['tela-contract', 'normal'],
+      ['ab_glyph', 'normal'],
+      ['tela-core', 'dev'], // dev 也不行
+    ]),
+  ]);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /禁止反向依赖 tela-core/);
+});
+
+test('完整合法 workspace 通过', () => {
+  const crates: CrateInfo[] = [
+    crate('tela-contract', []),
+    crate('tela-core', [
+      ['tela-contract', 'normal'],
+      ['tela-render-raster', 'dev'],
+    ]),
+    crate('tela-render-raster', [
+      ['tela-contract', 'normal'],
+      ['ab_glyph', 'normal'],
+      ['ab_glyph_rasterizer', 'normal'],
+      ['png', 'normal'],
+      ['font8x8', 'normal'],
+    ]),
+    crate('tela-render-canvas', [['tela-contract', 'normal']]),
+    crate('tela-render-wgpu', [
+      ['tela-contract', 'normal'],
+      ['tela-log', 'normal'],
+      ['ab_glyph', 'normal'],
+      ['bytemuck', 'normal'],
+      ['wgpu', 'normal'],
+    ]),
+    crate('tela-log', []),
+  ];
+  assert.deepEqual(checkArchitecture(crates), []);
+});
+
+test('wgpu 后端白名单之外依赖报违规', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-render-wgpu', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'], // render 后端反向依赖 core，双违规
+    ]),
+  ]);
+  assert.ok(violations.length >= 1);
+});

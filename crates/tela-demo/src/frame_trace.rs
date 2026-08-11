@@ -1,0 +1,166 @@
+//! `UiFrame` 的稳定调试投影。
+//!
+//! 这是 demo 宿主的只读观测格式，不是另一个场景描述或 renderer 输入。
+//! 它直接从已经 resolve 完成的 `tela_contract::UiFrame` 生成，因此 CPU 与
+//! WebGPU 可打印完全相同的逻辑帧。
+
+use std::fmt::Write;
+
+use tela_contract::{BorderStroke, ClipRect, Color, DrawPayload, Rect, UiFrame};
+
+pub(crate) fn to_json(frame: &UiFrame) -> String {
+    let mut output = String::new();
+    write!(
+        output,
+        r#"{{"viewport":{{"width":{},"height":{}}},"commands":["#,
+        frame.viewport.width, frame.viewport.height
+    )
+    .expect("写入 String 不会失败");
+    for (index, command) in frame.commands.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(r#"{"geometry":"#);
+        write_rect(&mut output, command.geometry);
+        output.push_str(r#","clip":"#);
+        write_clip(&mut output, command.clip);
+        output.push_str(r#","payload":"#);
+        write_payload(&mut output, &command.payload);
+        output.push('}');
+    }
+    output.push_str(r#"],"hit_regions":["#);
+    for (index, region) in frame.hit_regions.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(r#"{"node_id":"#);
+        write_json_string(&mut output, &format!("{:?}", region.node_id));
+        output.push_str(r#","rect":"#);
+        write_rect(&mut output, region.rect);
+        output.push_str(r#","clip":"#);
+        write_clip(&mut output, region.clip);
+        output.push('}');
+    }
+    output.push_str("]}");
+    output
+}
+
+fn write_rect(output: &mut String, rect: Rect) {
+    write!(
+        output,
+        r#"{{"x":{},"y":{},"w":{},"h":{}}}"#,
+        rect.x, rect.y, rect.w, rect.h
+    )
+    .expect("写入 String 不会失败");
+}
+
+fn write_clip(output: &mut String, clip: Option<ClipRect>) {
+    match clip {
+        Some(clip) => {
+            output.push_str(r#"{"rect":"#);
+            write_rect(output, clip.rect);
+            output.push('}');
+        }
+        None => output.push_str("null"),
+    }
+}
+
+fn write_payload(output: &mut String, payload: &DrawPayload) {
+    match payload {
+        DrawPayload::Rect { fill, border } => {
+            output.push_str(r#"{"kind":"rect","fill":"#);
+            write_color_option(output, *fill);
+            output.push_str(r#","border":"#);
+            write_border_option(output, *border);
+            output.push('}');
+        }
+        other => {
+            // 当前 demo 的场景只含 Rect。保留完整 Debug 文本而不是静默丢弃
+            // 其他核心命令，以便场景扩展时观测立即暴露出来。
+            output.push_str(r#"{"kind":"unprojected","debug":"#);
+            write_json_string(output, &format!("{other:?}"));
+            output.push('}');
+        }
+    }
+}
+
+fn write_color_option(output: &mut String, color: Option<Color>) {
+    match color {
+        Some(color) => write_color(output, color),
+        None => output.push_str("null"),
+    }
+}
+
+fn write_color(output: &mut String, color: Color) {
+    write!(
+        output,
+        r#"{{"r":{},"g":{},"b":{},"a":{}}}"#,
+        color.r, color.g, color.b, color.a
+    )
+    .expect("写入 String 不会失败");
+}
+
+fn write_border_option(output: &mut String, border: Option<BorderStroke>) {
+    match border {
+        Some(border) => {
+            output.push_str(r#"{"color":"#);
+            write_color(output, border.color);
+            write!(output, r#","width":{}}}"#, border.width).expect("写入 String 不会失败");
+        }
+        None => output.push_str("null"),
+    }
+}
+
+fn write_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character.is_control() => {
+                write!(output, "\\u{:04x}", character as u32).expect("写入 String 不会失败");
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use tela_contract::{Color, DrawCommand, DrawPayload, UiFrame, Viewport};
+
+    use super::to_json;
+
+    #[test]
+    fn writes_rect_payload_as_structured_json() {
+        let frame = UiFrame {
+            viewport: Viewport {
+                width: 1.0,
+                height: 1.0,
+            },
+            commands: vec![DrawCommand {
+                geometry: tela_contract::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0,
+                },
+                clip: None,
+                payload: DrawPayload::Rect {
+                    fill: Some(Color::BLUE),
+                    border: None,
+                },
+            }],
+            hit_regions: Vec::new(),
+        };
+
+        assert_eq!(
+            to_json(&frame),
+            "{\"viewport\":{\"width\":1,\"height\":1},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":1,\"h\":1},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0,\"g\":0,\"b\":1,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
+        );
+    }
+}
