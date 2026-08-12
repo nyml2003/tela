@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
-use crate::{VIEWPORT, with_app};
+use crate::with_app;
 
 thread_local! {
     static GPU: RefCell<Option<GpuSession>> = const { RefCell::new(None) };
@@ -215,29 +215,18 @@ pub fn set_input_value(value: String) -> u32 {
     crate::with_app(|app| app.set_input_value(value))
 }
 
+/// 写入浏览器 CSS 视口。布局使用逻辑像素，surface 仍按 canvas backing store 提交。
+#[wasm_bindgen]
+pub fn set_viewport(width: f32, height: f32) -> bool {
+    crate::with_app(|app| app.set_viewport(width, height))
+}
+
 /// 逻辑画布对应的浏览器 canvas 尺寸。
 #[wasm_bindgen]
 pub fn frame_size() -> u32 {
-    VIEWPORT.width as u32 | ((VIEWPORT.height as u32) << 16)
-}
-
-/// 注册浏览器适配器已解码的 RGBA8 图片；URL/base64 解析不属于 WGPU 后端。
-#[wasm_bindgen]
-pub fn upload_image(
-    texture: String,
-    width: u32,
-    height: u32,
-    rgba8: Vec<u8>,
-) -> Result<(), JsValue> {
-    GPU.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let session = slot
-            .as_mut()
-            .ok_or_else(|| JsValue::from_str("GPU 会话未启动"))?;
-        session
-            .renderer
-            .upload_rgba8(tela_contract::TextureRef(texture), width, height, &rgba8)
-            .map_err(|error| JsValue::from_str(&error.to_string()))
+    with_app(|app| {
+        let viewport = app.viewport();
+        viewport.width.round() as u32 | ((viewport.height.round() as u32) << 16)
     })
 }
 

@@ -1,14 +1,12 @@
 // 最小浏览器宿主：选择 CPU/WGPU 后端，驱动同一 tela 场景帧。
 
-import { decodeImageRgba8, type DecodedImage } from './resource_adapter';
-
 type BackendMode = 'auto' | 'raster' | 'wgpu';
 
 interface GpuGlue {
   default(options?: { module_or_path?: string }): Promise<unknown>;
+  set_viewport(width: number, height: number): boolean;
   frame_size(): number;
   start_gpu(canvas: HTMLCanvasElement): Promise<void>;
-  upload_image(texture: string, width: number, height: number, rgba8: Uint8Array): void;
   tick_gpu(): number;
   pointer_down(x: number, y: number): number;
   pointer_move(x: number, y: number): number;
@@ -23,6 +21,8 @@ interface GpuGlue {
 
 interface CpuExports {
   demo_tick(): number;
+  demo_set_viewport(width: number, height: number): number;
+  demo_set_raster_dpi(dpi: number): void;
   demo_pointer_down(x: number, y: number): number;
   demo_pointer_move(x: number, y: number): number;
   demo_pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
@@ -34,8 +34,6 @@ interface CpuExports {
   demo_frame_ptr(): number;
   demo_frame_trace_ptr(): number;
   demo_frame_trace_len(): number;
-  demo_image_upload_begin(bytes: number): number;
-  demo_image_upload_finish(width: number, height: number): number;
   memory: WebAssembly.Memory;
 }
 
@@ -49,14 +47,6 @@ interface InteractionBridge extends PointerBridge {
   input_focused(): boolean;
   pointer_cursor(): number;
   set_input_value(value: string): number;
-}
-
-const DEMO_IMAGE_ID = 'demo.image';
-// 源图明显大于 176x132 的展示框，避免低分辨率随机图被放大后发糊。
-const DEMO_IMAGE_URL = 'https://picsum.photos/800/600';
-
-async function loadDemoImage(): Promise<DecodedImage> {
-  return decodeImageRgba8(DEMO_IMAGE_ID, DEMO_IMAGE_URL);
 }
 
 interface CanvasSurfaceSize {
@@ -74,24 +64,23 @@ function modeFromUrl(): BackendMode {
   return value === 'raster' || value === 'wgpu' ? value : 'auto';
 }
 
-function setCanvasSize(canvas: HTMLCanvasElement, packed: number): void {
-  const { width, height } = unpackCanvasSize(packed);
-  canvas.width = width;
-  canvas.height = height;
+function logicalViewport(canvas: HTMLCanvasElement): { width: number; height: number } {
+  const bounds = canvas.getBoundingClientRect();
+  return { width: Math.max(320, Math.round(bounds.width)), height: Math.max(240, Math.round(bounds.height)) };
 }
 
 /** 把浏览器 CSS 坐标转换成 tela 逻辑坐标，再交给核心交互层命中测试。 */
 function installPointerEvents(
   canvas: HTMLCanvasElement,
-  packed: number,
+  viewport: () => { width: number; height: number },
   bridge: InteractionBridge,
 ): void {
-  const { width, height } = unpackCanvasSize(packed);
   const point = (event: PointerEvent): { x: number; y: number } => {
     const bounds = canvas.getBoundingClientRect();
+    const logical = viewport();
     return {
-      x: (event.clientX - bounds.left) * width / Math.max(bounds.width, 1),
-      y: (event.clientY - bounds.top) * height / Math.max(bounds.height, 1),
+      x: (event.clientX - bounds.left) * logical.width / Math.max(bounds.width, 1),
+      y: (event.clientY - bounds.top) * logical.height / Math.max(bounds.height, 1),
     };
   };
   const syncCursor = () => {
@@ -118,17 +107,18 @@ function installPointerEvents(
   canvas.addEventListener('wheel', (event) => {
     event.preventDefault();
     const position = point(event);
+    const logical = viewport();
     const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE
       ? 16
       : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-        ? height
+        ? logical.height
         : 1;
     const bounds = canvas.getBoundingClientRect();
     bridge.pointer_scroll(
       position.x,
       position.y,
-      event.deltaX * unit * width / Math.max(bounds.width, 1),
-      event.deltaY * unit * height / Math.max(bounds.height, 1),
+      event.deltaX * unit * logical.width / Math.max(bounds.width, 1),
+      event.deltaY * unit * logical.height / Math.max(bounds.height, 1),
     );
   }, { passive: false });
 
@@ -168,9 +158,9 @@ function unpackCanvasSize(packed: number): { width: number; height: number } {
   return { width: packed & 0xffff, height: packed >>> 16 };
 }
 
-/** 逻辑画布维持不变，仅把 WGPU 的 backing store 提升到屏幕的实际像素密度。 */
-function syncGpuCanvasSize(canvas: HTMLCanvasElement, packed: number): CanvasSurfaceSize {
-  const { width: logicalWidth, height: logicalHeight } = unpackCanvasSize(packed);
+/** CSS 视口驱动逻辑布局，backing store 独立跟随设备像素比。 */
+function syncGpuCanvasSize(canvas: HTMLCanvasElement): CanvasSurfaceSize {
+  const { width: logicalWidth, height: logicalHeight } = logicalViewport(canvas);
   const bounds = canvas.getBoundingClientRect();
   const pixelRatio = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
   const pixelWidth = Math.max(1, Math.round(bounds.width * pixelRatio));
@@ -189,9 +179,9 @@ function syncGpuCanvasSize(canvas: HTMLCanvasElement, packed: number): CanvasSur
 }
 
 /** CSS 尺寸、窗口缩放或跨屏倍率变化时，更新 WGPU backing store。 */
-function observeGpuCanvasSize(canvas: HTMLCanvasElement, packed: number): void {
+function observeGpuCanvasSize(canvas: HTMLCanvasElement, syncViewport: (size: CanvasSurfaceSize) => void): void {
   const sync = () => {
-    syncGpuCanvasSize(canvas, packed);
+    syncViewport(syncGpuCanvasSize(canvas));
   };
   const observer = new ResizeObserver(sync);
   observer.observe(canvas);
@@ -235,15 +225,6 @@ function rasterFrameTrace(wasm: CpuExports): string {
   );
 }
 
-function uploadRasterImage(wasm: CpuExports, image: DecodedImage): void {
-  const ptr = wasm.demo_image_upload_begin(image.rgba8.byteLength);
-  if (ptr === 0) throw new Error('CPU 图片上传缓冲区分配失败');
-  new Uint8Array(wasm.memory.buffer, ptr, image.rgba8.byteLength).set(image.rgba8);
-  if (wasm.demo_image_upload_finish(image.width, image.height) !== 1) {
-    throw new Error('CPU 图片上传校验失败');
-  }
-}
-
 function setRasterInputValue(wasm: CpuExports, value: string): number {
   const bytes = new TextEncoder().encode(value);
   const ptr = wasm.demo_input_value_begin(bytes.byteLength);
@@ -258,9 +239,14 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
     env: { tela_now: () => performance.now() },
   });
   const wasm = instance.exports as unknown as CpuExports;
-  const logicalSize = wasm.demo_frame_size();
-  setCanvasSize(canvas, logicalSize);
-  installPointerEvents(canvas, logicalSize, {
+  let viewport = logicalViewport(canvas);
+  const syncViewport = () => {
+    viewport = logicalViewport(canvas);
+    wasm.demo_set_viewport(viewport.width, viewport.height);
+    wasm.demo_set_raster_dpi(window.devicePixelRatio || 1);
+  };
+  syncViewport();
+  installPointerEvents(canvas, () => viewport, {
     pointer_down: (x, y) => wasm.demo_pointer_down(x, y),
     pointer_move: (x, y) => wasm.demo_pointer_move(x, y),
     pointer_scroll: (x, y, deltaX, deltaY) => wasm.demo_pointer_scroll(x, y, deltaX, deltaY),
@@ -268,13 +254,9 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
     input_focused: () => wasm.demo_input_focused() !== 0,
     set_input_value: (value) => setRasterInputValue(wasm, value),
   });
-  void loadDemoImage().then(
-    (image) => {
-      uploadRasterImage(wasm, image);
-      console.info('[tela/resource]', { backend: 'raster', id: image.id, width: image.width, height: image.height });
-    },
-    (error: unknown) => console.warn('[tela/resource] raster image unavailable:', error),
-  );
+  const observer = new ResizeObserver(syncViewport);
+  observer.observe(canvas);
+  window.addEventListener('resize', syncViewport);
   let logged = false;
   return () => {
     const submitted = wasm.demo_tick();
@@ -292,21 +274,16 @@ async function startGpu(canvas: HTMLCanvasElement): Promise<() => void> {
   const glueUrl = '/tela_demo_gpu.js';
   const glue = (await import(/* webpackIgnore: true */ glueUrl)) as GpuGlue;
   await glue.default({ module_or_path: `/tela_demo_gpu_bg.wasm?v=${Date.now()}` });
-  const logicalSize = glue.frame_size();
-  // 先建立 4:3 逻辑宽高比，使 CSS `height: auto` 的初始测量正确。
-  setCanvasSize(canvas, logicalSize);
+  let viewport = logicalViewport(canvas);
+  glue.set_viewport(viewport.width, viewport.height);
   // WebGPU surface 必须在 canvas 物理尺寸确定后创建。
-  const surfaceSize = syncGpuCanvasSize(canvas, logicalSize);
+  const surfaceSize = syncGpuCanvasSize(canvas);
   await glue.start_gpu(canvas);
-  installPointerEvents(canvas, logicalSize, glue);
-  observeGpuCanvasSize(canvas, logicalSize);
-  void loadDemoImage().then(
-    (image) => {
-      glue.upload_image(image.id, image.width, image.height, image.rgba8);
-      console.info('[tela/resource]', { backend: 'wgpu', id: image.id, width: image.width, height: image.height });
-    },
-    (error: unknown) => console.warn('[tela/resource] wgpu image unavailable:', error),
-  );
+  installPointerEvents(canvas, () => viewport, glue);
+  observeGpuCanvasSize(canvas, (size) => {
+    viewport = { width: size.logicalWidth, height: size.logicalHeight };
+    glue.set_viewport(viewport.width, viewport.height);
+  });
   const submitted = glue.tick_gpu();
   console.info('[tela/frame]', JSON.parse(glue.frame_trace()));
   console.info('[tela/wgpu/surface]', surfaceSize);
