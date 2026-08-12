@@ -1,10 +1,9 @@
 //! `Switch` 组件（AntD 简化）：轨道 + 滑块，受控开合态。
 
 use tela_contract::{
-    BindId, Color, Fill, IdentityConcern, Insets, InteractConcern, LayoutConcern, SemanticKey,
-    Size, UiNode, VisualConcern,
+    BindId, Color, Fill, Insets, InteractConcern, LayoutConcern, Size, UiNode, VisualConcern,
 };
-use tela_core::{LayoutContainer, ViewStateStore};
+use tela_core::LayoutContainer;
 
 use crate::shared::{PRIMARY, text};
 
@@ -16,18 +15,24 @@ const KNOB: f32 = 12.0;
 
 /// 开关：轨道 + 滑块，选中时滑块右移且轨道主题色。
 pub struct Switch {
-    key: SemanticKey,
     checked: bool,
     disabled: bool,
+    bind_id: Option<BindId>,
+}
+
+impl Default for Switch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Switch {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建 Switch；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             checked: false,
             disabled: false,
+            bind_id: None,
         }
     }
 
@@ -37,15 +42,15 @@ impl Switch {
         self
     }
 
-    /// 从视图状态仓库读取选中态。
-    pub fn view_state(mut self, store: &ViewStateStore) -> Self {
-        self.checked = store.selection(&self.key).selected;
-        self
-    }
-
     /// 设置禁用。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
         self
     }
 
@@ -88,10 +93,6 @@ impl Switch {
             })
             .into();
         let mut node: UiNode = LayoutContainer::flex(vec![knob])
-            .identity(IdentityConcern {
-                semantic_key: Some(self.key.clone()),
-                ..IdentityConcern::default()
-            })
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(track_color)),
                 border_radius: tela_contract::BorderRadius::all(TRACK_H / 2.0),
@@ -108,7 +109,7 @@ impl Switch {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: Some(BindId(self.key.0.clone())),
+                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -129,8 +130,8 @@ mod tests {
 
     #[test]
     fn switch_checked_moves_knob_right() {
-        let on = Switch::new("s1").checked(true).into_node();
-        let off = Switch::new("s2").into_node();
+        let on = Switch::new().checked(true).into_node();
+        let off = Switch::new().into_node();
         // 轨道填充：on = 主题蓝，off = 灰。
         let track_on = match on.visual.as_ref().and_then(|v| v.fill.as_ref()) {
             Some(Fill::Solid(c)) => c,

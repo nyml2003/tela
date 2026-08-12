@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    Color, Fill, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec, InputEvent,
-    InteractConcern, Key, KeyCombo, KeyState, LayoutConcern, Modifiers, Point, RawKeyboardEvent,
-    SemanticKey, ShortcutId, ShortcutMapping, ShortcutScopeSpec, Size, TextMeasureRequest,
-    TextMeasurer, TextMetrics, UiAction, Viewport, VisualConcern,
+    Color, Fill, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec, IdentityConcern,
+    InputEvent, InteractConcern, Key, KeyCombo, KeyState, KeyStrategy, LayoutConcern, Modifiers,
+    Point, RawKeyboardEvent, SemanticKey, ShortcutId, ShortcutMapping, ShortcutScopeSpec, Size,
+    TextMeasureRequest, TextMeasurer, TextMetrics, UiAction, Viewport, VirtualListSpec,
+    VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{UiTree, ViewStateStore, handle_input, restore_focus, save_focus};
@@ -174,6 +175,53 @@ fn hit_test_respects_clip() {
         }),
     );
     assert!(!actions.is_empty());
+}
+
+#[test]
+fn scroll_bubbles_from_child_button_to_virtual_list() {
+    let child = LayoutContainer::flex([clickable_rect(80.0, 24.0)])
+        .identity(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            semantic_key: Some(SemanticKey("row-0".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into_node();
+    let tree = UiTree::new(
+        LayoutContainer::virtual_list(
+            VirtualListSpec {
+                total_items: 1,
+                first_item_index: 0,
+                item_height: 24.0,
+                item_spacing: 0.0,
+                overscan: 0,
+            },
+            [child],
+        )
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(80.0)),
+            height: Some(Size::fixed(24.0)),
+            ..LayoutConcern::default()
+        })
+        .interact(InteractConcern {
+            hoverable: true,
+            ..InteractConcern::default()
+        }),
+    )
+    .unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    let actions = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(tela_contract::PointerEvent::Scroll {
+            position: Point { x: 10.0, y: 10.0 },
+            delta: Point { x: 0.0, y: 12.0 },
+        }),
+    );
+    assert!(actions.iter().any(
+        |action| matches!(action, UiAction::Scroll { node_id, .. } if *node_id == tree.node_ids()[0])
+    ));
 }
 
 // ---------- 验收：Tab 焦点转移（纯函数可离线推导 + trap_focus + tab_index） ----------

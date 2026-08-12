@@ -1,10 +1,9 @@
 //! `Checkbox` / `Radio` 组件（AntD 简化）：方框/圆点 + 标签，受控选中态。
 
 use tela_contract::{
-    BindId, Color, Fill, IdentityConcern, InteractConcern, LayoutConcern, SemanticKey, Size,
-    UiNode, VisualConcern,
+    BindId, Color, Fill, InteractConcern, LayoutConcern, Size, UiNode, VisualConcern,
 };
-use tela_core::{LayoutContainer, ViewStateStore};
+use tela_core::LayoutContainer;
 
 use crate::shared::{BORDER, PRIMARY, TEXT, text};
 
@@ -13,20 +12,26 @@ const BOX: f32 = 16.0;
 
 /// 可勾选项：方框（选中填充主题色 + 对勾） + 标签文本。
 pub struct Checkbox {
-    key: SemanticKey,
     label: String,
     checked: bool,
     disabled: bool,
+    bind_id: Option<BindId>,
+}
+
+impl Default for Checkbox {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Checkbox {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建 Checkbox；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             label: String::new(),
             checked: false,
             disabled: false,
+            bind_id: None,
         }
     }
 
@@ -42,15 +47,15 @@ impl Checkbox {
         self
     }
 
-    /// 从视图状态仓库读取选中态。
-    pub fn view_state(mut self, store: &ViewStateStore) -> Self {
-        self.checked = store.selection(&self.key).selected;
-        self
-    }
-
     /// 设置禁用。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
         self
     }
 
@@ -84,10 +89,6 @@ impl Checkbox {
             })
             .into();
         let mut node: UiNode = LayoutContainer::flex(vec![box_node, text(&self.label, 13.0, TEXT)])
-            .identity(IdentityConcern {
-                semantic_key: Some(self.key.clone()),
-                ..IdentityConcern::default()
-            })
             .layout(LayoutConcern {
                 gap: 6.0,
                 main_align: tela_contract::MainAlign::Start,
@@ -100,7 +101,7 @@ impl Checkbox {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: Some(BindId(self.key.0.clone())),
+                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -116,20 +117,26 @@ impl From<Checkbox> for UiNode {
 
 /// 单选圆点（选中填色 + 圆心白点）。
 pub struct Radio {
-    key: SemanticKey,
     label: String,
     checked: bool,
     disabled: bool,
+    bind_id: Option<BindId>,
+}
+
+impl Default for Radio {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Radio {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建 Radio；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             label: String::new(),
             checked: false,
             disabled: false,
+            bind_id: None,
         }
     }
 
@@ -145,15 +152,15 @@ impl Radio {
         self
     }
 
-    /// 从视图状态仓库读取选中态。
-    pub fn view_state(mut self, store: &ViewStateStore) -> Self {
-        self.checked = store.selection(&self.key).selected;
-        self
-    }
-
     /// 设置禁用。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
         self
     }
 
@@ -175,10 +182,6 @@ impl Radio {
             })
             .into();
         let mut node: UiNode = LayoutContainer::flex(vec![dot, text(&self.label, 13.0, TEXT)])
-            .identity(IdentityConcern {
-                semantic_key: Some(self.key.clone()),
-                ..IdentityConcern::default()
-            })
             .layout(LayoutConcern {
                 gap: 6.0,
                 cross_align: tela_contract::CrossAlign::Center,
@@ -190,7 +193,7 @@ impl Radio {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: Some(BindId(self.key.0.clone())),
+                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -222,10 +225,7 @@ mod tests {
 
     #[test]
     fn checkbox_checked_uses_primary() {
-        let node = Checkbox::new("agree")
-            .label("同意")
-            .checked(true)
-            .into_node();
+        let node = Checkbox::new().label("同意").checked(true).into_node();
         assert_eq!(node.kind, NodeKind::Flex);
         assert!(node.interact.as_ref().is_some_and(|i| i.clickable));
         assert!(box_fill(&node).r < 0.2, "checked 应为主题蓝");
@@ -234,9 +234,9 @@ mod tests {
 
     #[test]
     fn checkbox_unchecked_white_and_radio_round() {
-        let node = Checkbox::new("c1").label("x").into_node();
+        let node = Checkbox::new().label("x").into_node();
         assert!(box_fill(&node).r > 0.9, "unchecked 应为白底");
-        let radio = Radio::new("r1").label("选项").checked(true).into_node();
+        let radio = Radio::new().label("选项").checked(true).into_node();
         assert!(
             radio.children[0]
                 .visual

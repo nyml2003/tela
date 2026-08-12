@@ -198,6 +198,10 @@ pub struct TeleportSpec {
 /// 虚拟列表容器配置（见 006-布局引擎 6）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VirtualListSpec {
+    /// 业务数据的总 item 数；布局用它保留完整的可滚动内容高度。
+    pub total_items: u32,
+    /// 当前已构建窗口的首个 item 在完整数据集中的索引。
+    pub first_item_index: u32,
     /// 定高 item 高度（首版仅支持定高）。
     pub item_height: f32,
     /// item 间距。

@@ -1,10 +1,10 @@
 //! `Button` 组件：语义变体与受控交互状态到 `UiNode` 的映射。
 
 use tela_contract::{
-    BorderRadius, Color, Fill, FontRef, IdentityConcern, InteractConcern, LayoutConcern, MainAlign,
-    SemanticKey, Size, TextContent, UiNode, VisualConcern,
+    BorderRadius, Color, Fill, FontRef, InteractConcern, LayoutConcern, MainAlign, Size,
+    TextContent, UiNode, VisualConcern,
 };
-use tela_core::{LayoutContainer, Primitive, ViewStateStore};
+use tela_core::{LayoutContainer, Primitive};
 
 /// Button 的语义视觉变体。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -21,7 +21,7 @@ pub enum ButtonVariant {
 /// Button 在当前构建帧的受控状态。
 ///
 /// 状态优先级为 `disabled > selected > hovered > normal`。它是构建期快照，不存入
-/// `UiNode`；下一帧由宿主或 [`ViewStateStore`] 重新提供。
+/// `UiNode`；下一帧由宿主重新提供。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ButtonState {
     /// 指针正悬停在 Button 上。
@@ -83,7 +83,6 @@ impl ButtonVariant {
 
 /// 上层可复用的可点击 Button。
 pub struct Button {
-    key: SemanticKey,
     label: String,
     variant: ButtonVariant,
     palette: Option<ButtonPalette>,
@@ -97,10 +96,9 @@ pub struct Button {
 }
 
 impl Button {
-    /// 用稳定语义 key 和显示文字构建一个 primary Button。
-    pub fn new(key: impl Into<String>, label: impl Into<String>) -> Self {
+    /// 用显示文字构建一个 primary Button；identity 由 `tela-core` 默认策略生成。
+    pub fn new(label: impl Into<String>) -> Self {
         Self {
-            key: SemanticKey(key.into()),
             label: label.into(),
             variant: ButtonVariant::Primary,
             palette: None,
@@ -132,13 +130,6 @@ impl Button {
         self
     }
 
-    /// 从基座的视图状态仓库读取 hover 与 selected 状态。
-    pub fn view_state(mut self, store: &ViewStateStore) -> Self {
-        self.state.hovered = store.hover_key().is_some_and(|key| key == &self.key);
-        self.state.selected = store.selection(&self.key).selected;
-        self
-    }
-
     /// 设置 Button 是否禁用。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.state.disabled = disabled;
@@ -151,7 +142,7 @@ impl Button {
         self
     }
 
-    /// 设置悬停状态；通常应使用 [`Button::view_state`] 从输入状态读取。
+    /// 设置悬停状态。
     pub fn hovered(mut self, hovered: bool) -> Self {
         self.state.hovered = hovered;
         self
@@ -218,10 +209,6 @@ impl Button {
             border_radius: BorderRadius::all(self.border_radius),
             ..VisualConcern::default()
         })
-        .identity(IdentityConcern {
-            semantic_key: Some(self.key),
-            ..IdentityConcern::default()
-        })
         .layout(LayoutConcern {
             width: Some(Size::fixed(self.width)),
             height: Some(Size::fixed(self.height)),
@@ -251,10 +238,8 @@ impl From<Button> for UiNode {
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{ContentConcern, NodeKind};
-    use tela_core::{SelectionSlot, ViewStateStore};
-
     use super::{Button, ButtonState, ButtonVariant};
+    use tela_contract::{ContentConcern, NodeKind};
 
     fn fill(button: &tela_contract::UiNode) -> tela_contract::Color {
         match button
@@ -269,19 +254,12 @@ mod tests {
 
     #[test]
     fn button_composes_centered_interactive_label() {
-        let node = Button::new("save", "保存").width(96.0).into_node();
+        let node = Button::new("保存").width(96.0).into_node();
         let layout = node.layout.as_ref().expect("Button has layout");
         let interact = node.interact.as_ref().expect("Button is interactive");
 
         assert_eq!(node.kind, NodeKind::Flex);
-        assert_eq!(
-            node.identity
-                .as_ref()
-                .and_then(|identity| identity.semantic_key.as_ref())
-                .unwrap()
-                .0,
-            "save"
-        );
+        assert!(node.identity.is_none());
         assert!(interact.clickable && interact.hoverable && interact.focusable);
         assert_eq!(layout.main_align, tela_contract::MainAlign::Center);
         assert_eq!(layout.cross_align, tela_contract::CrossAlign::Center);
@@ -295,7 +273,7 @@ mod tests {
     #[test]
     fn state_priority_and_variant_palette_are_explicit() {
         let primary = ButtonVariant::Primary.palette();
-        let node = Button::new("submit", "提交")
+        let node = Button::new("提交")
             .state(ButtonState {
                 hovered: true,
                 selected: true,
@@ -304,7 +282,7 @@ mod tests {
             .into_node();
         assert_eq!(fill(&node), primary.selected);
 
-        let disabled = Button::new("remove", "删除")
+        let disabled = Button::new("删除")
             .variant(ButtonVariant::Danger)
             .state(ButtonState {
                 hovered: true,
@@ -317,15 +295,14 @@ mod tests {
     }
 
     #[test]
-    fn view_state_controls_hover_and_selection() {
-        let key = tela_contract::SemanticKey("warning".to_string());
-        let mut store = ViewStateStore::new();
-        store.set_hover(Some(key.clone()));
-        store.set_selection(key, SelectionSlot { selected: true });
-
-        let node = Button::new("warning", "注意")
+    fn explicit_state_controls_hover_and_selection() {
+        let node = Button::new("注意")
             .variant(ButtonVariant::Warning)
-            .view_state(&store)
+            .state(ButtonState {
+                hovered: true,
+                selected: true,
+                disabled: false,
+            })
             .into_node();
         assert_eq!(fill(&node), ButtonVariant::Warning.palette().selected);
     }

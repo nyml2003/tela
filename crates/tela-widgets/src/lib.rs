@@ -25,4 +25,4 @@ pub use input::{Input, InputNumber};
 pub use select::{CascadeOption, Cascader, OptionItem, Select};
 pub use signal::{Signal, SignalSubscription};
 pub use switch::Switch;
-pub use table::{Td, Tr};
+pub use table::{Table, Td, Tr};

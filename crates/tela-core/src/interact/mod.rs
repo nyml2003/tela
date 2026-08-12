@@ -162,8 +162,13 @@ impl<'a> Session<'a> {
                 }
             }
             PointerEvent::Scroll { position, delta } => {
-                if let Some((node_id, _node)) = self.hit_test(position) {
-                    self.actions.push(UiAction::Scroll { node_id, delta });
+                if let Some((node_id, _node)) = self.hit_test(position)
+                    && let Some(scroll_id) = self.nearest_scroll_target(node_id)
+                {
+                    self.actions.push(UiAction::Scroll {
+                        node_id: scroll_id,
+                        delta,
+                    });
                 }
             }
         }
@@ -194,6 +199,27 @@ impl<'a> Session<'a> {
             return Some((region.node_id, node));
         }
         None
+    }
+
+    /// 滚轮从命中叶子向上归属到最近的滚动容器，使表格内按钮不会截断表体滚动。
+    fn nearest_scroll_target(&self, node_id: NodeId) -> Option<NodeId> {
+        let parents = self.focus.as_ref()?.parents.as_slice();
+        let mut index = node_id.0 as usize;
+        loop {
+            if matches!(
+                self.nodes.get(index).map(|node| &node.kind),
+                Some(
+                    tela_contract::NodeKind::ScrollView
+                        | tela_contract::NodeKind::VirtualListView(_)
+                )
+            ) {
+                return self.ids.get(index).copied();
+            }
+            if index == 0 {
+                return None;
+            }
+            index = *parents.get(index)?;
+        }
     }
 
     /// 命中点是否落在任意 Teleport 子树外：是则返回首个 Teleport 节点 id（portal 点击外部，见 006-4.4）。

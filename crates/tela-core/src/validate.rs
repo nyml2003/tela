@@ -96,6 +96,15 @@ fn validate_node(
 
     // 虚拟列表：item 必须显式 semantic-id（见 006-布局引擎 6）。
     if matches!(node.kind, NodeKind::VirtualListView(_)) {
+        let spec = match &node.kind {
+            NodeKind::VirtualListView(spec) => *spec,
+            _ => unreachable!(),
+        };
+        if spec.first_item_index > spec.total_items
+            || node.children.len() as u32 > spec.total_items - spec.first_item_index
+        {
+            return Err(UiBuildError::InvalidVirtualListRange);
+        }
         for child in &node.children {
             let has_key = child
                 .identity

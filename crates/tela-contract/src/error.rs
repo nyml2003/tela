@@ -31,6 +31,8 @@ pub enum UiBuildError {
     InvalidMinMax,
     /// 虚拟列表容器子项缺少显式 `semantic-id`（见 006-布局引擎 6）。
     MissingVirtualItemKey,
+    /// 虚拟列表的可视窗口越过总 item 范围。
+    InvalidVirtualListRange,
     /// 父 `focus_graph` 引用子 FocusScope 内部节点 id（见 008-交互焦点与宿主接口 2.9）。
     FocusGraphCrossScope,
     /// `entry_*`/`exit_*` 端口绑定了本 Scope 外部或不存在的焦点 id。

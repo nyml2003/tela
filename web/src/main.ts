@@ -12,6 +12,7 @@ interface GpuGlue {
   tick_gpu(): number;
   pointer_down(x: number, y: number): number;
   pointer_move(x: number, y: number): number;
+  pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
   pointer_cursor(): number;
   input_focused(): boolean;
   set_input_value(value: string): number;
@@ -24,6 +25,7 @@ interface CpuExports {
   demo_tick(): number;
   demo_pointer_down(x: number, y: number): number;
   demo_pointer_move(x: number, y: number): number;
+  demo_pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
   demo_pointer_cursor(): number;
   demo_input_focused(): number;
   demo_input_value_begin(bytes: number): number;
@@ -40,6 +42,7 @@ interface CpuExports {
 interface PointerBridge {
   pointer_down(x: number, y: number): number;
   pointer_move(x: number, y: number): number;
+  pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
 }
 
 interface InteractionBridge extends PointerBridge {
@@ -112,6 +115,22 @@ function installPointerEvents(
     bridge.pointer_move(-1, -1);
     syncCursor();
   });
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const position = point(event);
+    const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? height
+        : 1;
+    const bounds = canvas.getBoundingClientRect();
+    bridge.pointer_scroll(
+      position.x,
+      position.y,
+      event.deltaX * unit * width / Math.max(bounds.width, 1),
+      event.deltaY * unit * height / Math.max(bounds.height, 1),
+    );
+  }, { passive: false });
 
   // Canvas 没有原生文本编辑面；保留一个不可见 textarea 承接键盘和 IME，
   // 输入值仍通过受控 `ValueChange` 回写 tela，而不是由 DOM 绘制。
@@ -244,6 +263,7 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
   installPointerEvents(canvas, logicalSize, {
     pointer_down: (x, y) => wasm.demo_pointer_down(x, y),
     pointer_move: (x, y) => wasm.demo_pointer_move(x, y),
+    pointer_scroll: (x, y, deltaX, deltaY) => wasm.demo_pointer_scroll(x, y, deltaX, deltaY),
     pointer_cursor: () => wasm.demo_pointer_cursor(),
     input_focused: () => wasm.demo_input_focused() !== 0,
     set_input_value: (value) => setRasterInputValue(wasm, value),

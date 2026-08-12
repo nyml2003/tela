@@ -1,8 +1,6 @@
 //! `Select` / `Cascader` 组件（AntD 简化）：下拉选择与级联选择。
 
-use tela_contract::{
-    BindId, Color, IdentityConcern, InteractConcern, LayoutConcern, SemanticKey, UiNode,
-};
+use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, UiNode};
 use tela_core::LayoutContainer;
 
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
@@ -18,24 +16,30 @@ pub struct OptionItem {
 
 /// 下拉选择：触发框（当前值/占位符 + ▾）+ 展开时的选项列表。
 pub struct Select {
-    key: SemanticKey,
     options: Vec<OptionItem>,
     value: Option<String>,
     placeholder: String,
     expanded: bool,
     disabled: bool,
+    bind_id: Option<BindId>,
+}
+
+impl Default for Select {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Select {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建 Select；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             options: Vec::new(),
             value: None,
             placeholder: String::new(),
             expanded: false,
             disabled: false,
+            bind_id: None,
         }
     }
 
@@ -69,6 +73,12 @@ impl Select {
         self
     }
 
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
+        self
+    }
+
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let current = self
@@ -96,10 +106,6 @@ impl Select {
             self.disabled,
             false,
         )
-        .identity(IdentityConcern {
-            semantic_key: Some(self.key.clone()),
-            ..IdentityConcern::default()
-        })
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(180.0)),
             height: Some(tela_contract::Size::fixed(28.0)),
@@ -123,13 +129,6 @@ impl Select {
                     };
                     let mut node: UiNode =
                         LayoutContainer::flex(vec![text(&option.label, 13.0, TEXT)])
-                            .identity(IdentityConcern {
-                                semantic_key: Some(SemanticKey(format!(
-                                    "{}-{}",
-                                    self.key.0, option.value
-                                ))),
-                                ..IdentityConcern::default()
-                            })
                             .visual(tela_contract::VisualConcern {
                                 fill: Some(tela_contract::Fill::Solid(bg)),
                                 ..tela_contract::VisualConcern::default()
@@ -145,7 +144,7 @@ impl Select {
                         node.interact = Some(InteractConcern {
                             clickable: true,
                             hoverable: true,
-                            bind_id: Some(BindId(self.key.0.clone())),
+                            bind_id: self.bind_id.clone(),
                             ..InteractConcern::default()
                         });
                     }
@@ -182,7 +181,7 @@ impl Select {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: Some(BindId(self.key.0.clone())),
+                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -209,22 +208,28 @@ pub struct CascadeOption {
 
 /// 级联选择：触发框 + 展开时按路径逐级展示选项列（简化 AntD Cascader 面板）。
 pub struct Cascader {
-    key: SemanticKey,
     options: Vec<CascadeOption>,
     path: Vec<String>,
     expanded: bool,
     disabled: bool,
+    bind_id: Option<BindId>,
+}
+
+impl Default for Cascader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cascader {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建 Cascader；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             options: Vec::new(),
             path: Vec::new(),
             expanded: false,
             disabled: false,
+            bind_id: None,
         }
     }
 
@@ -249,6 +254,12 @@ impl Cascader {
     /// 设置禁用。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
         self
     }
 
@@ -286,10 +297,6 @@ impl Cascader {
             self.disabled,
             false,
         )
-        .identity(IdentityConcern {
-            semantic_key: Some(self.key.clone()),
-            ..IdentityConcern::default()
-        })
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(180.0)),
             height: Some(tela_contract::Size::fixed(28.0)),
@@ -354,12 +361,24 @@ impl Cascader {
                 .into();
             children.push(panel);
         }
-        LayoutContainer::stack(children)
+        let mut node: UiNode = LayoutContainer::stack(children)
             .layout(LayoutConcern {
                 width: Some(tela_contract::Size::fixed(180.0)),
                 ..LayoutConcern::default()
             })
-            .into()
+            .into();
+        if !self.disabled
+            && let Some(trigger) = node.children.first_mut()
+        {
+            trigger.interact = Some(InteractConcern {
+                clickable: true,
+                hoverable: true,
+                focusable: true,
+                bind_id: self.bind_id,
+                ..InteractConcern::default()
+            });
+        }
+        node
     }
 }
 
@@ -376,7 +395,7 @@ mod tests {
 
     #[test]
     fn select_shows_selected_label() {
-        let node = Select::new("s")
+        let node = Select::new()
             .options(vec![
                 OptionItem {
                     value: "a".into(),
@@ -398,7 +417,7 @@ mod tests {
 
     #[test]
     fn select_expanded_adds_popup() {
-        let node = Select::new("s")
+        let node = Select::new()
             .options(vec![OptionItem {
                 value: "a".into(),
                 label: "A".into(),
@@ -410,7 +429,7 @@ mod tests {
 
     #[test]
     fn cascader_builds_breadcrumb() {
-        let node = super::Cascader::new("c")
+        let node = super::Cascader::new()
             .options(vec![CascadeOption {
                 value: "province".into(),
                 label: "浙江省".into(),

@@ -1,28 +1,32 @@
 //! `Input` / `InputNumber` 组件（AntD 简化）：文本/数字输入框，受控值 + 占位符。
 
-use tela_contract::{
-    BindId, Color, IdentityConcern, InteractConcern, LayoutConcern, SemanticKey, UiNode,
-};
+use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, UiNode};
 use tela_core::LayoutContainer;
 
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
 
 /// 文本输入框。
 pub struct Input {
-    key: SemanticKey,
     value: String,
     placeholder: String,
+    bind_id: Option<BindId>,
     disabled: bool,
     focused: bool,
 }
 
+impl Default for Input {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Input {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建 Input；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             value: String::new(),
             placeholder: String::new(),
+            bind_id: None,
             disabled: false,
             focused: false,
         }
@@ -40,6 +44,12 @@ impl Input {
         self
     }
 
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
+        self
+    }
+
     /// 设置禁用。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
@@ -52,12 +62,6 @@ impl Input {
         self
     }
 
-    /// 从视图状态仓库读取聚焦态。
-    pub fn view_state(mut self, store: &tela_core::ViewStateStore) -> Self {
-        self.focused = store.current_focus_key() == Some(&self.key);
-        self
-    }
-
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let shown = if self.value.is_empty() {
@@ -66,10 +70,6 @@ impl Input {
             text(&self.value, 13.0, TEXT)
         };
         let mut node: UiNode = field_box(vec![shown], 180.0, 28.0, self.disabled, self.focused)
-            .identity(IdentityConcern {
-                semantic_key: Some(self.key.clone()),
-                ..IdentityConcern::default()
-            })
             .layout(LayoutConcern {
                 width: Some(tela_contract::Size::fixed(180.0)),
                 height: Some(tela_contract::Size::fixed(28.0)),
@@ -83,7 +83,7 @@ impl Input {
                 hoverable: true,
                 focusable: true,
                 text_input: true,
-                bind_id: Some(BindId(self.key.0.clone())),
+                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -99,24 +99,30 @@ impl From<Input> for UiNode {
 
 /// 数字输入框：值 + 步进箭头（▲▼），受控数字。
 pub struct InputNumber {
-    key: SemanticKey,
     value: f64,
     min: f64,
     max: f64,
     step: f64,
     disabled: bool,
+    bind_id: Option<BindId>,
+}
+
+impl Default for InputNumber {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InputNumber {
-    /// 用稳定 key 构建。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建数字 Input；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             value: 0.0,
             min: f64::NEG_INFINITY,
             max: f64::INFINITY,
             step: 1.0,
             disabled: false,
+            bind_id: None,
         }
     }
 
@@ -145,6 +151,12 @@ impl InputNumber {
         self
     }
 
+    /// 设置业务数据绑定；它不参与节点 identity。
+    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
+        self.bind_id = Some(BindId(bind_id.into()));
+        self
+    }
+
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let value_text = if self.value.fract() == 0.0 {
@@ -169,10 +181,6 @@ impl InputNumber {
             self.disabled,
             false,
         )
-        .identity(IdentityConcern {
-            semantic_key: Some(self.key.clone()),
-            ..IdentityConcern::default()
-        })
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(120.0)),
             height: Some(tela_contract::Size::fixed(28.0)),
@@ -187,7 +195,7 @@ impl InputNumber {
                 hoverable: true,
                 focusable: true,
                 text_input: true,
-                bind_id: Some(BindId(self.key.0.clone())),
+                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -208,7 +216,7 @@ mod tests {
 
     #[test]
     fn input_shows_placeholder_when_empty() {
-        let node = Input::new("name").placeholder("请输入").into_node();
+        let node = Input::new().placeholder("请输入").into_node();
         let shown = &node.children[0];
         assert!(matches!(
             shown.content,
@@ -218,7 +226,7 @@ mod tests {
 
     #[test]
     fn input_shows_value_when_present() {
-        let node = Input::new("name").value("张三").into_node();
+        let node = Input::new().value("张三").into_node();
         let shown = &node.children[0];
         assert!(matches!(
             shown.content,
@@ -228,7 +236,7 @@ mod tests {
 
     #[test]
     fn input_number_formats_integer_without_fraction() {
-        let node = InputNumber::new("n").value(42.0).into_node();
+        let node = InputNumber::new().value(42.0).into_node();
         let shown = &node.children[0];
         assert!(matches!(
             shown.content,

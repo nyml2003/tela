@@ -186,6 +186,8 @@ fn view_state_store_slots() {
 fn virtual_list(children: Vec<UiNode>) -> UiNode {
     LayoutContainer::virtual_list(
         VirtualListSpec {
+            total_items: 1000,
+            first_item_index: 2,
             item_height: 30.0,
             item_spacing: 4.0,
             overscan: 2,
@@ -240,9 +242,9 @@ fn virtual_list_positions_items_and_scrolls() {
         },
     )]);
     let frame = tree.resolve(VIEWPORT, &MockMeasurer, &scrolls).unwrap();
-    // item 定高摆位：y = i × (30+4)；滚动平移 -70。
-    assert_eq!(frame.commands[0].geometry.y, -70.0);
-    assert_eq!(frame.commands[1].geometry.y, -36.0);
+    // item 定高摆位：y = (first_item_index + i) × (30+4)；滚动平移 -70。
+    assert_eq!(frame.commands[0].geometry.y, -2.0);
+    assert_eq!(frame.commands[1].geometry.y, 32.0);
     // 视口 clip（列表盒 140×70）。
     let clip = frame.commands[0].clip.expect("虚拟列表应有视口 clip");
     assert_eq!((clip.rect.w, clip.rect.h), (140.0, 70.0));

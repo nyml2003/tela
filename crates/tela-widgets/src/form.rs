@@ -1,13 +1,12 @@
 //! `Form` / `FormItem` 组件（AntD 简化）：表单容器与表单项（标签 + 控件 + 校验错误）。
 
-use tela_contract::{IdentityConcern, LayoutConcern, SemanticKey, UiNode};
-use tela_core::{LayoutContainer, ViewStateStore};
+use tela_contract::{LayoutConcern, UiNode};
+use tela_core::LayoutContainer;
 
 use crate::shared::{ERROR, TEXT, text};
 
 /// 表单项：标签（右上红星 + 文本）+ 控件 + 错误提示。
 pub struct FormItem {
-    key: SemanticKey,
     label: String,
     required: bool,
     error: Option<String>,
@@ -15,10 +14,9 @@ pub struct FormItem {
 }
 
 impl FormItem {
-    /// 用稳定 key 构建表单项。
-    pub fn new(key: impl Into<String>, control: UiNode) -> Self {
+    /// 构建表单项；identity 由 `tela-core` 默认策略生成。
+    pub fn new(control: UiNode) -> Self {
         Self {
-            key: SemanticKey(key.into()),
             label: String::new(),
             required: false,
             error: None,
@@ -72,10 +70,6 @@ impl FormItem {
             column.push(text(&error, 12.0, ERROR));
         }
         LayoutContainer::flex(column)
-            .identity(IdentityConcern {
-                semantic_key: Some(self.key),
-                ..IdentityConcern::default()
-            })
             .layout(LayoutConcern {
                 direction: tela_contract::FlexDirection::Column,
                 gap: 2.0,
@@ -93,16 +87,20 @@ impl From<FormItem> for UiNode {
 
 /// 表单容器：纵向排列表单项（子项校验状态由宿主提供）。
 pub struct Form {
-    key: SemanticKey,
     items: Vec<UiNode>,
     gap: f32,
 }
 
+impl Default for Form {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Form {
-    /// 用稳定 key 构建表单。
-    pub fn new(key: impl Into<String>) -> Self {
+    /// 构建表单；identity 由 `tela-core` 默认策略生成。
+    pub fn new() -> Self {
         Self {
-            key: SemanticKey(key.into()),
             items: Vec::new(),
             gap: 8.0,
         }
@@ -123,10 +121,6 @@ impl Form {
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         LayoutContainer::flex(self.items)
-            .identity(IdentityConcern {
-                semantic_key: Some(self.key),
-                ..IdentityConcern::default()
-            })
             .layout(LayoutConcern {
                 direction: tela_contract::FlexDirection::Column,
                 gap: self.gap,
@@ -142,9 +136,6 @@ impl From<Form> for UiNode {
     }
 }
 
-/// 从视图状态读取控件选中/聚焦（供组件联动；当前为占位约定，各控件各自实现）。
-pub fn _form_view_state(_store: &ViewStateStore) {}
-
 #[cfg(test)]
 mod tests {
     use super::{Form, FormItem};
@@ -153,8 +144,8 @@ mod tests {
 
     #[test]
     fn form_item_lays_out_label_control_error() {
-        let control = Input::new("name").value("x").into_node();
-        let node = FormItem::new("name", control)
+        let control = Input::new().value("x").into_node();
+        let node = FormItem::new(control)
             .label("姓名")
             .required(true)
             .error("必填")
@@ -178,17 +169,9 @@ mod tests {
 
     #[test]
     fn form_stacks_items_vertically() {
-        let form = Form::new("f")
-            .item(
-                FormItem::new("a", Input::new("a").into_node())
-                    .label("A")
-                    .into(),
-            )
-            .item(
-                FormItem::new("b", Input::new("b").into_node())
-                    .label("B")
-                    .into(),
-            );
+        let form = Form::new()
+            .item(FormItem::new(Input::new().into_node()).label("A").into())
+            .item(FormItem::new(Input::new().into_node()).label("B").into());
         let node = form.into_node();
         assert_eq!(node.children.len(), 2);
         assert_eq!(

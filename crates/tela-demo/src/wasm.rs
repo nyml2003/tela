@@ -183,6 +183,20 @@ pub fn pointer_move(x: f32, y: f32) -> u32 {
     })
 }
 
+/// 浏览器注入的滚轮事件；命中哪个滚动容器由 tela-core 统一决定。
+#[wasm_bindgen]
+pub fn pointer_scroll(x: f32, y: f32, delta_x: f32, delta_y: f32) -> u32 {
+    crate::with_app(|app| {
+        app.handle_pointer(tela_contract::PointerEvent::Scroll {
+            position: tela_contract::Point { x, y },
+            delta: tela_contract::Point {
+                x: delta_x,
+                y: delta_y,
+            },
+        })
+    })
+}
+
 /// 当前 Input 是否为 tela-core 焦点；浏览器据此接管原生键盘与 IME 输入。
 #[wasm_bindgen]
 pub fn input_focused() -> bool {

@@ -805,7 +805,12 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         children: Vec<LayoutBox>,
     ) -> Result<LayoutBox, UiLayoutError> {
         let layout = node.layout.as_ref().cloned().unwrap_or_default();
-        let content_h = children.len() as f32 * (spec.item_height + spec.item_spacing);
+        let content_h = if spec.total_items == 0 {
+            0.0
+        } else {
+            spec.total_items as f32 * spec.item_height
+                + (spec.total_items - 1) as f32 * spec.item_spacing
+        };
         let content_w = children.iter().map(|c| c.w).fold(0.0, f32::max);
         let self_w = self.resolve_self_axis(
             node,
@@ -835,7 +840,9 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         for (index, mut cb) in children.into_iter().enumerate() {
             let margin = margin_of(&node.children[index]);
             cb.x = origin_x + margin.left;
-            cb.y = index as f32 * (spec.item_height + spec.item_spacing) + margin.top;
+            cb.y = (spec.first_item_index as usize + index) as f32
+                * (spec.item_height + spec.item_spacing)
+                + margin.top;
             placed.push(cb);
         }
         box_.children = placed;

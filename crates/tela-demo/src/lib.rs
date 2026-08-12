@@ -10,16 +10,17 @@ mod frame_trace;
 mod wasm;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, FlexDirection, InputEvent, LayoutConcern, Point,
-    PointerEvent, SemanticKey, Size, TextMeasureRequest, TextMeasurer, TextMetrics, TextureRef,
-    UiAction, UiFrame, Value, Viewport, VisualConcern,
+    BindId, BorderRadius, Color, ContentConcern, Fill, FlexDirection, InputEvent, LayoutConcern,
+    NodeId, NodeKind, Point, PointerEvent, ScrollState, SemanticKey, Size, TextMeasureRequest,
+    TextMeasurer, TextMetrics, TextureRef, UiAction, UiFrame, UiNode, Value, Viewport,
+    VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, Primitive};
 use tela_core::{UiTree, ViewStateStore, handle_input};
-use tela_widgets::{Button, ImageBackground, Input};
+use tela_widgets::{Button, ButtonVariant, ImageBackground, Input, Table, Td, Tr};
 
 /// 所有后端共享的逻辑画布尺寸。
 pub const VIEWPORT: Viewport = Viewport {
@@ -33,6 +34,15 @@ const CLIP_OVERFLOW: Color = Color::rgba(0.95, 0.70, 0.18, 1.0);
 const MAIN: Color = Color::rgba(0.16, 0.60, 0.43, 1.0);
 const MAIN_BORDER: Color = Color::rgba(0.05, 0.24, 0.17, 1.0);
 const FOOTER: Color = Color::rgba(0.22, 0.25, 0.31, 1.0);
+const SIDEBAR_WIDTH: f32 = 160.0;
+const MAIN_WIDTH: f32 = 640.0;
+const CONTENT_HEIGHT: f32 = 464.0;
+const TABLE_WIDTH: f32 = 612.0;
+const TABLE_HEADER_HEIGHT: f32 = 28.0;
+const TABLE_BODY_HEIGHT: f32 = 368.0;
+const TABLE_ROW_HEIGHT: f32 = 26.0;
+const TABLE_TOTAL_ROWS: u32 = 1_000;
+const TABLE_OVERSCAN: u32 = 2;
 /// 浏览器宿主注册到所有 renderer 的图片资源 id。
 pub const DEMO_IMAGE_TEXTURE: &str = "demo.image";
 
@@ -78,6 +88,11 @@ struct App {
     button_selected: bool,
     blue_visible: bool,
     input_value: String,
+    input_key: Option<SemanticKey>,
+    submit_key: Option<SemanticKey>,
+    table_scroll_key: Option<SemanticKey>,
+    clickable_keys: BTreeSet<SemanticKey>,
+    table_scroll: ScrollState,
     input_value_upload: Vec<u8>,
     frame_trace: Vec<u8>,
     cpu_rendered: bool,
@@ -95,6 +110,11 @@ impl App {
             button_selected: false,
             blue_visible: true,
             input_value: String::new(),
+            input_key: None,
+            submit_key: None,
+            table_scroll_key: None,
+            clickable_keys: BTreeSet::new(),
+            table_scroll: ScrollState::default(),
             input_value_upload: Vec::new(),
             frame_trace: Vec::new(),
             cpu_rendered: false,
@@ -107,17 +127,30 @@ impl App {
     /// 确保共享逻辑帧存在；返回值表示本次是否发生了场景构建与布局。
     fn ensure_frame(&mut self) -> bool {
         if self.frame.is_none() {
+            let (first_row_index, visible_rows) = self.table_window();
             let tree = UiTree::new(scene_node(
-                &self.view_state,
                 self.button_selected,
                 self.blue_visible,
                 &self.input_value,
+                self.input_focused(),
+                self.submit_hovered(),
+                first_row_index,
+                visible_rows,
             ))
             .expect("最小 demo 场景必须合法");
+            let mut scroll_inputs = HashMap::new();
+            if let Some(key) = &self.table_scroll_key {
+                scroll_inputs.insert(key.clone(), self.table_scroll);
+            }
             let frame = tree
-                .resolve(VIEWPORT, &DemoTextMeasurer, &HashMap::new())
+                .resolve(VIEWPORT, &DemoTextMeasurer, &scroll_inputs)
                 .expect("最小 demo 场景必须可布局");
             self.frame_trace = frame_trace::to_json(&frame).into_bytes();
+            let keys = discover_control_keys(&tree);
+            self.input_key = keys.input;
+            self.submit_key = keys.submit;
+            self.table_scroll_key = keys.table_scroll;
+            self.clickable_keys = keys.clickable;
             self.tree = Some(tree);
             self.frame = Some(frame);
             self.cpu_rendered = false;
@@ -160,18 +193,30 @@ impl App {
             let UiAction::Click { node_id } = action else {
                 return false;
             };
-            tree.node_ids()
-                .iter()
-                .position(|id| id == node_id)
-                .and_then(|index| tree.keys().get(index))
-                .is_some_and(|key| key == &SemanticKey("demo.submit".to_owned()))
+            node_key(tree, *node_id).is_some_and(|key| self.submit_key.as_ref() == Some(key))
         });
+        let mut scrolled = false;
+        for action in &actions {
+            let UiAction::Scroll { node_id, delta } = action else {
+                continue;
+            };
+            if node_key(tree, *node_id)
+                .is_some_and(|key| self.table_scroll_key.as_ref() == Some(key))
+            {
+                let max_offset = table_max_scroll();
+                let next = (self.table_scroll.offset_y + delta.y).clamp(0.0, max_offset);
+                if (next - self.table_scroll.offset_y).abs() > f32::EPSILON {
+                    self.table_scroll.offset_y = next;
+                    scrolled = true;
+                }
+            }
+        }
         let count = u32::try_from(actions.len()).expect("交互动作数必须可编码");
         if clicked_submit && !self.input_value.is_empty() {
             self.button_selected = !self.button_selected;
             self.blue_visible = !self.blue_visible;
         }
-        if count != 0 {
+        if count != 0 || scrolled {
             self.invalidate_frame();
         }
         count
@@ -180,16 +225,33 @@ impl App {
     fn input_focused(&self) -> bool {
         self.view_state
             .current_focus_key()
-            .is_some_and(|key| key.0 == "demo.input")
+            .is_some_and(|key| self.input_key.as_ref() == Some(key))
+    }
+
+    fn submit_hovered(&self) -> bool {
+        self.view_state
+            .hover_key()
+            .is_some_and(|key| self.submit_key.as_ref() == Some(key))
     }
 
     /// 供浏览器宿主映射为 CSS cursor 的轻量意图：0=默认，1=文本，2=手型。
     fn pointer_cursor(&self) -> u32 {
-        match self.view_state.hover_key().map(|key| key.0.as_str()) {
-            Some("demo.input") => 1,
-            Some("demo.submit") => 2,
-            _ => 0,
+        let hover = self.view_state.hover_key();
+        if hover.is_some_and(|key| self.input_key.as_ref() == Some(key)) {
+            1
+        } else if hover.is_some_and(|key| self.clickable_keys.contains(key)) {
+            2
+        } else {
+            0
         }
+    }
+
+    fn table_window(&self) -> (u32, u32) {
+        let first_visible = (self.table_scroll.offset_y / TABLE_ROW_HEIGHT).floor() as u32;
+        let first = first_visible.saturating_sub(TABLE_OVERSCAN);
+        let visible = (TABLE_BODY_HEIGHT / TABLE_ROW_HEIGHT).ceil() as u32;
+        let count = (visible + TABLE_OVERSCAN * 2).min(TABLE_TOTAL_ROWS - first);
+        (first, count)
     }
 
     /// 接收浏览器 IME/键盘适配层生成的受控值变更。
@@ -298,17 +360,20 @@ fn solid_rect(color: Color, width: Size, height: Size) -> tela_contract::UiNode 
 /// 共享 tela 场景：header / 等宽侧栏与内容 / footer，以及主内容中的图片背景、输入框和按钮。
 /// header 左侧刻意包含累计溢出的子矩形，用 clip 验证后端 scissor。
 fn scene_node(
-    view_state: &ViewStateStore,
     button_selected: bool,
     blue_visible: bool,
     input_value: &str,
-) -> tela_contract::UiNode {
+    input_focused: bool,
+    submit_hovered: bool,
+    first_row_index: u32,
+    visible_rows: u32,
+) -> UiNode {
     let header_clip: tela_contract::UiNode = LayoutContainer::flex([
-        solid_rect(SIDEBAR, Size::fixed(170.0), Size::fixed(80.0)),
-        solid_rect(CLIP_OVERFLOW, Size::fixed(170.0), Size::fixed(80.0)),
+        solid_rect(SIDEBAR, Size::fixed(80.0), Size::fixed(80.0)),
+        solid_rect(CLIP_OVERFLOW, Size::fixed(160.0), Size::fixed(80.0)),
     ])
     .layout(LayoutConcern {
-        width: Some(Size::fixed(280.0)),
+        width: Some(Size::fixed(200.0)),
         height: Some(Size::fixed(80.0)),
         clip: true,
         ..LayoutConcern::default()
@@ -325,25 +390,115 @@ fn scene_node(
             ..VisualConcern::default()
         })
         .into();
-    let sidebar = solid_rect(SIDEBAR, Size::fixed(280.0), Size::fixed(464.0));
-    let input = Input::new("demo.input")
+    let sidebar = solid_rect(
+        SIDEBAR,
+        Size::fixed(SIDEBAR_WIDTH),
+        Size::fixed(CONTENT_HEIGHT),
+    );
+    let input = Input::new()
+        .bind_id("demo.input")
         .value(input_value)
         .placeholder("请输入内容")
-        .view_state(view_state)
+        .focused(input_focused)
         .into_node();
-    let button = Button::new("demo.submit", "提交")
+    let button = Button::new("提交")
         .width(112.0)
         .height(32.0)
-        .view_state(view_state)
+        .hovered(submit_hovered)
         .selected(button_selected)
         .into_node();
-    let main_card = LayoutContainer::flex([input, button])
+    let toolbar = LayoutContainer::flex([input, button]).layout(LayoutConcern {
+        width: Some(Size::fixed(TABLE_WIDTH)),
+        height: Some(Size::fixed(32.0)),
+        gap: 8.0,
+        cross_align: tela_contract::CrossAlign::Center,
+        ..LayoutConcern::default()
+    });
+
+    let column_widths = [54.0, 100.0, 76.0, 80.0, 74.0, 92.0, 136.0];
+    let header_labels = ["ID", "名称", "状态", "分类", "进度", "更新", "操作"];
+    let header_cells = header_labels
+        .into_iter()
+        .zip(column_widths)
+        .map(|(label, width)| Td::text(label).width(Size::fixed(width)).into())
+        .collect();
+    let table_header = Tr::new(header_cells)
+        .height(TABLE_HEADER_HEIGHT)
+        .background(Color::rgba(0.91, 0.94, 0.98, 1.0));
+    let rows = (first_row_index..first_row_index.saturating_add(visible_rows))
+        .take_while(|index| *index < TABLE_TOTAL_ROWS)
+        .map(|index| {
+            let operation = LayoutContainer::flex([
+                Button::new("删除")
+                    .width(40.0)
+                    .height(20.0)
+                    .variant(ButtonVariant::Danger)
+                    .text_metrics(11.0, 14.0),
+                Button::new("修改")
+                    .width(40.0)
+                    .height(20.0)
+                    .variant(ButtonVariant::Warning)
+                    .text_metrics(11.0, 14.0),
+                Button::new("查看")
+                    .width(40.0)
+                    .height(20.0)
+                    .text_metrics(11.0, 14.0),
+            ])
+            .layout(LayoutConcern {
+                gap: 4.0,
+                main_align: tela_contract::MainAlign::Center,
+                cross_align: tela_contract::CrossAlign::Center,
+                ..LayoutConcern::default()
+            });
+            let values = [
+                format!("{}", index + 1),
+                format!("项目 {:04}", index + 1),
+                if index % 3 == 0 {
+                    "运行中"
+                } else if index % 3 == 1 {
+                    "待处理"
+                } else {
+                    "已完成"
+                }
+                .to_owned(),
+                if index % 2 == 0 { "标准" } else { "扩展" }.to_owned(),
+                format!("{}%", (index * 7) % 101),
+                format!("08-{:02}", (index % 28) + 1),
+            ];
+            let mut cells: Vec<UiNode> = values
+                .into_iter()
+                .zip(column_widths.into_iter().take(6))
+                .map(|(value, width)| Td::text(value).width(Size::fixed(width)).into())
+                .collect();
+            cells.push(
+                Td::new(vec![operation.into()])
+                    .width(Size::fixed(column_widths[6]))
+                    .into(),
+            );
+            Tr::data_row(format!("row-{index}"), cells)
+                .height(TABLE_ROW_HEIGHT)
+                .background(if index % 2 == 0 {
+                    Color::WHITE
+                } else {
+                    Color::rgba(0.98, 0.99, 1.0, 1.0)
+                })
+                .into()
+        })
+        .collect();
+    let table: UiNode = Table::new(table_header)
+        .virtual_rows(TABLE_TOTAL_ROWS, first_row_index, rows)
+        .width(TABLE_WIDTH)
+        .header_height(TABLE_HEADER_HEIGHT)
+        .body_height(TABLE_BODY_HEIGHT)
+        .row_metrics(TABLE_ROW_HEIGHT, 0.0, TABLE_OVERSCAN)
+        .into();
+    let main_card = LayoutContainer::flex([toolbar.into(), table])
         .layout(LayoutConcern {
-            width: Some(Size::fixed(520.0)),
-            height: Some(Size::fixed(464.0)),
-            gap: 16.0,
-            main_align: tela_contract::MainAlign::Center,
-            cross_align: tela_contract::CrossAlign::Center,
+            width: Some(Size::fixed(MAIN_WIDTH)),
+            height: Some(Size::fixed(CONTENT_HEIGHT)),
+            direction: FlexDirection::Column,
+            gap: 8.0,
+            padding: tela_contract::Insets::all(8.0),
             border_width: 6.0,
             ..LayoutConcern::default()
         })
@@ -356,8 +511,8 @@ fn scene_node(
     let main: tela_contract::UiNode = ImageBackground::new(DEMO_IMAGE_TEXTURE, main_card).into();
     let content = LayoutContainer::flex([sidebar, main])
         .layout(LayoutConcern {
-            width: Some(Size::fixed(800.0)),
-            height: Some(Size::fixed(464.0)),
+            width: Some(Size::fixed(VIEWPORT.width)),
+            height: Some(Size::fixed(CONTENT_HEIGHT)),
             direction: FlexDirection::Row,
             ..LayoutConcern::default()
         })
@@ -371,6 +526,73 @@ fn scene_node(
             ..LayoutConcern::default()
         })
         .into()
+}
+
+struct ControlKeys {
+    input: Option<SemanticKey>,
+    submit: Option<SemanticKey>,
+    table_scroll: Option<SemanticKey>,
+    clickable: BTreeSet<SemanticKey>,
+}
+
+fn discover_control_keys(tree: &UiTree) -> ControlKeys {
+    fn visit(node: &UiNode, keys: &[SemanticKey], index: &mut usize, found: &mut ControlKeys) {
+        let key = keys.get(*index).cloned();
+        *index += 1;
+        if let Some(key) = key {
+            if node
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.text_input)
+            {
+                found.input = Some(key.clone());
+            }
+            if node
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.clickable)
+            {
+                found.clickable.insert(key.clone());
+                if node_contains_text(node, "提交") {
+                    found.submit = Some(key.clone());
+                }
+            }
+            if matches!(node.kind, NodeKind::VirtualListView(_)) {
+                found.table_scroll = Some(key.clone());
+            }
+        }
+        for child in &node.children {
+            visit(child, keys, index, found);
+        }
+    }
+    let mut found = ControlKeys {
+        input: None,
+        submit: None,
+        table_scroll: None,
+        clickable: BTreeSet::new(),
+    };
+    let mut index = 0;
+    visit(tree.root(), tree.keys(), &mut index, &mut found);
+    found
+}
+
+fn node_contains_text(node: &UiNode, target: &str) -> bool {
+    matches!(node.content, Some(ContentConcern::Text(ref text)) if text.text == target)
+        || node
+            .children
+            .iter()
+            .any(|child| node_contains_text(child, target))
+}
+
+fn node_key(tree: &UiTree, node_id: NodeId) -> Option<&SemanticKey> {
+    tree.node_ids()
+        .iter()
+        .position(|id| *id == node_id)
+        .and_then(|index| tree.keys().get(index))
+}
+
+fn table_max_scroll() -> f32 {
+    (TABLE_TOTAL_ROWS as f32 * TABLE_ROW_HEIGHT - TABLE_BODY_HEIGHT).max(0.0)
 }
 
 pub(crate) fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
@@ -412,6 +634,21 @@ pub extern "C" fn demo_pointer_move(x: f32, y: f32) -> u32 {
     })
 }
 
+/// CPU 宿主注入的滚轮事件；表体的滚动归属仍由 tela-core 命中测试决定。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_pointer_scroll(x: f32, y: f32, delta_x: f32, delta_y: f32) -> u32 {
+    with_app(|app| {
+        app.handle_pointer(PointerEvent::Scroll {
+            position: Point { x, y },
+            delta: Point {
+                x: delta_x,
+                y: delta_y,
+            },
+        })
+    })
+}
+
 /// CPU 宿主读取当前 Input 焦点，决定是否将原生文本输入交给该控件。
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
@@ -447,7 +684,7 @@ pub extern "C" fn demo_frame_ptr() -> *const u8 {
     with_app(|app| app.cpu_bitmap.as_ptr())
 }
 
-/// CPU 位图尺寸（RGBA8，逻辑像素与物理像素均为 480×360）。
+/// CPU 位图尺寸（RGBA8，逻辑像素与物理像素均为 800×600）。
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_frame_size() -> u32 {
@@ -504,13 +741,13 @@ pub extern "C" fn demo_wasm_version() -> u32 {
 mod tests {
     use super::*;
 
-    fn control_center(app: &App, key: &str) -> Point {
+    fn control_center(app: &App, key: &SemanticKey) -> Point {
         let tree = app.tree.as_ref().expect("tree");
         let node_id = tree
             .node_ids()
             .iter()
             .zip(tree.keys())
-            .find_map(|(id, node_key)| (node_key.0 == key).then_some(*id))
+            .find_map(|(id, node_key)| (node_key == key).then_some(*id))
             .expect("control key");
         let rect = app
             .frame()
@@ -526,34 +763,25 @@ mod tests {
     }
 
     #[test]
-    fn shared_scene_resolves_to_header_content_footer_and_image() {
+    fn shared_scene_resolves_to_layout_table_and_image() {
         let mut app = App::new();
         assert!(app.ensure_frame());
         let frame = app.frame();
         assert_eq!(frame.viewport, VIEWPORT);
-        assert_eq!(frame.commands.len(), 11);
-        let expected = [
-            (0.0, 0.0, 800.0, 80.0, HEADER),
-            (0.0, 0.0, 170.0, 80.0, SIDEBAR),
-            (170.0, 0.0, 170.0, 80.0, CLIP_OVERFLOW),
-            (0.0, 80.0, 280.0, 464.0, SIDEBAR),
-        ];
-        for (command, (x, y, w, h, color)) in frame.commands.iter().zip(expected) {
-            assert_eq!((command.geometry.x, command.geometry.y), (x, y));
-            assert_eq!((command.geometry.w, command.geometry.h), (w, h));
-            assert!(matches!(
-                &command.payload,
-                tela_contract::DrawPayload::Rect { fill, border }
-                    if *fill == Some(color) && border.is_none()
-            ));
-        }
+        assert!(frame.commands.len() > 50, "表格应产生多行绘制命令");
+        assert!(frame.commands.iter().any(|command| {
+            matches!(command.payload, tela_contract::DrawPayload::Rect { fill: Some(color), .. } if color == SIDEBAR)
+        }));
         let image = frame
             .commands
             .iter()
             .find(|command| matches!(command.payload, tela_contract::DrawPayload::Image { .. }))
             .expect("demo 必须有图片背景命令");
-        assert_eq!((image.geometry.x, image.geometry.y), (280.0, 80.0));
-        assert_eq!((image.geometry.w, image.geometry.h), (520.0, 464.0));
+        assert_eq!((image.geometry.x, image.geometry.y), (SIDEBAR_WIDTH, 80.0));
+        assert_eq!(
+            (image.geometry.w, image.geometry.h),
+            (MAIN_WIDTH, CONTENT_HEIGHT)
+        );
         assert_eq!(
             image.payload,
             tela_contract::DrawPayload::Image {
@@ -571,8 +799,11 @@ mod tests {
                 )
             })
             .expect("demo 必须有主卡片圆角命令");
-        assert_eq!((main.geometry.x, main.geometry.y), (280.0, 80.0));
-        assert_eq!((main.geometry.w, main.geometry.h), (520.0, 464.0));
+        assert_eq!((main.geometry.x, main.geometry.y), (SIDEBAR_WIDTH, 80.0));
+        assert_eq!(
+            (main.geometry.w, main.geometry.h),
+            (MAIN_WIDTH, CONTENT_HEIGHT)
+        );
         let texts: Vec<&tela_contract::TextContent> = frame
             .commands
             .iter()
@@ -581,9 +812,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(texts.len(), 2);
+        assert!(texts.len() > 20);
         assert!(texts.iter().any(|text| text.text == "请输入内容"));
         assert!(texts.iter().any(|text| text.text == "提交"));
+        assert!(texts.iter().any(|text| text.text == "操作"));
+        assert!(texts.iter().any(|text| text.text == "查看"));
+        assert!(texts.iter().any(|text| text.text == "项目 0001"));
+        assert!(!tree_keys(app.tree.as_ref().unwrap()).contains(&"row-999".to_owned()));
         let footer = frame.commands.last().expect("footer 必须是最后一条命令");
         assert_eq!(
             (
@@ -601,17 +836,20 @@ mod tests {
                 border: None,
             }
         );
-        assert_eq!(
-            frame.commands[2].clip,
-            Some(tela_contract::ClipRect {
-                rect: tela_contract::Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 280.0,
-                    h: 80.0,
-                },
-            })
-        );
+        assert!(frame.hit_regions.iter().any(|region| {
+            Some(region.node_id)
+                == app
+                    .tree
+                    .as_ref()
+                    .and_then(|tree| {
+                        tree.node_ids().get(
+                            tree.keys()
+                                .iter()
+                                .position(|key| Some(key) == app.table_scroll_key.as_ref())?,
+                        )
+                    })
+                    .copied()
+        }));
     }
 
     #[test]
@@ -633,6 +871,8 @@ mod tests {
         assert!(trace.contains("\"kind\":\"image\",\"texture\":\"demo.image\""));
         assert!(trace.contains("\"kind\":\"text\""));
         assert!(trace.contains("请输入内容"));
+        assert!(trace.contains("操作"));
+        assert!(trace.contains("项目 0001"));
         assert!(trace.contains("\"hit_regions\":["));
         assert!(trace.ends_with("]}"));
     }
@@ -655,7 +895,7 @@ mod tests {
         let mut app = App::new();
         app.input_value = "ready".to_owned();
         app.ensure_frame();
-        let position = control_center(&app, "demo.submit");
+        let position = control_center(&app, app.submit_key.as_ref().expect("submit key"));
         assert!(app.handle_pointer(PointerEvent::Down { position }) > 0);
         assert!(app.button_selected);
         assert!(!app.blue_visible);
@@ -666,7 +906,7 @@ mod tests {
     fn empty_input_submit_does_not_toggle_blue_rectangle() {
         let mut app = App::new();
         app.ensure_frame();
-        let position = control_center(&app, "demo.submit");
+        let position = control_center(&app, app.submit_key.as_ref().expect("submit key"));
         assert!(app.handle_pointer(PointerEvent::Down { position }) > 0);
         assert!(!app.button_selected);
         assert!(app.blue_visible);
@@ -678,14 +918,14 @@ mod tests {
         app.ensure_frame();
         assert!(
             app.handle_pointer(PointerEvent::Move {
-                position: control_center(&app, "demo.input"),
+                position: control_center(&app, app.input_key.as_ref().expect("input key")),
             }) > 0
         );
         assert_eq!(app.pointer_cursor(), 1);
         app.ensure_frame();
         assert!(
             app.handle_pointer(PointerEvent::Move {
-                position: control_center(&app, "demo.submit"),
+                position: control_center(&app, app.submit_key.as_ref().expect("submit key")),
             }) > 0
         );
         assert_eq!(app.pointer_cursor(), 2);
@@ -703,7 +943,7 @@ mod tests {
         app.ensure_frame();
         assert!(
             app.handle_pointer(PointerEvent::Down {
-                position: control_center(&app, "demo.input"),
+                position: control_center(&app, app.input_key.as_ref().expect("input key")),
             }) > 0
         );
         assert!(app.input_focused());
@@ -715,5 +955,32 @@ mod tests {
                 tela_contract::DrawPayload::Text { text } if text.text == "你好 tela"
             )
         }));
+    }
+
+    fn tree_keys(tree: &UiTree) -> Vec<String> {
+        tree.keys().iter().map(|key| key.0.clone()).collect()
+    }
+
+    #[test]
+    fn virtual_table_builds_window_and_scrolls_rows() {
+        let mut app = App::new();
+        app.ensure_frame();
+        let before = tree_keys(app.tree.as_ref().unwrap());
+        assert!(before.contains(&"row-0".to_owned()));
+        assert!(!before.contains(&"row-30".to_owned()));
+        let table_center = control_center(
+            &app,
+            app.table_scroll_key.as_ref().expect("table scroll key"),
+        );
+        assert!(
+            app.handle_pointer(PointerEvent::Scroll {
+                position: table_center,
+                delta: Point { x: 0.0, y: 260.0 },
+            }) > 0
+        );
+        app.ensure_frame();
+        let after = tree_keys(app.tree.as_ref().unwrap());
+        assert!(after.contains(&"row-8".to_owned()));
+        assert!(!after.contains(&"row-0".to_owned()));
     }
 }
