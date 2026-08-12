@@ -9,6 +9,7 @@ members = [
     "crates/tela-render-canvas",
     "crates/tela-render-wgpu",
     "crates/tela-widgets",
+    "crates/tela-ui",
     "crates/tela-demo",
     "crates/wgpu-mvp",
 ]
