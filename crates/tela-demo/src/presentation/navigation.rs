@@ -106,7 +106,7 @@ fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
             bottom: 0.0,
             left: indent,
         },
-        cross_align: tela_contract::CrossAlign::Center,
+        cross_align: tela_contract::CrossAlign::Baseline,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
@@ -139,7 +139,7 @@ fn scope_row(label: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
             bottom: 0.0,
             left: 0.0,
         },
-        cross_align: tela_contract::CrossAlign::Center,
+        cross_align: tela_contract::CrossAlign::Baseline,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {

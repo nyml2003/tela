@@ -27,7 +27,7 @@ mod validate;
 
 pub use builder::{LayoutContainer, LogicalContainer, Primitive};
 pub use identity::IdentityAllocator;
-pub use interact::{handle_input, restore_focus, save_focus};
+pub use interact::{ensure_modal_focus, handle_input, restore_focus, save_focus};
 pub use layout::{DefaultLayoutEngine, LayoutEngine};
 pub use state::{CursorSlot, FocusSlot, SelectionSlot, ViewStateStore};
 pub use tree::UiTree;

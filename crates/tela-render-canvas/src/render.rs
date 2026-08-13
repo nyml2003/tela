@@ -142,13 +142,13 @@ fn render_payload(
                 canvas.draw_image(geometry, texture);
             }
         }
-        DrawPayload::Text { text } => {
+        DrawPayload::Text { text, baseline_y } => {
             if caps.text {
                 canvas.fill_text(
                     &text.text,
                     &text.font,
                     geometry.x,
-                    geometry.y + text.font_size,
+                    *baseline_y,
                     text.font_size,
                     text.color,
                 );

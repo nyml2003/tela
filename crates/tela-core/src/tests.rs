@@ -4,15 +4,16 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    BaseSize, ClipRect, Color, Constraints, ContentConcern, CrossAlign, Fill, FontRef,
-    IdentityConcern, Insets, KeyStrategy, LayoutBox, LayoutConcern, MainAlign, MinMax, Rect,
-    ScrollState, SemanticKey, Size, StackAlign, StackLayer, TextContent, TextMeasureRequest,
-    TextMeasurer, TextMetrics, UiBuildError, UiLayoutError, UiNode, Viewport, VisualConcern,
+    BaseSize, ClipRect, Color, Constraints, ContentConcern, CrossAlign, Fill, FocusAppearance,
+    FontRef, IdentityConcern, Insets, InteractConcern, KeyStrategy, KeymapScopeId, LayoutBox,
+    LayoutConcern, MainAlign, MinMax, Rect, ScrollState, SemanticKey, ShortcutScopeSpec, Size,
+    StackAlign, StackLayer, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics,
+    UiBuildError, UiLayoutError, UiNode, Viewport, VisualConcern,
 };
 
-use crate::UiTree;
 use crate::builder::{LayoutContainer, LogicalContainer, Primitive};
 use crate::layout::{DefaultLayoutEngine, LayoutEngine};
+use crate::{FocusSlot, UiTree, ViewStateStore};
 
 const VIEWPORT: Viewport = Viewport {
     width: 200.0,
@@ -28,6 +29,7 @@ impl TextMeasurer for MockMeasurer {
             width: request.text.chars().count() as f32 * request.font_size * 0.5,
             height: request.line_height,
             line_count: 1,
+            first_baseline: request.font_size * 0.8,
         }
     }
 }
@@ -189,6 +191,215 @@ fn resolve_does_not_read_external_state() {
         )
         .unwrap();
     assert_eq!(a, b);
+}
+
+#[test]
+fn baseline_flex_aligns_text_and_emits_absolute_baselines() {
+    let text = |value: &str, font_size: f32, line_height: f32| -> UiNode {
+        Primitive::text(TextContent {
+            text: value.to_owned(),
+            font: FontRef("mock".to_owned()),
+            font_size,
+            line_height,
+            color: Color::BLACK,
+        })
+        .into()
+    };
+    let tree = UiTree::new(
+        LayoutContainer::flex([text("small", 10.0, 14.0), text("large", 20.0, 26.0)]).layout(
+            LayoutConcern {
+                width: Some(Size::fixed(200.0)),
+                cross_align: CrossAlign::Baseline,
+                ..LayoutConcern::default()
+            },
+        ),
+    )
+    .unwrap();
+    let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
+    let box_ = engine
+        .measure(
+            tree.root(),
+            Constraints {
+                min_w: 0.0,
+                max_w: 200.0,
+                min_h: 0.0,
+                max_h: 100.0,
+            },
+        )
+        .unwrap();
+    let left_baseline = box_.children[0].y + box_.children[0].first_baseline.unwrap();
+    let right_baseline = box_.children[1].y + box_.children[1].first_baseline.unwrap();
+    assert!(
+        (left_baseline - right_baseline).abs() < f32::EPSILON,
+        "同一 Flex 行的首行基线必须一致: {left_baseline} != {right_baseline}"
+    );
+
+    let frame = resolve(&tree);
+    let baseline_y: Vec<f32> = frame
+        .commands
+        .iter()
+        .filter_map(|command| match command.payload {
+            tela_contract::DrawPayload::Text { baseline_y, .. } => Some(baseline_y),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(baseline_y.len(), 2);
+    assert!(
+        (baseline_y[0] - baseline_y[1]).abs() < f32::EPSILON,
+        "frame 协议必须保留布局计算的绝对基线"
+    );
+}
+
+#[test]
+fn focus_ring_is_a_visual_decoration_without_new_hit_region() {
+    let mut node = rect(50.0, 20.0);
+    node.interact = Some(InteractConcern {
+        focusable: true,
+        ..InteractConcern::default()
+    });
+    let tree = UiTree::new(node).unwrap();
+    let key = tree.keys()[0].clone();
+    let plain = resolve(&tree);
+    let focused = tree
+        .resolve_with_focus(
+            VIEWPORT,
+            &MockMeasurer,
+            &HashMap::new(),
+            Some(&key),
+            Some(FocusAppearance {
+                color: Color::BLUE,
+                width: 2.0,
+                inset: 2.0,
+            }),
+        )
+        .unwrap();
+    assert_eq!(plain.hit_regions, focused.hit_regions);
+    assert_eq!(focused.commands.len(), plain.commands.len() + 1);
+    let ring = focused.commands.last().expect("焦点环命令");
+    assert_eq!(
+        ring.geometry,
+        Rect {
+            x: 2.0,
+            y: 2.0,
+            w: 46.0,
+            h: 16.0,
+        }
+    );
+    assert!(matches!(
+        ring.payload,
+        tela_contract::DrawPayload::RoundedRect {
+            fill: None,
+            border: Some(border),
+            ..
+        } if border.color == Color::BLUE && border.width == 2.0
+    ));
+}
+
+#[test]
+fn default_focus_key_survives_a_regular_tree_rebuild() {
+    let focusable = || {
+        let mut node = rect(48.0, 20.0);
+        node.interact = Some(InteractConcern {
+            focusable: true,
+            ..InteractConcern::default()
+        });
+        node
+    };
+    let first = UiTree::new(LayoutContainer::flex([focusable(), focusable()])).unwrap();
+    let (key, node_id) = first.focusable_nodes()[0].clone();
+    let mut state = ViewStateStore::new();
+    state.set_current_focus(FocusSlot {
+        node_id: Some(node_id),
+        key: Some(key.clone()),
+    });
+
+    let rebuilt = UiTree::new(LayoutContainer::flex([focusable(), focusable()])).unwrap();
+    state.reconcile_focus(&rebuilt.focusable_nodes());
+    assert_eq!(state.current_focus_key(), Some(&key));
+    assert_eq!(
+        state.current_focus().and_then(|slot| slot.node_id),
+        Some(rebuilt.focusable_nodes()[0].1),
+        "普通组件不传 focus key 时也由 core 的 AutoPath 重映射"
+    );
+}
+
+#[test]
+fn keymap_scopes_follow_the_focused_node_ancestor_order() {
+    let mut leaf = rect(48.0, 20.0);
+    leaf.interact = Some(InteractConcern {
+        focusable: true,
+        ..InteractConcern::default()
+    });
+    let tree = UiTree::new(
+        LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+            id: KeymapScopeId("outer".to_owned()),
+        })
+        .children([LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+            id: KeymapScopeId("inner".to_owned()),
+        })
+        .children([leaf])]),
+    )
+    .unwrap();
+    let focus_key = tree.focusable_nodes()[0].0.clone();
+    assert_eq!(
+        tree.keymap_scopes_for_focus(Some(&focus_key)),
+        vec![
+            KeymapScopeId("inner".to_owned()),
+            KeymapScopeId("outer".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn teleported_focus_uses_the_modal_host_keymap_chain_not_its_source_chain() {
+    let mut page_leaf = rect(48.0, 20.0);
+    page_leaf.interact = Some(InteractConcern {
+        focusable: true,
+        ..InteractConcern::default()
+    });
+    let mut teleported_leaf = rect(48.0, 20.0);
+    teleported_leaf.interact = Some(InteractConcern {
+        focusable: true,
+        ..InteractConcern::default()
+    });
+    let overlay_scope: UiNode = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+        id: KeymapScopeId("overlay".to_owned()),
+    })
+    .children([teleported_leaf])
+    .into();
+    let teleported: UiNode = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Node(tela_contract::NodeId(0)),
+    })
+    .children([overlay_scope])
+    .into();
+    let source_scope: UiNode = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+        id: KeymapScopeId("source".to_owned()),
+    })
+    .children([teleported])
+    .into();
+    let modal_host: UiNode = LogicalContainer::modal_host()
+        .children([page_leaf, source_scope])
+        .into();
+    let tree = UiTree::new(
+        LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+            id: KeymapScopeId("page".to_owned()),
+        })
+        .children([modal_host]),
+    )
+    .unwrap();
+    let focusable = tree.focusable_nodes();
+    assert_eq!(
+        tree.keymap_scopes_for_focus(Some(&focusable[0].0)),
+        vec![KeymapScopeId("page".to_owned())]
+    );
+    assert_eq!(
+        tree.keymap_scopes_for_focus(Some(&focusable[1].0)),
+        vec![
+            KeymapScopeId("overlay".to_owned()),
+            KeymapScopeId("page".to_owned())
+        ],
+        "Teleport 焦点链不得泄漏来源位置的 source 作用域"
+    );
 }
 
 // ---------- 非法树返回结构化错误 ----------

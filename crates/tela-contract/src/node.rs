@@ -1,8 +1,6 @@
 //! 节点模型：`UiNode` 与五维度槽位、`NodeKind` 与容器配置（见 003-场景树与节点模型）。
 
-use crate::{
-    BorderRadius, Color, Fill, Insets, KeyCombo, PixelOffset, ShadowSpec, ShortcutId, Size,
-};
+use crate::{BorderRadius, Color, Fill, Insets, KeymapScopeId, PixelOffset, ShadowSpec, Size};
 
 /// 结构 id：基座内部构建期分配，本帧内唯一有效（见 003-场景树与节点模型 4）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,7 +15,7 @@ pub enum NodeKind {
     IdentityScope,
     /// 逻辑容器：焦点作用域，声明方向化 entry/exit 端口与焦点图（见 008-交互焦点与宿主接口 2.9）。
     FocusScope(FocusScopeSpec),
-    /// 逻辑容器：局部快捷键映射 `KeyCombo → ShortcutId`（见 008-交互焦点与宿主接口 2.11）。
+    /// 逻辑容器：声明应用键位表的作用域 id（映射由应用持有）。
     ShortcutScope(ShortcutScopeSpec),
     /// 逻辑容器：模态宿主，栈顶子树天然全局最上（见 006-布局引擎 4.1）。
     ModalHost,
@@ -163,20 +161,22 @@ pub struct FocusScopeSpec {
     pub focus_graph: FocusGraph,
 }
 
-/// 快捷键映射：物理组合键 → 语义动作 id（见 008-交互焦点与宿主接口 2.11）。
+/// `ShortcutScope` 配置：只声明应用键位表作用域。
+///
+/// 名称为兼容既有树结构而保留；静态 `KeyCombo -> ShortcutId` 映射已经迁移到应用层
+/// `KeymapSnapshot`，不得再存入 `UiNode`。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShortcutMapping {
-    /// 物理组合键。
-    pub combo: KeyCombo,
-    /// 语义动作 id。
-    pub shortcut: ShortcutId,
+pub struct ShortcutScopeSpec {
+    /// 稳定的键位表作用域标识。
+    pub id: KeymapScopeId,
 }
 
-/// `ShortcutScope` 配置：局部快捷键映射表。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ShortcutScopeSpec {
-    /// 映射表，支持局部键位重写。
-    pub mappings: Vec<ShortcutMapping>,
+impl Default for ShortcutScopeSpec {
+    fn default() -> Self {
+        Self {
+            id: KeymapScopeId("default".to_owned()),
+        }
+    }
 }
 
 /// Teleport source 锚点（见 006-布局引擎 4.4）。

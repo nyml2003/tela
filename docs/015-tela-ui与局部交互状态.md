@@ -38,8 +38,7 @@ tela-core（值树、布局、身份、命中、焦点、ViewStateStore）
 | Business state | 宿主 Store | 已提交字段、校验、文件实体、请求结果 | 是 |
 
 - 普通组件实例由 runtime 的不可见结构路径自动定位；调用方不传 `SemanticKey`。
-- 动态集合只能由 `Table`/虚拟列表等集合组件在内部用业务稳定 ID 维持 item state；该 ID 不泄漏
-  为 tela 节点 key。
+- 动态集合由集合组件在内部决定身份策略：虚拟列表用业务稳定 ID，非虚拟的条件命令集合可只声明 core 的 `auto-stable-identity`；两者都不泄漏为调用方必须维护的 tela key。
 - 局部状态可放入显式 `CacheScope`；它是 `tela-ui` runtime 的缓存域名，不参与 core identity。
   缓存域的释放策略尚未确定，见第 6 节。
 

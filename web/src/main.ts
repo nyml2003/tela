@@ -11,8 +11,11 @@ interface GpuGlue {
   pointer_down(x: number, y: number): number;
   pointer_move(x: number, y: number): number;
   pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
+  key_down(code: number, modifierBits: number, repeat: boolean): number;
+  replace_keymap_json(json: string): number;
   pointer_cursor(): number;
   input_focused(): boolean;
+  input_focus(): number;
   input_value(): string;
   input_composition_start(): number;
   input_composition_end(): number;
@@ -32,8 +35,10 @@ interface CpuExports {
   demo_pointer_down(x: number, y: number): number;
   demo_pointer_move(x: number, y: number): number;
   demo_pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
+  demo_key_down(code: number, modifierBits: number, repeat: number): number;
   demo_pointer_cursor(): number;
   demo_input_focused(): number;
+  demo_input_focus(): number;
   demo_input_composition_start(): number;
   demo_input_composition_end(): number;
   demo_input_enter(): number;
@@ -43,6 +48,8 @@ interface CpuExports {
   demo_input_value_len(): number;
   demo_input_value_begin(bytes: number): number;
   demo_input_value_finish(bytes: number): number;
+  demo_keymap_begin(bytes: number): number;
+  demo_keymap_finish(bytes: number): number;
   demo_frame_size(): number;
   demo_frame_ptr(): number;
   demo_frame_trace_ptr(): number;
@@ -57,7 +64,9 @@ interface PointerBridge {
 }
 
 interface InteractionBridge extends PointerBridge {
+  key_down(code: number, modifierBits: number, repeat: boolean): number;
   input_focused(): boolean;
+  input_focus(): number;
   input_value(): string;
   input_composition_start(): number;
   input_composition_end(): number;
@@ -66,6 +75,37 @@ interface InteractionBridge extends PointerBridge {
   input_blur(): number;
   pointer_cursor(): number;
   set_input_value(value: string): number;
+}
+
+const MODIFIER_SHIFT = 1 << 0;
+const MODIFIER_CTRL = 1 << 1;
+const MODIFIER_ALT = 1 << 2;
+const MODIFIER_META = 1 << 3;
+
+// `KeyboardEvent.code` 表示物理位置；数值和 tela_contract::PhysicalKey 的 USB HID
+// code 一致。键位表映射可运行时替换，这个表只做浏览器平台归一化。
+const PHYSICAL_KEY_CODES: Readonly<Record<string, number>> = {
+  KeyA: 0x04, KeyB: 0x05, KeyC: 0x06, KeyD: 0x07, KeyE: 0x08, KeyF: 0x09,
+  KeyG: 0x0a, KeyH: 0x0b, KeyI: 0x0c, KeyJ: 0x0d, KeyK: 0x0e, KeyL: 0x0f,
+  KeyM: 0x10, KeyN: 0x11, KeyO: 0x12, KeyP: 0x13, KeyQ: 0x14, KeyR: 0x15,
+  KeyS: 0x16, KeyT: 0x17, KeyU: 0x18, KeyV: 0x19, KeyW: 0x1a, KeyX: 0x1b,
+  KeyY: 0x1c, KeyZ: 0x1d,
+  Digit1: 0x1e, Digit2: 0x1f, Digit3: 0x20, Digit4: 0x21, Digit5: 0x22,
+  Digit6: 0x23, Digit7: 0x24, Digit8: 0x25, Digit9: 0x26, Digit0: 0x27,
+  Enter: 0x28, Escape: 0x29, Backspace: 0x2a, Tab: 0x2b, Space: 0x2c,
+  Insert: 0x49, Home: 0x4a, PageUp: 0x4b, Delete: 0x4c, End: 0x4d,
+  PageDown: 0x4e, ArrowRight: 0x4f, ArrowLeft: 0x50, ArrowDown: 0x51, ArrowUp: 0x52,
+};
+
+function physicalKeyCode(code: string): number | undefined {
+  return PHYSICAL_KEY_CODES[code];
+}
+
+function modifierBits(event: KeyboardEvent): number {
+  return (event.shiftKey ? MODIFIER_SHIFT : 0)
+    | (event.ctrlKey ? MODIFIER_CTRL : 0)
+    | (event.altKey ? MODIFIER_ALT : 0)
+    | (event.metaKey ? MODIFIER_META : 0);
 }
 
 interface CanvasSurfaceSize {
@@ -94,7 +134,7 @@ function installPointerEvents(
   viewport: () => { width: number; height: number },
   bridge: InteractionBridge,
 ): () => void {
-  const point = (event: PointerEvent): { x: number; y: number } => {
+  const point = (event: MouseEvent): { x: number; y: number } => {
     const bounds = canvas.getBoundingClientRect();
     const logical = viewport();
     return {
@@ -112,7 +152,7 @@ function installPointerEvents(
     canvas.setPointerCapture?.(event.pointerId);
     bridge.pointer_down(position.x, position.y);
     syncCursor();
-    syncTextFocus();
+    syncTextFocus(true);
   });
   canvas.addEventListener('pointermove', (event) => {
     const position = point(event);
@@ -161,16 +201,35 @@ function installPointerEvents(
     resize: 'none',
   });
   document.body.append(editor);
-  const syncTextFocus = () => {
+  const syncTextFocus = (restoreCanvas = false) => {
     if (bridge.input_focused()) {
       if (document.activeElement !== editor) {
         editor.value = bridge.input_value();
         editor.focus({ preventScroll: true });
       }
+      bridge.input_focus();
     } else if (document.activeElement === editor) {
       editor.blur();
     }
+    if (restoreCanvas && !bridge.input_focused() && document.activeElement !== canvas) {
+      canvas.focus({ preventScroll: true });
+    }
   };
+  const dispatchCanvasKey = (event: KeyboardEvent): boolean => {
+    if (event.isComposing || bridge.input_focused()) return false;
+    const code = physicalKeyCode(event.code);
+    if (code === undefined) return false;
+    const consumed = bridge.key_down(code, modifierBits(event), event.repeat) !== 0;
+    if (consumed) {
+      event.preventDefault();
+      syncTextFocus();
+    }
+    return consumed;
+  };
+  canvas.addEventListener('keydown', dispatchCanvasKey);
+  editor.addEventListener('focus', () => {
+    bridge.input_focus();
+  });
   editor.addEventListener('input', () => {
     bridge.set_input_value(editor.value);
   });
@@ -188,6 +247,12 @@ function installPointerEvents(
       event.preventDefault();
       bridge.input_cancel();
       editor.value = bridge.input_value();
+    } else if (event.code === 'Tab' && !event.isComposing) {
+      const code = physicalKeyCode(event.code);
+      if (code !== undefined && bridge.key_down(code, modifierBits(event), event.repeat) !== 0) {
+        event.preventDefault();
+        syncTextFocus(true);
+      }
     }
   });
   editor.addEventListener('blur', () => {
@@ -244,8 +309,14 @@ function presentRaster(canvas: HTMLCanvasElement, wasm: CpuExports): void {
   const packed = wasm.demo_frame_size();
   const width = packed & 0xffff;
   const height = packed >>> 16;
+  // CSS owns the logical viewport. Raster exports physical pixels, so its
+  // backing store must match the frame before putImageData or 300x150 clips.
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
   const pixels = new Uint8ClampedArray(wasm.memory.buffer, wasm.demo_frame_ptr(), width * height * 4);
-  canvas.getContext('2d')!.putImageData(new ImageData(pixels, width, height), 0, 0);
+  const context = canvas.getContext('2d');
+  if (context === null) throw new Error('无法创建 Raster 2D canvas context');
+  context.putImageData(new ImageData(pixels, width, height), 0, 0);
 }
 
 function rasterCenterRgba(wasm: CpuExports): string {
@@ -276,6 +347,24 @@ function setRasterInputValue(wasm: CpuExports, value: string): number {
   return wasm.demo_input_value_finish(bytes.byteLength);
 }
 
+function setRasterKeymap(wasm: CpuExports, json: string): number {
+  const bytes = new TextEncoder().encode(json);
+  const ptr = wasm.demo_keymap_begin(bytes.byteLength);
+  if (bytes.byteLength > 0) {
+    new Uint8Array(wasm.memory.buffer, ptr, bytes.byteLength).set(bytes);
+  }
+  return wasm.demo_keymap_finish(bytes.byteLength);
+}
+
+function exposeKeymapReplacement(replace: (json: string) => number): void {
+  Object.assign(window, {
+    telaReplaceKeymap(snapshot: string | object): boolean {
+      const json = typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
+      return replace(json) !== 0;
+    },
+  });
+}
+
 function rasterInputValue(wasm: CpuExports): string {
   const ptr = wasm.demo_input_value_ptr();
   const len = wasm.demo_input_value_len();
@@ -298,8 +387,10 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
     pointer_down: (x, y) => wasm.demo_pointer_down(x, y),
     pointer_move: (x, y) => wasm.demo_pointer_move(x, y),
     pointer_scroll: (x, y, deltaX, deltaY) => wasm.demo_pointer_scroll(x, y, deltaX, deltaY),
+    key_down: (code, modifierBits, repeat) => wasm.demo_key_down(code, modifierBits, Number(repeat)),
     pointer_cursor: () => wasm.demo_pointer_cursor(),
     input_focused: () => wasm.demo_input_focused() !== 0,
+    input_focus: () => wasm.demo_input_focus(),
     input_value: () => rasterInputValue(wasm),
     input_composition_start: () => wasm.demo_input_composition_start(),
     input_composition_end: () => wasm.demo_input_composition_end(),
@@ -308,6 +399,7 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
     input_blur: () => wasm.demo_input_blur(),
     set_input_value: (value) => setRasterInputValue(wasm, value),
   });
+  exposeKeymapReplacement((json) => setRasterKeymap(wasm, json));
   const observer = new ResizeObserver(syncViewport);
   observer.observe(canvas);
   window.addEventListener('resize', syncViewport);
@@ -335,6 +427,7 @@ async function startGpu(canvas: HTMLCanvasElement): Promise<() => void> {
   const surfaceSize = syncGpuCanvasSize(canvas);
   await glue.start_gpu(canvas);
   const syncTextFocus = installPointerEvents(canvas, () => viewport, glue);
+  exposeKeymapReplacement((json) => glue.replace_keymap_json(json));
   observeGpuCanvasSize(canvas, (size) => {
     viewport = { width: size.logicalWidth, height: size.logicalHeight };
     glue.set_viewport(viewport.width, viewport.height);

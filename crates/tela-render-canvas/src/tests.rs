@@ -158,6 +158,7 @@ fn forwards_text_font_reference_to_canvas_host() {
                     line_height: 18.0,
                     color: Color::BLUE,
                 },
+                baseline_y: 21.0,
             },
         }],
         hit_regions: vec![],
@@ -165,6 +166,7 @@ fn forwards_text_font_reference_to_canvas_host() {
     let mut canvas = Recorder::default();
     render_frame(&mut canvas, &frame, &BackendCapabilities::full());
     assert!(canvas.calls[0].contains("tela-icons"));
+    assert!(canvas.calls[0].contains("(4,21)"));
 }
 
 #[test]

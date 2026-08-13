@@ -4,6 +4,7 @@ use crate::domain::{
     EntryFilter, EntryId, FileCommand, FileManagerModel, FileManagerSession, OperationKind,
 };
 
+pub mod keymap;
 pub mod reactive;
 pub mod runtime;
 

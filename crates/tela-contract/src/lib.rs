@@ -37,7 +37,8 @@ pub use error::{UiBuildError, UiLayoutError};
 pub use geometry::{BorderRadius, Color, Insets, PixelOffset, Point, Rect, snap};
 pub use identity::{IdentityConcern, KeyStrategy, SemanticKey, UpdateMode};
 pub use interaction::{
-    BindId, ClipboardOp, HostPorts, ImeUpdate, InputEvent, Key, KeyCombo, KeyState, Modifiers,
+    BindId, ClipboardOp, FocusAppearance, FocusDirection, HostPorts, ImeUpdate, InputEvent,
+    KeyCombo, KeyState, KeyboardIntent, KeyboardIntentEvent, KeymapScopeId, Modifiers, PhysicalKey,
     PointerEvent, RawKeyboardEvent, ShortcutId, UiAction, Value,
 };
 pub use layout::{
@@ -47,8 +48,8 @@ pub use layout::{
 pub use node::{
     ContentConcern, DrawOrder, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec,
     ImageContent, InteractConcern, LayoutConcern, NinePatchContent, NodeId, NodeKind,
-    ShortcutMapping, ShortcutScopeSpec, TeleportSource, TeleportSpec, TextContent, UiNode,
-    VirtualListSpec, VisualConcern,
+    ShortcutScopeSpec, TeleportSource, TeleportSpec, TextContent, UiNode, VirtualListSpec,
+    VisualConcern,
 };
 pub use paint::{ColorStop, Fill, Gradient, GradientKind, ShadowSpec};
 pub use resource::{FontRef, TextureId, TextureRef};

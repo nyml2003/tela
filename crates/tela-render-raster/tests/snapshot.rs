@@ -213,7 +213,10 @@ fn complex_frame() -> UiFrame {
                     h: 20.0,
                 },
                 None,
-                DrawPayload::Text { text: text.clone() },
+                DrawPayload::Text {
+                    text: text.clone(),
+                    baseline_y: 76.0,
+                },
             ),
             cmd(
                 Rect {
@@ -411,7 +414,10 @@ fn text_is_clipped_to_its_geometry() {
                 h: 16.0,
             },
             None,
-            DrawPayload::Text { text },
+            DrawPayload::Text {
+                text,
+                baseline_y: 32.0,
+            },
         )],
         hit_regions: vec![],
     };
@@ -581,7 +587,10 @@ fn text_renders_full_glyphs_at_em_scale() {
                 h: 16.8,
             },
             clip: None,
-            payload: DrawPayload::Text { text },
+            payload: DrawPayload::Text {
+                text,
+                baseline_y: 16.0,
+            },
         }],
         hit_regions: vec![],
     };
@@ -639,6 +648,7 @@ fn space_character_does_not_render_block() {
                     line_height: 15.4,
                     color: Color::WHITE,
                 },
+                baseline_y: 19.4,
             },
         }],
         hit_regions: vec![],

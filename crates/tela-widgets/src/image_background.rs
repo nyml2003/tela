@@ -72,6 +72,7 @@ mod tests {
                 width: 0.0,
                 height: 0.0,
                 line_count: 0,
+                first_baseline: 0.0,
             }
         }
     }

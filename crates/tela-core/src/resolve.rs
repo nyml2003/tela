@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    BorderStroke, ClipRect, ContentConcern, DrawCommand, DrawPayload, Fill, HitRegion, LayoutBox,
-    NodeId, NodeKind, Overflow, Point, Rect, ScrollState, SemanticKey, TextMeasurer, UiFrame,
-    UiLayoutError, UiNode, Viewport,
+    BorderRadius, BorderStroke, ClipRect, ContentConcern, DrawCommand, DrawPayload, Fill,
+    FocusAppearance, HitRegion, LayoutBox, NodeId, NodeKind, Overflow, Point, Rect, ScrollState,
+    SemanticKey, TextMeasurer, UiFrame, UiLayoutError, UiNode, Viewport,
 };
 
 use crate::layout::{DefaultLayoutEngine, LayoutEngine};
@@ -25,6 +25,8 @@ struct EmitContext<'a> {
     node_meta: HashMap<usize, (NodeId, SemanticKey)>,
     /// Teleport 提升队列：主遍历后按队列渲染（全局顶层，见 006-4.4）。
     pending_teleports: Vec<TeleportEntry>,
+    focus_key: Option<&'a SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
 }
 
 /// Teleport 提升项（节点 + 布局盒 + 祖先平移；提升后视觉独立于父布局）。
@@ -50,6 +52,18 @@ pub(crate) fn resolve_tree(
     text_measurer: &impl TextMeasurer,
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
 ) -> Result<UiFrame, UiLayoutError> {
+    resolve_tree_with_focus(tree, viewport, text_measurer, scroll_inputs, None, None)
+}
+
+/// 树 → `UiFrame`，带只读焦点外观输入。
+pub(crate) fn resolve_tree_with_focus(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &impl TextMeasurer,
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Result<UiFrame, UiLayoutError> {
     // 逻辑画布必须使用非零基数。
     if !(viewport.width > 0.0 && viewport.height > 0.0) {
         return Err(UiLayoutError::InvalidViewport {
@@ -67,7 +81,14 @@ pub(crate) fn resolve_tree(
         max_h: viewport.height,
     };
     let root_box = engine.measure(&tree.root, root_constraints)?;
-    emit_frame_tree(tree, &root_box, viewport, scroll_inputs)
+    emit_frame_tree(
+        tree,
+        &root_box,
+        viewport,
+        scroll_inputs,
+        focus_key,
+        focus_appearance,
+    )
 }
 
 /// 树 → `UiFrame`（Dirty 布局：按 key 逐节点缓存，仅脏节点重算，见 004、010-M5）。
@@ -77,6 +98,27 @@ pub(crate) fn resolve_tree_dirty(
     text_measurer: &impl TextMeasurer,
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
     cache: &mut LayoutCache,
+) -> Result<UiFrame, UiLayoutError> {
+    resolve_tree_dirty_with_focus(
+        tree,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        cache,
+        None,
+        None,
+    )
+}
+
+/// Dirty 布局版本：带只读焦点外观输入。
+pub(crate) fn resolve_tree_dirty_with_focus(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &impl TextMeasurer,
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    cache: &mut LayoutCache,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
 ) -> Result<UiFrame, UiLayoutError> {
     if !(viewport.width > 0.0 && viewport.height > 0.0) {
         return Err(UiLayoutError::InvalidViewport {
@@ -111,7 +153,14 @@ pub(crate) fn resolve_tree_dirty(
         &mut engine,
         cache,
     )?;
-    emit_frame_tree(tree, &root_box, viewport, scroll_inputs)
+    emit_frame_tree(
+        tree,
+        &root_box,
+        viewport,
+        scroll_inputs,
+        focus_key,
+        focus_appearance,
+    )
 }
 
 /// 布局盒树 → 帧生成（emit 阶段，Full/Dirty 共用）。
@@ -120,6 +169,8 @@ fn emit_frame_tree(
     root_box: &LayoutBox,
     viewport: Viewport,
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
 ) -> Result<UiFrame, UiLayoutError> {
     let (nodes, node_ids, keys) = tree.node_table();
     let node_meta = nodes
@@ -134,6 +185,8 @@ fn emit_frame_tree(
         scroll_inputs,
         node_meta,
         pending_teleports: Vec::new(),
+        focus_key,
+        focus_appearance,
     };
     emit_frame(&tree.root, root_box, &mut ctx, (0.0, 0.0), None, false);
     // Teleport 提升：主遍历后按队列渲染（顶层，见 006-4.4）。
@@ -257,6 +310,59 @@ fn emit_frame(
             expanding_teleport,
         );
     }
+    emit_focus_ring(node, box_, offset, clip, &key, ctx);
+}
+
+/// 在焦点节点子树之后追加装饰，不进入命中区或布局。
+fn emit_focus_ring(
+    node: &UiNode,
+    box_: &LayoutBox,
+    offset: (f32, f32),
+    clip: Option<ClipRect>,
+    key: &SemanticKey,
+    ctx: &mut EmitContext<'_>,
+) {
+    let Some(focus_key) = ctx.focus_key else {
+        return;
+    };
+    let Some(appearance) = ctx.focus_appearance else {
+        return;
+    };
+    if focus_key != key
+        || !node
+            .interact
+            .as_ref()
+            .is_some_and(|interact| interact.focusable)
+    {
+        return;
+    }
+    let inset = appearance.inset.max(0.0);
+    let geometry = Rect {
+        x: box_.x + offset.0 + inset,
+        y: box_.y + offset.1 + inset,
+        w: (box_.w - inset * 2.0).max(0.0),
+        h: (box_.h - inset * 2.0).max(0.0),
+    };
+    if geometry.w <= 0.0 || geometry.h <= 0.0 || appearance.width <= 0.0 {
+        return;
+    }
+    let radius = node
+        .visual
+        .as_ref()
+        .map(|visual| visual.border_radius)
+        .unwrap_or_else(|| BorderRadius::all(0.0));
+    ctx.commands.push(DrawCommand {
+        geometry,
+        clip,
+        payload: DrawPayload::RoundedRect {
+            fill: None,
+            border: Some(BorderStroke {
+                color: appearance.color,
+                width: appearance.width,
+            }),
+            radius,
+        },
+    });
 }
 
 /// draw_order 排序键：分组（InnerBottom < Normal < InnerTop）+ 组内权重，稳定排序保持树序兜底。
@@ -314,9 +420,10 @@ fn emit_draw_command(
         h: box_.h,
     };
     let payload = match (&node.kind, &node.content, &node.visual) {
-        (NodeKind::Text, Some(ContentConcern::Text(text)), _) => {
-            DrawPayload::Text { text: text.clone() }
-        }
+        (NodeKind::Text, Some(ContentConcern::Text(text)), _) => DrawPayload::Text {
+            text: text.clone(),
+            baseline_y: geometry.y + box_.first_baseline.unwrap_or(text.font_size),
+        },
         (NodeKind::Image, Some(ContentConcern::Image(image)), _) => DrawPayload::Image {
             texture: image.texture.clone(),
         },

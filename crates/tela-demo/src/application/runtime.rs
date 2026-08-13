@@ -1,15 +1,22 @@
 //! 应用运行时：组合领域、View、tela-core 视图状态与布局缓存。
 
+mod input;
+
 use std::collections::{BTreeSet, HashMap};
 
 use ab_glyph::{Font, FontArc, ScaleFont};
 use tela_contract::{
-    InputEvent, NodeId, NodeKind, PointerEvent, ScrollState, SemanticKey, TextMeasureRequest,
-    TextMeasurer, TextMetrics, UiAction, UiFrame, UiNode, Viewport,
+    Color, FocusAppearance, InputEvent, NodeId, NodeKind, PointerEvent, RawKeyboardEvent,
+    ScrollState, SemanticKey, ShortcutId, TextMeasureRequest, TextMeasurer, TextMetrics, UiAction,
+    UiFrame, UiNode, Viewport,
 };
-use tela_core::{LayoutCache, UiTree, ViewStateStore, handle_input};
-use tela_ui::{DraftInputEvent, IntentTarget, LocalStateRuntime, UiIntent, intent_from_action};
+use tela_core::{
+    IdentityAllocator, LayoutCache, UiTree, ViewStateStore, ensure_modal_focus, handle_input,
+    restore_focus, save_focus,
+};
+use tela_ui::{LocalStateRuntime, intent_from_action};
 
+use super::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
 use super::reactive::ComponentRuntime;
 use super::{Intent, apply_intent, intent_from_bind_id};
 use crate::domain::{FileManagerModel, FileManagerSession};
@@ -23,6 +30,12 @@ use crate::presentation::{
 pub const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280.0,
     height: 800.0,
+};
+
+const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
+    color: Color::rgba(0.15, 0.39, 0.92, 1.0),
+    width: 2.0,
+    inset: 2.0,
 };
 
 struct DemoTextMeasurer;
@@ -45,6 +58,7 @@ impl TextMeasurer for DemoTextMeasurer {
             width: request.max_width.map_or(width, |max| width.min(max)),
             height: line_count as f32 * request.line_height,
             line_count,
+            first_baseline: scaled.ascent(),
         }
     }
 }
@@ -77,18 +91,24 @@ pub struct App {
     frame: Option<UiFrame>,
     tree: Option<UiTree>,
     layout_cache: LayoutCache,
+    identity_allocator: IdentityAllocator,
     view_state: ViewStateStore,
-    search_key: Option<SemanticKey>,
     nav_scroll_key: Option<SemanticKey>,
     detail_scroll_key: Option<SemanticKey>,
     clickable_keys: BTreeSet<SemanticKey>,
     hovered_toolbar_target: Option<String>,
+    keymap: KeymapSnapshot,
     nav_scroll: ScrollState,
     detail_scroll: ScrollState,
     frame_trace: Vec<u8>,
     cpu_rendered: bool,
     cpu_bitmap: Vec<u8>,
     input_upload: Vec<u8>,
+    keymap_upload: Vec<u8>,
+    /// 由 `runtime::input` 管理的隐藏 DOM 编辑器目标，不是 tela key 或业务状态。
+    dom_input_target: Option<tela_ui::IntentTarget>,
+    /// 弹窗关闭后的显式焦点恢复延迟到新树建好后执行，避免把旧帧 node id 带回页面。
+    restore_focus_pending: bool,
     revision: tela_widgets::Signal<u64>,
     component_runtime: ComponentRuntime,
     local_state: LocalStateRuntime,
@@ -107,18 +127,22 @@ impl App {
             frame: None,
             tree: None,
             layout_cache: LayoutCache::new(),
+            identity_allocator: IdentityAllocator::new(),
             view_state: ViewStateStore::new(),
-            search_key: None,
             nav_scroll_key: None,
             detail_scroll_key: None,
             clickable_keys: BTreeSet::new(),
             hovered_toolbar_target: None,
+            keymap: KeymapSnapshot::file_manager_default(),
             nav_scroll: ScrollState::default(),
             detail_scroll: ScrollState::default(),
             frame_trace: Vec::new(),
             cpu_rendered: false,
             cpu_bitmap: Vec::new(),
             input_upload: Vec::new(),
+            keymap_upload: Vec::new(),
+            dom_input_target: None,
+            restore_focus_pending: false,
             revision,
             component_runtime,
             local_state: LocalStateRuntime::new(),
@@ -155,41 +179,29 @@ impl App {
         }
         let modal_key = SemanticKey(OPERATION_MODAL_KEY.to_owned());
         if self.session.operation.is_some() && !self.view_state.modal_stack().contains(&modal_key) {
+            save_focus(&mut self.view_state);
             self.view_state.push_modal(modal_key.clone());
         }
         if self.session.operation.is_none()
             && self.view_state.modal_stack().last() == Some(&modal_key)
         {
             self.view_state.pop_modal();
+            self.restore_focus_pending = true;
         }
-        self.local_state.begin_render();
-        let search_input = self
-            .local_state
-            .sync_draft_input(&self.session.query, "file.search");
-        let operation_input = self.session.operation.as_ref().and_then(|operation| {
-            if matches!(
-                operation.kind,
-                crate::domain::OperationKind::MoveToDesign | crate::domain::OperationKind::Trash
-            ) {
-                None
-            } else {
-                Some(
-                    self.local_state
-                        .sync_draft_input(&operation.value, "operation.value"),
-                )
-            }
-        });
-        let props = AppShellProps {
+        let (search_input, operation_input) = self.begin_input_render();
+        let mut props = AppShellProps {
             model: &self.model,
             session: &self.session,
             viewport: self.viewport,
-            search_focused: self.search_focused(),
+            search_focused: false,
+            operation_focused: false,
             hovered_target: self.hovered_toolbar_target.clone(),
             search_input,
             operation_input,
         };
-        let tree = UiTree::new(AppShell.render(&props)).expect("文件管理器场景必须合法");
-        self.local_state.finish_render();
+        let mut tree =
+            UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
+                .expect("文件管理器场景必须合法");
         let mut scroll_inputs = HashMap::new();
         if let Some(key) = &self.nav_scroll_key {
             scroll_inputs.insert(key.clone(), self.nav_scroll);
@@ -197,17 +209,52 @@ impl App {
         if let Some(key) = &self.detail_scroll_key {
             scroll_inputs.insert(key.clone(), self.detail_scroll);
         }
+        let focusable_nodes = tree.focusable_nodes();
+        self.view_state.reconcile_focus(&focusable_nodes);
+        self.view_state.reconcile_hover(tree.keys());
+        if self.restore_focus_pending {
+            restore_focus(&tree, &mut self.view_state);
+            self.restore_focus_pending = false;
+        }
+        ensure_modal_focus(&tree, &mut self.view_state);
+        let mut controls = discover_controls(&tree);
+        let hovered_target = self.toolbar_target_for_hover_key(&tree);
+        if self.hovered_toolbar_target != hovered_target {
+            self.hovered_toolbar_target = hovered_target;
+            props.hovered_target = self.hovered_toolbar_target.clone();
+            tree =
+                UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
+                    .expect("文件管理器场景必须合法");
+            controls = discover_controls(&tree);
+        }
+        if self.restore_focus_pending {
+            restore_focus(&tree, &mut self.view_state);
+            self.restore_focus_pending = false;
+        }
+        let modal_focus_changed = !ensure_modal_focus(&tree, &mut self.view_state).is_empty();
+        let (search_focused, operation_focused) = self.input_focus_projection(&tree);
+        let focus_projection_changed =
+            props.search_focused != search_focused || props.operation_focused != operation_focused;
+        if modal_focus_changed || focus_projection_changed {
+            props.search_focused = search_focused;
+            props.operation_focused = operation_focused;
+            tree =
+                UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
+                    .expect("文件管理器场景必须合法");
+            controls = discover_controls(&tree);
+        }
+        self.finish_input_render();
         let frame = tree
-            .resolve_dirty(
+            .resolve_dirty_with_focus(
                 self.viewport,
                 &DemoTextMeasurer,
                 &scroll_inputs,
                 &mut self.layout_cache,
+                self.view_state.current_focus_key(),
+                Some(FOCUS_APPEARANCE),
             )
             .expect("文件管理器场景必须可布局");
         self.frame_trace = crate::frame_trace::to_json(&frame).into_bytes();
-        let controls = discover_controls(&tree);
-        self.search_key = controls.search;
         self.nav_scroll_key = controls.scrolls.first().cloned();
         self.detail_scroll_key = controls.scrolls.get(1).cloned();
         self.clickable_keys = controls.clickable;
@@ -236,34 +283,8 @@ impl App {
             (self.viewport.height * self.raster_dpi).round() as u32,
         )
     }
-    pub fn input_focused(&self) -> bool {
-        if self.session.operation.is_some() {
-            self.operation_accepts_input()
-        } else {
-            self.search_focused()
-        }
-    }
-    pub fn input_value(&self) -> String {
-        if self.operation_accepts_input() {
-            return self
-                .local_state
-                .snapshot(&IntentTarget::new("operation.value"))
-                .map(|snapshot| snapshot.value().to_owned())
-                .unwrap_or_else(|| {
-                    self.session
-                        .operation
-                        .as_ref()
-                        .map(|operation| operation.value.clone())
-                        .unwrap_or_default()
-                });
-        }
-        self.local_state
-            .snapshot(&IntentTarget::new("file.search"))
-            .map(|snapshot| snapshot.value().to_owned())
-            .unwrap_or_else(|| self.session.query.clone())
-    }
     pub fn pointer_cursor(&self) -> u32 {
-        if self.search_focused() {
+        if self.input_is_focused() {
             1
         } else if self
             .view_state
@@ -300,61 +321,60 @@ impl App {
             &mut self.view_state,
             &InputEvent::Pointer(event),
         );
-        let mut changed = false;
-        for action in &actions {
-            match action {
-                UiAction::Click { node_id } => changed |= self.handle_click(*node_id),
-                UiAction::Scroll { node_id, delta } => {
-                    changed |= self.handle_scroll(*node_id, delta.y)
-                }
-                UiAction::Hover { node_id, .. } => {
-                    self.hovered_toolbar_target = self.toolbar_target_at(*node_id);
-                    changed = true;
-                }
-                UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
-                _ => {}
-            }
-        }
+        let changed = self.handle_ui_actions(&actions);
         if changed {
             self.mark_view_dirty();
         }
         actions.len() as u32
     }
 
-    pub fn set_input_value(&mut self, value: String) -> u32 {
+    /// 应用当前键位快照解析原始按键后，才把语义意图交给 tela-core。
+    ///
+    /// 返回 1 表示组合键已被当前键位表消费，即使该意图最终没有产生业务动作；浏览器据此
+    /// 阻止原生 Tab 等默认行为。
+    pub fn handle_raw_key(&mut self, raw: RawKeyboardEvent) -> u32 {
         self.ensure_frame();
-        if self.session.operation.is_some() && !self.operation_accepts_input() {
+        if self.input_is_composing() {
             return 0;
         }
-        if self.session.operation.is_none() && !self.search_focused() {
+        let scopes = self
+            .tree
+            .as_ref()
+            .expect("tree")
+            .keymap_scopes_for_focus(self.view_state.current_focus_key());
+        let Some(intent) = self.keymap.resolve(raw, &scopes) else {
             return 0;
+        };
+        let frame = self.frame().clone();
+        let actions = handle_input(
+            self.tree.as_ref().expect("tree"),
+            &frame,
+            &mut self.view_state,
+            &InputEvent::Keyboard(intent),
+        );
+        if self.handle_ui_actions(&actions) {
+            self.mark_view_dirty();
         }
-        self.dispatch_draft_input(DraftInputEvent::Input(value))
+        1
     }
 
-    pub fn composition_start(&mut self) -> u32 {
-        self.ensure_frame();
-        self.dispatch_draft_input(DraftInputEvent::CompositionStart)
+    /// CPU/WASM 与 wasm-bindgen 共用的稳定原始键 ABI。
+    pub fn handle_raw_key_codes(&mut self, code: u16, modifier_bits: u8, repeat: bool) -> u32 {
+        raw_key_from_codes(code, modifier_bits, repeat)
+            .map(|raw| self.handle_raw_key(raw))
+            .unwrap_or(0)
     }
 
-    pub fn composition_end(&mut self) -> u32 {
-        self.ensure_frame();
-        self.dispatch_draft_input(DraftInputEvent::CompositionEnd)
+    /// 原子替换已校验的完整键位表；失败时保留旧快照。
+    pub fn replace_keymap(&mut self, snapshot: KeymapSnapshot) -> Result<(), KeymapError> {
+        snapshot.validate(Some(self.keymap.revision))?;
+        self.keymap = snapshot;
+        Ok(())
     }
 
-    pub fn input_enter(&mut self) -> u32 {
-        self.ensure_frame();
-        self.dispatch_draft_input(DraftInputEvent::Enter)
-    }
-
-    pub fn input_cancel(&mut self) -> u32 {
-        self.ensure_frame();
-        self.dispatch_draft_input(DraftInputEvent::Cancel)
-    }
-
-    pub fn input_blur(&mut self) -> u32 {
-        self.ensure_frame();
-        self.dispatch_draft_input(DraftInputEvent::Blur)
+    /// 浏览器/原生宿主的 JSON 注入入口。传输格式不进入 core 或 renderer。
+    pub fn replace_keymap_json(&mut self, json: &str) -> Result<(), KeymapError> {
+        self.replace_keymap(KeymapSnapshot::from_json(json)?)
     }
 
     #[cfg(test)]
@@ -367,26 +387,22 @@ impl App {
         true
     }
 
-    pub fn begin_input_upload(&mut self, bytes: usize) -> *mut u8 {
-        self.input_upload.resize(bytes, 0);
-        self.input_upload.as_mut_ptr()
+    /// 为 CPU WASM ABI 分配键位表 JSON 上传缓冲区。
+    pub fn begin_keymap_upload(&mut self, bytes: usize) -> *mut u8 {
+        self.keymap_upload.resize(bytes, 0);
+        self.keymap_upload.as_mut_ptr()
     }
-    pub fn input_value_ptr(&mut self) -> *const u8 {
-        self.input_upload = self.input_value().into_bytes();
-        self.input_upload.as_ptr()
-    }
-    pub fn input_value_len(&mut self) -> u32 {
-        self.input_value().len() as u32
-    }
-    pub fn finish_input_upload(&mut self, bytes: usize) -> u32 {
-        if bytes != self.input_upload.len() {
-            self.input_upload.clear();
+
+    /// 校验并原子替换刚上传的键位表 JSON；失败时旧快照保持生效。
+    pub fn finish_keymap_upload(&mut self, bytes: usize) -> u32 {
+        if bytes != self.keymap_upload.len() {
+            self.keymap_upload.clear();
             return 0;
         }
-        let Ok(value) = String::from_utf8(std::mem::take(&mut self.input_upload)) else {
+        let Ok(json) = String::from_utf8(std::mem::take(&mut self.keymap_upload)) else {
             return 0;
         };
-        self.set_input_value(value)
+        u32::from(self.replace_keymap_json(&json).is_ok())
     }
 
     fn invalidate_frame(&mut self) {
@@ -398,56 +414,64 @@ impl App {
     fn mark_view_dirty(&mut self) {
         self.revision.update(|value| *value = value.wrapping_add(1));
     }
-    fn dispatch_draft_input(&mut self, event: DraftInputEvent) -> u32 {
-        let target = if self.operation_accepts_input() {
-            IntentTarget::new("operation.value")
-        } else if self.session.operation.is_none() && self.search_focused() {
-            IntentTarget::new("file.search")
-        } else {
-            return 0;
-        };
-        let Some(outcome) = self.local_state.dispatch(&target, event) else {
-            return 0;
-        };
-        let mut changed = outcome.changed;
-        if let Some(UiIntent::Commit {
-            target,
-            value: tela_contract::Value::String(value),
-        }) = outcome.intent
-        {
-            let intent = match target.as_str() {
-                "operation.value" => Intent::SetOperationValue(value),
-                "file.search" => {
-                    self.detail_scroll = ScrollState::default();
-                    Intent::SetQuery(value)
-                }
-                _ => return u32::from(changed),
-            };
-            self.apply_controller_intent(intent);
-            changed = true;
-        }
-        if changed {
-            self.mark_view_dirty();
-        }
-        u32::from(changed)
-    }
     fn apply_controller_intent(&mut self, intent: Intent) {
         apply_intent(&mut self.model, &mut self.session, intent);
         if self.session.operation.is_none() {
             self.local_state
-                .release_target(&IntentTarget::new("operation.value"));
+                .release_target(&tela_ui::IntentTarget::new("operation.value"));
         }
     }
     fn dispatch_controller_intent(&mut self, intent: Intent) {
         if matches!(intent, Intent::ConfirmOperation) {
-            self.dispatch_draft_input(DraftInputEvent::Blur);
+            self.commit_operation_input_before_confirm();
         }
         self.apply_controller_intent(intent);
     }
-    fn search_focused(&self) -> bool {
-        self.view_state
-            .current_focus_key()
-            .is_some_and(|key| self.search_key.as_ref() == Some(key))
+
+    /// 统一消费 core 产生的 UI 生命周期动作。业务 mutation 只经应用意图写入。
+    fn handle_ui_actions(&mut self, actions: &[UiAction]) -> bool {
+        let mut changed = false;
+        for action in actions {
+            match action {
+                UiAction::Click { node_id } => changed |= self.handle_click(*node_id),
+                UiAction::Scroll { node_id, delta } => {
+                    changed |= self.handle_scroll(*node_id, delta.y)
+                }
+                UiAction::Hover { node_id, entered } => {
+                    let target = self.toolbar_target_at(*node_id);
+                    if *entered {
+                        if self.hovered_toolbar_target != target {
+                            self.hovered_toolbar_target = target;
+                            changed = true;
+                        }
+                    } else if target.as_deref() == self.hovered_toolbar_target.as_deref() {
+                        self.hovered_toolbar_target = None;
+                        changed = true;
+                    }
+                }
+                UiAction::ShortcutActivated { shortcut_id } => {
+                    changed |= self.handle_shortcut(shortcut_id);
+                }
+                UiAction::CloseModal { .. } if self.session.operation.is_some() => {
+                    self.dispatch_controller_intent(Intent::CancelOperation);
+                    self.restore_focus_pending = true;
+                    changed = true;
+                }
+                UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    fn handle_shortcut(&mut self, shortcut: &ShortcutId) -> bool {
+        match shortcut {
+            ShortcutId::Undo if self.session.operation.is_none() => {
+                self.dispatch_controller_intent(Intent::Command(crate::domain::FileCommand::Undo));
+                true
+            }
+            _ => false,
+        }
     }
     fn operation_accepts_input(&self) -> bool {
         self.session.operation.as_ref().is_some_and(|operation| {
@@ -463,6 +487,17 @@ impl App {
             .as_ref()
             .and_then(|tree| node_at(tree.root(), node_id.0 as usize, &mut 0))
             .and_then(|node| node.interact.as_ref())
+            .and_then(|interact| interact.bind_id.as_ref())
+            .and_then(|bind_id| bind_id.0.strip_prefix("ui.invoke:"))
+            .map(str::to_owned)
+    }
+
+    /// 状态栏提示只投影当前 core hover key 在本帧树上的实际工具栏绑定。
+    ///
+    /// 节点条件卸载、重排或默认身份复用后，不能用旧字符串猜测它仍然对应哪个命令。
+    fn toolbar_target_for_hover_key(&self, tree: &UiTree) -> Option<String> {
+        let key = self.view_state.hover_key()?;
+        tree.interact_for_key(key)
             .and_then(|interact| interact.bind_id.as_ref())
             .and_then(|bind_id| bind_id.0.strip_prefix("ui.invoke:"))
             .map(str::to_owned)
@@ -530,7 +565,6 @@ impl App {
 }
 
 struct Controls {
-    search: Option<SemanticKey>,
     scrolls: Vec<SemanticKey>,
     clickable: BTreeSet<SemanticKey>,
 }
@@ -539,13 +573,6 @@ fn discover_controls(tree: &UiTree) -> Controls {
         let key = keys.get(*i).cloned();
         *i += 1;
         if let Some(key) = key {
-            if node
-                .interact
-                .as_ref()
-                .is_some_and(|interact| interact.text_input)
-            {
-                out.search = Some(key.clone());
-            }
             if node
                 .interact
                 .as_ref()
@@ -565,7 +592,6 @@ fn discover_controls(tree: &UiTree) -> Controls {
         }
     }
     let mut out = Controls {
-        search: None,
         scrolls: Vec::new(),
         clickable: BTreeSet::new(),
     };
@@ -643,7 +669,7 @@ mod tests {
             .commands
             .iter()
             .filter_map(|command| match &command.payload {
-                tela_contract::DrawPayload::Text { text } => Some(text.text.clone()),
+                tela_contract::DrawPayload::Text { text, .. } => Some(text.text.clone()),
                 _ => None,
             })
             .collect();
@@ -707,7 +733,7 @@ mod tests {
                     .commands
                     .iter()
                     .any(|command| matches!(&command.payload,
-                tela_contract::DrawPayload::Text { text } if text.text == "TELA 文件"))
+                tela_contract::DrawPayload::Text { text, .. } if text.text == "TELA 文件"))
             );
             app.invalidate_frame();
         }
@@ -795,7 +821,7 @@ mod tests {
                 .commands
                 .iter()
                 .find_map(|command| match &command.payload {
-                    tela_contract::DrawPayload::Text { text } if text.text == "README.md" => {
+                    tela_contract::DrawPayload::Text { text, .. } if text.text == "README.md" => {
                         Some(command.geometry.x)
                     }
                     _ => None,
@@ -870,5 +896,237 @@ mod tests {
             Some("command.new-folder")
         );
         assert!(app.ensure_frame());
+        app.handle_pointer(PointerEvent::Move {
+            position: tela_contract::Point { x: -1.0, y: -1.0 },
+        });
+        assert_eq!(app.hovered_toolbar_target, None, "离开必须恢复状态栏投影");
+        assert!(app.ensure_frame());
+    }
+
+    #[test]
+    fn unloading_a_hovered_toolbar_node_clears_the_status_projection() {
+        let mut app = App::new();
+        app.session.select(5);
+        app.invalidate_frame();
+        app.ensure_frame();
+        let tree = app.tree.as_ref().expect("tree");
+        let node_id = tree
+            .node_ids()
+            .iter()
+            .copied()
+            .find(|id| {
+                node_at(tree.root(), id.0 as usize, &mut 0)
+                    .and_then(|node| node.interact.as_ref())
+                    .and_then(|interact| interact.bind_id.as_ref())
+                    .is_some_and(|bind| bind.0 == "ui.invoke:command.rename")
+            })
+            .expect("选中项目后 Toolbar 重命名项应存在");
+        let hit = app
+            .frame()
+            .hit_regions
+            .iter()
+            .find(|region| region.node_id == node_id)
+            .expect("Toolbar 重命名项应可命中");
+        app.handle_pointer(PointerEvent::Move {
+            position: tela_contract::Point {
+                x: hit.rect.x + 1.0,
+                y: hit.rect.y + 1.0,
+            },
+        });
+        assert_eq!(
+            app.hovered_toolbar_target.as_deref(),
+            Some("command.rename")
+        );
+
+        app.session.selected.clear();
+        app.invalidate_frame();
+        app.ensure_frame();
+        assert_eq!(
+            app.hovered_toolbar_target, None,
+            "已卸载节点的 core hover key 不得继续投影旧状态栏说明"
+        );
+    }
+
+    #[test]
+    fn raw_keyboard_moves_default_focus_and_projects_a_focus_ring() {
+        let mut app = App::new();
+        app.ensure_frame();
+        assert_eq!(
+            app.handle_raw_key_codes(0x2b, 0, false),
+            1,
+            "Tab 应被默认键位表消费"
+        );
+        let first = app
+            .view_state
+            .current_focus_key()
+            .cloned()
+            .expect("Tab 后 core 应持有默认焦点");
+        assert!(app.ensure_frame());
+        assert!(app.frame().commands.iter().any(|command| {
+            matches!(
+                &command.payload,
+                tela_contract::DrawPayload::RoundedRect {
+                    fill: None,
+                    border: Some(border),
+                    ..
+                } if border.color == FOCUS_APPEARANCE.color && border.width == FOCUS_APPEARANCE.width
+            )
+        }), "焦点变化必须在同一帧投影可见 FocusRing");
+
+        assert_eq!(
+            app.handle_raw_key_codes(0x51, 0, false),
+            1,
+            "ArrowDown 应被默认键位表消费"
+        );
+        let second = app
+            .view_state
+            .current_focus_key()
+            .cloned()
+            .expect("方向键后应仍有焦点");
+        assert_ne!(
+            first, second,
+            "方向意图由焦点图/树序推进，而不是依赖页面手写 key"
+        );
+    }
+
+    #[test]
+    fn runtime_keymap_replacement_is_atomic_and_changes_the_next_key() {
+        let mut app = App::new();
+        app.ensure_frame();
+        let replacement = r#"{
+            "version": 1,
+            "revision": 2,
+            "default_layer": [
+                {"key":"KeyA","intent":{"type":"focus_next"}}
+            ]
+        }"#;
+        assert!(app.replace_keymap_json(replacement).is_ok());
+        assert_eq!(
+            app.handle_raw_key_codes(0x2b, 0, false),
+            0,
+            "旧 Tab 绑定不应残留"
+        );
+        assert_eq!(
+            app.handle_raw_key_codes(0x04, 0, false),
+            1,
+            "新快照立即生效"
+        );
+        let focused = app.view_state.current_focus_key().cloned();
+        assert!(focused.is_some());
+
+        let invalid = r#"{
+            "version": 1,
+            "revision": 1,
+            "default_layer": [
+                {"key":"KeyB","intent":{"type":"focus_next"}}
+            ]
+        }"#;
+        assert!(app.replace_keymap_json(invalid).is_err());
+        assert_eq!(
+            app.handle_raw_key_codes(0x04, 0, false),
+            1,
+            "拒绝快照后保留旧表"
+        );
+    }
+
+    #[test]
+    fn escape_closes_modal_and_restores_the_saved_background_focus() {
+        let mut app = App::new();
+        app.ensure_frame();
+        assert_eq!(app.handle_raw_key_codes(0x2b, 0, false), 1);
+        let background_focus = app.view_state.current_focus_key().cloned();
+        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert!(app.ensure_frame());
+        assert!(app.session.operation.is_some());
+        let modal_focus = app.view_state.current_focus_key().cloned();
+        assert_ne!(
+            modal_focus, background_focus,
+            "打开模态后 core 自动进入模态焦点域"
+        );
+        assert_eq!(
+            app.handle_raw_key_codes(0x29, 0, false),
+            1,
+            "Escape 应进入 Cancel 意图"
+        );
+        assert!(app.session.operation.is_none(), "Cancel 动作关闭业务模态");
+        assert!(app.ensure_frame());
+        assert_eq!(
+            app.view_state.current_focus_key(),
+            background_focus.as_ref()
+        );
+    }
+
+    #[test]
+    fn tab_leaving_a_text_input_returns_arrow_keys_to_the_core_focus_graph() {
+        let mut app = App::new();
+        app.ensure_frame();
+        assert_eq!(
+            app.handle_raw_key_codes(0x2b, 0, false),
+            1,
+            "Tab 应进入搜索输入"
+        );
+        assert!(
+            app.input_focused(),
+            "当前 core 焦点是输入时才接管 DOM 文本编辑"
+        );
+        assert_eq!(app.input_focus(), 1, "DOM 焦点只记录 core 已判定的输入目标");
+
+        assert_eq!(
+            app.handle_raw_key_codes(0x2b, 0, false),
+            1,
+            "第二次 Tab 应离开输入"
+        );
+        assert!(
+            !app.input_focused(),
+            "弹窗或页面存在输入框不等于它仍拥有键盘方向键"
+        );
+        assert_eq!(app.input_blur(), 0, "无草稿时 DOM blur 不应产生业务写入");
+        let after_tab = app
+            .view_state
+            .current_focus_key()
+            .cloned()
+            .expect("Tab 后应有下一个焦点目标");
+
+        assert_eq!(
+            app.handle_raw_key_codes(0x51, 0, false),
+            1,
+            "ArrowDown 应重新由默认键位表映射到 core"
+        );
+        assert_ne!(
+            app.view_state.current_focus_key(),
+            Some(&after_tab),
+            "方向导航不能被已经失焦的隐藏 textarea 吞掉"
+        );
+    }
+
+    #[test]
+    fn modal_keymap_scope_overrides_the_default_snapshot_layer() {
+        let mut app = App::new();
+        app.ensure_frame();
+        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert!(app.ensure_frame());
+        assert!(
+            app.operation_input_focused(),
+            "默认模态焦点落在首个输入控件"
+        );
+
+        let replacement = r#"{
+            "version": 1,
+            "revision": 2,
+            "default_layer": [
+                {"key":"KeyA","intent":{"type":"focus_next"}}
+            ],
+            "scoped_layers": {
+                "file-manager.operation": [
+                    {"key":"KeyA","intent":{"type":"cancel"}}
+                ]
+            }
+        }"#;
+        assert!(app.replace_keymap_json(replacement).is_ok());
+        assert_eq!(app.handle_raw_key_codes(0x04, 0, false), 1);
+        assert!(
+            app.session.operation.is_none(),
+            "模态内层 KeymapScopeId 必须先于默认层命中"
+        );
     }
 }

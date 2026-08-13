@@ -1,6 +1,8 @@
 //! 主题无关的命令工具栏。
 
-use tela_contract::{Color, Fill, Insets, LayoutConcern, Size, UiNode, VisualConcern};
+use tela_contract::{
+    Color, Fill, IdentityConcern, Insets, KeyStrategy, LayoutConcern, Size, UiNode, VisualConcern,
+};
 use tela_core::{LayoutContainer, Primitive};
 use tela_widgets::{ButtonPalette, IconButton, IconButtonPalette, IconButtonVariant, IconName};
 
@@ -297,7 +299,11 @@ impl Toolbar {
         self
     }
 
-    /// 生成本帧节点树。普通调用方不需要提供 tela key。
+    /// 生成本帧节点树。
+    ///
+    /// Toolbar 的项目可由选择、权限或窗口宽度条件增删，因此它只在集合边界声明 core 的
+    /// `AutoStableIdentity` 策略。调用方不提供、组件也不保存 tela key；实际身份仍由 core
+    /// 根据稳定命令绑定分配。
     pub fn into_node(self) -> UiNode {
         let mut children: Vec<UiNode> = self
             .items
@@ -330,12 +336,16 @@ impl Toolbar {
             ));
         }
         LayoutContainer::flex(children)
+            .identity(IdentityConcern {
+                key_strategy: KeyStrategy::AutoStableIdentity,
+                ..IdentityConcern::default()
+            })
             .layout(LayoutConcern {
                 width: Some(Size::fill()),
                 height: Some(Size::fixed(self.style.height)),
                 gap: self.style.gap,
                 padding: self.style.padding,
-                cross_align: tela_contract::CrossAlign::Center,
+                cross_align: tela_contract::CrossAlign::Baseline,
                 ..LayoutConcern::default()
             })
             .visual(VisualConcern {
@@ -356,7 +366,21 @@ impl From<Toolbar> for UiNode {
 mod tests {
     use super::{Toolbar, ToolbarItem, ToolbarOverflow};
     use crate::{UiIntent, intent_from_action};
-    use tela_contract::{NodeId, UiAction};
+    use tela_contract::{NodeId, SemanticKey, UiAction};
+    use tela_core::{IdentityAllocator, UiTree};
+
+    fn key_for_target(tree: &UiTree, target: &str) -> SemanticKey {
+        let bind_id = format!("ui.invoke:{target}");
+        tree.keys()
+            .iter()
+            .find(|key| {
+                tree.interact_for_key(key)
+                    .and_then(|interact| interact.bind_id.as_ref())
+                    .is_some_and(|candidate| candidate.0 == bind_id)
+            })
+            .cloned()
+            .expect("Toolbar 项目应有稳定 core key")
+    }
 
     #[test]
     fn enabled_item_maps_click_to_invoke() {
@@ -423,6 +447,39 @@ mod tests {
             Some(UiIntent::Invoke {
                 target: "toolbar.more".into(),
             })
+        );
+    }
+
+    #[test]
+    fn conditional_items_keep_core_identity_without_page_keys() {
+        let mut allocator = IdentityAllocator::new();
+        let first = UiTree::new_with_allocator(
+            Toolbar::new()
+                .item(ToolbarItem::new("新建", "command.new-folder"))
+                .item(ToolbarItem::new("重命名", "command.rename"))
+                .item(ToolbarItem::new("列表", "command.toggle-view")),
+            &mut allocator,
+        )
+        .expect("Toolbar 应构成合法树");
+        let rename_key = key_for_target(&first, "command.rename");
+        let view_key = key_for_target(&first, "command.toggle-view");
+
+        let second = UiTree::new_with_allocator(
+            Toolbar::new()
+                .item(ToolbarItem::new("新建", "command.new-folder"))
+                .item(ToolbarItem::new("列表", "command.toggle-view")),
+            &mut allocator,
+        )
+        .expect("条件收缩后的 Toolbar 应构成合法树");
+
+        assert!(
+            !second.keys().contains(&rename_key),
+            "被卸载命令的 key 不能复用给后续项目"
+        );
+        assert_eq!(
+            key_for_target(&second, "command.toggle-view"),
+            view_key,
+            "同一命令移动后仍由 core 保持其身份"
         );
     }
 }

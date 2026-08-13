@@ -88,6 +88,11 @@ pub enum DrawPayload {
     Text {
         /// 文本内容。
         text: TextContent,
+        /// 已解析的首行绝对基线坐标。
+        ///
+        /// renderer 必须直接使用此值定位字形，不得以 `geometry.y + font_size` 或后端
+        /// 私有 ascent 重算垂直原点。
+        baseline_y: f32,
     },
     /// 线性渐变。
     LinearGradient {
@@ -150,7 +155,10 @@ impl Clone for DrawPayload {
                 texture: texture.clone(),
                 border: *border,
             },
-            Self::Text { text } => Self::Text { text: text.clone() },
+            Self::Text { text, baseline_y } => Self::Text {
+                text: text.clone(),
+                baseline_y: *baseline_y,
+            },
             Self::LinearGradient { gradient } => Self::LinearGradient {
                 gradient: gradient.clone(),
             },
@@ -234,7 +242,16 @@ impl PartialEq for DrawPayload {
                     border: bb,
                 },
             ) => a == b && ab == bb,
-            (Self::Text { text: a }, Self::Text { text: b }) => a == b,
+            (
+                Self::Text {
+                    text: a,
+                    baseline_y: ay,
+                },
+                Self::Text {
+                    text: b,
+                    baseline_y: by,
+                },
+            ) => a == b && ay == by,
             (Self::LinearGradient { gradient: a }, Self::LinearGradient { gradient: b }) => a == b,
             (Self::RadialGradient { gradient: a }, Self::RadialGradient { gradient: b }) => a == b,
             (

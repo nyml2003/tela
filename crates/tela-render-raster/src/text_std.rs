@@ -48,6 +48,7 @@ pub(crate) fn draw_text_std(
     canvas: &mut Canvas<'_>,
     region: &IRect,
     text: &TextContent,
+    baseline_y: f32,
     scale: f32,
     logical_width: f32,
 ) {
@@ -57,7 +58,7 @@ pub(crate) fn draw_text_std(
     // 行高与布局侧对齐：布局行高 = TextMeasurer 返回的 line_height（见 007-4.0 同一度量）。
     let line_height = text.line_height * scale;
     let mut pen_x = 0.0f32;
-    let mut pen_y = 0.0f32;
+    let mut pen_y = baseline_y * scale - region.y as f32 - scaled.ascent();
     for ch in text.text.chars() {
         if ch == '\n' {
             pen_x = 0.0;

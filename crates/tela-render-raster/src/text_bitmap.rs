@@ -15,13 +15,14 @@ pub(crate) fn draw_text_bitmap(
     canvas: &mut Canvas<'_>,
     region: &IRect,
     text: &TextContent,
+    baseline_y: f32,
     scale: f32,
     _logical_width: f32,
 ) {
     let cell = (text.font_size * scale).max(1.0) / GLYPH_H as f32;
     let cell = if cell < 1.0 { 1.0 } else { cell };
     let mut pen_x = 0.0f32;
-    let mut pen_y = 0.0f32;
+    let mut pen_y = baseline_y * scale - region.y as f32 - cell * GLYPH_H as f32;
     for ch in text.text.chars() {
         if ch == '\n' {
             pen_x = 0.0;

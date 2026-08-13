@@ -189,9 +189,10 @@ impl StableTable {
     }
 }
 
-/// 内容指纹：类型 + 内容关键属性（类型变化 → 新身份，见 005-2.2）。
+/// 内容指纹：类型 + 内容关键属性 + 稳定交互绑定（类型变化 → 新身份，见 005-2.2）。
 ///
-/// 只使用 kind 与内容（文本）作为身份指纹——尺寸/视觉变化不改变身份（状态随内容保持）。
+/// 尺寸、视觉和瞬时交互状态不改变身份；稳定的 `BindId` 则能让动态命令集合中的同形
+/// 项目被 core 的自动分配器区分。`BindId` 仍不是 tela key，组件不会据此生成或保存 key。
 /// 采用确定性 FNV-1a（`DefaultHasher` 随机种子会导致跨帧指纹不稳定，破坏身份匹配）。
 fn fingerprint(node: &UiNode) -> u64 {
     let mut h = FnvHasher::new();
@@ -223,6 +224,17 @@ fn fingerprint(node: &UiNode) -> u64 {
             h.write_u64(points.len() as u64);
         }
         Some(ContentConcern::Empty) | None => h.write(0),
+    }
+    match node
+        .interact
+        .as_ref()
+        .and_then(|interact| interact.bind_id.as_ref())
+    {
+        Some(bind_id) => {
+            h.write(4);
+            h.write_str(&bind_id.0);
+        }
+        None => h.write(0),
     }
     h.finish()
 }

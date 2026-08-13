@@ -24,7 +24,13 @@ fn em_pixel_height(font: &FontArc, font_size: f32) -> f32 {
 }
 
 /// 将一段 `TextContent` 栅格化为透明 RGBA8；结果直接上传到现有图片 pipeline。
-pub(crate) fn rasterize(text: &TextContent, width: u32, height: u32, scale: f32) -> Vec<u8> {
+pub(crate) fn rasterize(
+    text: &TextContent,
+    width: u32,
+    height: u32,
+    baseline_y: f32,
+    scale: f32,
+) -> Vec<u8> {
     if width == 0 || height == 0 {
         return Vec::new();
     }
@@ -35,7 +41,7 @@ pub(crate) fn rasterize(text: &TextContent, width: u32, height: u32, scale: f32)
     let line_height = text.line_height * scale;
     let wrap_width = width as f32;
     let mut pen_x = 0.0f32;
-    let mut pen_y = 0.0f32;
+    let mut pen_y = baseline_y * scale - scaled.ascent();
 
     for character in text.text.chars() {
         if character == '\n' {
@@ -109,6 +115,7 @@ mod tests {
             },
             64,
             32,
+            18.0,
             1.0,
         );
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
@@ -126,6 +133,7 @@ mod tests {
             },
             32,
             32,
+            22.0,
             1.0,
         );
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));

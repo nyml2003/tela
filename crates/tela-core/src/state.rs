@@ -94,6 +94,34 @@ impl ViewStateStore {
         self.current_focus = Some(slot);
     }
 
+    /// 清空当前焦点，返回被清除的本帧节点 id。
+    pub fn clear_current_focus(&mut self) -> Option<NodeId> {
+        self.current_focus.take().and_then(|slot| slot.node_id)
+    }
+
+    /// 按当前树的 key 重映射焦点；目标已消失或不再可聚焦时清空。
+    ///
+    /// 返回被清除的旧 node id，供宿主在同一帧投影 `FocusChanged` 或失效 UI。
+    pub fn reconcile_focus(&mut self, focusable_nodes: &[(SemanticKey, NodeId)]) -> Option<NodeId> {
+        let key = self
+            .current_focus
+            .as_ref()
+            .and_then(|current| current.key.as_ref());
+        let Some(key) = key else {
+            return self.clear_current_focus();
+        };
+        let Some((_, node_id)) = focusable_nodes
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+        else {
+            return self.clear_current_focus();
+        };
+        if let Some(current) = self.current_focus.as_mut() {
+            current.node_id = Some(*node_id);
+        }
+        None
+    }
+
     /// 当前悬停节点 key。
     pub fn hover_key(&self) -> Option<&SemanticKey> {
         self.hover.as_ref()
@@ -102,6 +130,18 @@ impl ViewStateStore {
     /// 设置当前悬停节点 key。
     pub fn set_hover(&mut self, key: Option<SemanticKey>) {
         self.hover = key;
+    }
+
+    /// 按当前树的 key 清理已经卸载的悬停目标。
+    ///
+    /// 这和 `reconcile_focus` 一样是跨帧状态重映射的一部分：条件卸载不能让宿主继续
+    /// 投影一个已经不存在的 hover 说明。
+    pub fn reconcile_hover(&mut self, keys: &[SemanticKey]) -> Option<SemanticKey> {
+        let stale = self
+            .hover
+            .as_ref()
+            .is_some_and(|hover| !keys.iter().any(|key| key == hover));
+        stale.then(|| self.hover.take()).flatten()
     }
 
     /// 显式保存当前焦点（SaveFocus，见 008-2.10）。

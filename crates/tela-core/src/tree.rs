@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    NodeId, ScrollState, SemanticKey, TextMeasurer, UiBuildError, UiFrame, UiLayoutError, UiNode,
-    Viewport,
+    FocusAppearance, InteractConcern, NodeId, ScrollState, SemanticKey, TextMeasurer, UiBuildError,
+    UiFrame, UiLayoutError, UiNode, Viewport,
 };
 
 use crate::identity::IdentityAllocator;
+use crate::interact::focus::build_focus_context;
 use crate::resolve::{resolve_tree, resolve_tree_dirty};
 use crate::validate;
 
@@ -99,5 +100,97 @@ impl UiTree {
         cache: &mut crate::update::LayoutCache,
     ) -> Result<UiFrame, UiLayoutError> {
         resolve_tree_dirty(self, viewport, text_measurer, scroll_inputs, cache)
+    }
+
+    /// 纯操作：与 [`Self::resolve`] 相同，但按只读焦点状态投影可见焦点环。
+    ///
+    /// `focus_key` 必须是本树仍然可聚焦的稳定 key；无样式或无焦点时不添加命令。
+    pub fn resolve_with_focus(
+        &self,
+        viewport: Viewport,
+        text_measurer: &impl TextMeasurer,
+        scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+        focus_key: Option<&SemanticKey>,
+        focus_appearance: Option<FocusAppearance>,
+    ) -> Result<UiFrame, UiLayoutError> {
+        crate::resolve::resolve_tree_with_focus(
+            self,
+            viewport,
+            text_measurer,
+            scroll_inputs,
+            focus_key,
+            focus_appearance,
+        )
+    }
+
+    /// Dirty 版本的 [`Self::resolve_with_focus`]。
+    pub fn resolve_dirty_with_focus(
+        &self,
+        viewport: Viewport,
+        text_measurer: &impl TextMeasurer,
+        scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+        cache: &mut crate::update::LayoutCache,
+        focus_key: Option<&SemanticKey>,
+        focus_appearance: Option<FocusAppearance>,
+    ) -> Result<UiFrame, UiLayoutError> {
+        crate::resolve::resolve_tree_dirty_with_focus(
+            self,
+            viewport,
+            text_measurer,
+            scroll_inputs,
+            cache,
+            focus_key,
+            focus_appearance,
+        )
+    }
+
+    /// 这帧可聚焦节点的稳定 key 与本帧 id。
+    pub fn focusable_nodes(&self) -> Vec<(SemanticKey, NodeId)> {
+        let (nodes, ids, keys) = self.node_table();
+        nodes
+            .into_iter()
+            .zip(ids)
+            .zip(keys)
+            .filter_map(|((node, node_id), key)| {
+                node.interact
+                    .as_ref()
+                    .is_some_and(|interact| interact.focusable)
+                    .then_some((key, node_id))
+            })
+            .collect()
+    }
+
+    /// 查询某个由 core 维护的稳定 key 在当前树中的交互语义。
+    ///
+    /// 应用可据此把当前焦点投影为宿主行为（例如隐藏 DOM 文本编辑器），无需保存或构造
+    /// 组件自己的 focus key。返回的引用只在本树存活期间有效。
+    pub fn interact_for_key(&self, key: &SemanticKey) -> Option<&InteractConcern> {
+        let index = self.keys.iter().position(|candidate| candidate == key)?;
+        let mut nodes = Vec::with_capacity(self.node_ids.len());
+        collect_nodes(&self.root, &mut nodes);
+        nodes.get(index).and_then(|node| node.interact.as_ref())
+    }
+
+    /// 当前焦点沿焦点链遇到的键位作用域（由内向外）。
+    ///
+    /// Teleport 子树的链由 `tela-core` 重挂到 ModalHost；因此不能从物理父节点回溯，
+    /// 也不要求组件/页面维护 keymap scope 的栈。
+    pub fn keymap_scopes_for_focus(
+        &self,
+        focus_key: Option<&SemanticKey>,
+    ) -> Vec<tela_contract::KeymapScopeId> {
+        let Some(focus_key) = focus_key else {
+            return Vec::new();
+        };
+        let (nodes, _ids, keys) = self.node_table();
+        let Some(index) = keys.iter().position(|key| key == focus_key) else {
+            return Vec::new();
+        };
+        let focus = build_focus_context(&nodes, &self.node_ids, &keys);
+        focus
+            .keymap_scopes_by_node
+            .get(index)
+            .cloned()
+            .unwrap_or_default()
     }
 }

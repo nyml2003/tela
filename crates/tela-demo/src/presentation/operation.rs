@@ -1,10 +1,10 @@
 //! 文件操作 modal：受控输入、确认与取消。
 
 use tela_contract::{
-    BorderRadius, Color, Fill, InteractConcern, LayoutConcern, SemanticKey, Size, StackAlign,
-    StackLayer, UiNode, VisualConcern,
+    BorderRadius, Color, Fill, InteractConcern, KeymapScopeId, LayoutConcern, SemanticKey,
+    ShortcutScopeSpec, Size, StackAlign, StackLayer, UiNode, VisualConcern,
 };
-use tela_core::builder::LayoutContainer;
+use tela_core::builder::{LayoutContainer, LogicalContainer};
 use tela_ui::{DraftInput, DraftInputSnapshot};
 
 use crate::domain::{FileManagerSession, OperationKind};
@@ -16,6 +16,7 @@ pub const OPERATION_MODAL_KEY: &str = "operation-modal";
 pub fn operation_modal(
     session: &FileManagerSession,
     input: Option<DraftInputSnapshot>,
+    input_focused: bool,
     width: f32,
     height: f32,
 ) -> UiNode {
@@ -46,7 +47,7 @@ pub fn operation_modal(
                 "operation.value",
             )
             .placeholder("输入名称")
-            .focused(true)
+            .focused(input_focused)
             .into_node(),
             300.0,
             32.0,
@@ -66,7 +67,12 @@ pub fn operation_modal(
         })
         .into(),
     );
-    let mut panel: UiNode = LayoutContainer::flex(controls)
+    let controls: UiNode = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+        id: KeymapScopeId("file-manager.operation".to_owned()),
+    })
+    .children(controls)
+    .into();
+    let mut panel: UiNode = LayoutContainer::flex([controls])
         .layout(LayoutConcern {
             width: Some(Size::fixed(360.0)),
             height: Some(Size::fixed(if needs_input { 220.0 } else { 180.0 })),

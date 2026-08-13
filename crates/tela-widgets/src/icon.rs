@@ -304,7 +304,7 @@ impl IconButton {
                     left: 6.0,
                 },
                 main_align: MainAlign::Center,
-                cross_align: tela_contract::CrossAlign::Center,
+                cross_align: tela_contract::CrossAlign::Baseline,
                 ..LayoutConcern::default()
             })
             .visual(VisualConcern {

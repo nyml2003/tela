@@ -18,6 +18,8 @@ tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
 tela-fonts = { path = "../tela-fonts" }
 ab_glyph = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tela-widgets = { path = "../tela-widgets" }
 tela-ui = { path = "../tela-ui" }
 tela-render-raster = { path = "../tela-render-raster" }

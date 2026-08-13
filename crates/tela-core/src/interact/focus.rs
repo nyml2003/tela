@@ -8,7 +8,7 @@
 //! - Teleport 子树焦点链重挂载至 ModalHost 作用域（见 008-2.10）。
 
 use std::collections::HashMap;
-use tela_contract::{FocusPort, FocusRef, Key, NodeId, NodeKind, SemanticKey, UiNode};
+use tela_contract::{FocusPort, FocusRef, KeymapScopeId, NodeId, NodeKind, SemanticKey, UiNode};
 
 /// 焦点图上下文：本帧从树构建（见 008-2.1）。
 pub(crate) struct FocusContext {
@@ -28,6 +28,11 @@ pub(crate) struct FocusContext {
     pub focusables: Vec<NodeId>,
     /// 节点索引 → 其开启的 scope 索引（图边目标为 FocusScope 时解析其 entry 端口）。
     pub scope_by_node: Vec<Option<usize>>,
+    /// 按 DFS 索引的键位作用域路径（由内向外）。
+    ///
+    /// 这和物理父节点不同：Teleport 子树会重挂到 ModalHost 的焦点链，因此不能继承
+    /// 来源位置的 `ShortcutScope`。应用只读取这份由 core 推导的路径。
+    pub keymap_scopes_by_node: Vec<Vec<KeymapScopeId>>,
 }
 
 /// 单个焦点作用域（见 008-2.9 端口契约）。
@@ -42,6 +47,12 @@ pub(crate) struct ScopeInfo {
     pub exit: FocusPort,
     /// 显式焦点图边（替换自动规则，单输入唯一目标）。
     pub graph: HashMap<NodeId, Vec<NodeId>>,
+}
+
+/// 当前 ModalHost 的焦点与键位链快照。
+struct ModalScopeContext {
+    focus_scope: usize,
+    keymap_scopes: Vec<KeymapScopeId>,
 }
 
 /// 方向（键身份，不是屏幕几何，见 008-2.9）。
@@ -90,11 +101,20 @@ pub(crate) fn build_focus_context(
         scope_node_index: vec![0],
         focusables: Vec::new(),
         scope_by_node: Vec::new(),
+        keymap_scopes_by_node: Vec::new(),
     };
     // 作用域栈 + ModalHost 作用域栈（Teleport 迁移目标）。
     let mut scope_stack: Vec<usize> = vec![0];
-    let mut modal_stack: Vec<usize> = Vec::new();
-    walk(nodes, 0, &mut ctx, &mut scope_stack, &mut modal_stack);
+    let mut modal_stack: Vec<ModalScopeContext> = Vec::new();
+    let mut keymap_scope_stack: Vec<KeymapScopeId> = Vec::new();
+    walk(
+        nodes,
+        0,
+        &mut ctx,
+        &mut scope_stack,
+        &mut modal_stack,
+        &mut keymap_scope_stack,
+    );
     // scope 内排序：tab_index 优先，树序兜底；-1 移出（id.0 即 DFS 索引，直接访问）。
     for scope in &mut ctx.scopes {
         scope.focusables.sort_by_key(|id| {
@@ -124,7 +144,8 @@ fn walk(
     index: usize,
     ctx: &mut FocusContext,
     scope_stack: &mut Vec<usize>,
-    modal_stack: &mut Vec<usize>,
+    modal_stack: &mut Vec<ModalScopeContext>,
+    keymap_scope_stack: &mut Vec<KeymapScopeId>,
 ) -> usize {
     if index >= nodes.len() {
         return index;
@@ -135,11 +156,15 @@ fn walk(
 
     // Teleport 焦点迁移：子树焦点链重挂载到最近 ModalHost 作用域，scope 父链同步迁移
     // （脱离原始逻辑树，见 008-2.10）。
-    let teleport_entered =
-        matches!(node.kind, NodeKind::Teleport(_)) && modal_stack.last().is_some();
-    if teleport_entered {
-        scope_stack.push(modal_stack.last().copied().unwrap_or(0));
-    }
+    let teleport_keymap_restore = if matches!(node.kind, NodeKind::Teleport(_)) {
+        modal_stack.last().map(|modal| {
+            scope_stack.push(modal.focus_scope);
+            std::mem::replace(keymap_scope_stack, modal.keymap_scopes.clone())
+        })
+    } else {
+        None
+    };
+    let teleport_entered = teleport_keymap_restore.is_some();
     let child_scope = *scope_stack.last().unwrap_or(&0);
 
     // DFS 前序：索引顺序 = 分配顺序，直接 push 对齐（id.0 == index）。
@@ -147,6 +172,8 @@ fn walk(
     ctx.node_scope.push(child_scope);
     ctx.parents.push(0);
     ctx.scope_by_node.push(None);
+    ctx.keymap_scopes_by_node
+        .push(keymap_scope_stack.iter().rev().cloned().collect());
     if node.interact.as_ref().is_some_and(|i| i.focusable) {
         ctx.scopes[child_scope].focusables.push(id);
         ctx.focusables.push(id);
@@ -154,7 +181,10 @@ fn walk(
 
     // ModalHost：其直接子树为模态层（Teleport 迁移目标作用域记录）。
     let entered_modal = if matches!(node.kind, NodeKind::ModalHost) {
-        modal_stack.push(child_scope);
+        modal_stack.push(ModalScopeContext {
+            focus_scope: child_scope,
+            keymap_scopes: keymap_scope_stack.clone(),
+        });
         true
     } else {
         false
@@ -183,19 +213,37 @@ fn walk(
         false
     };
 
+    let entered_keymap_scope = if let NodeKind::ShortcutScope(spec) = &node.kind {
+        keymap_scope_stack.push(spec.id.clone());
+        true
+    } else {
+        false
+    };
+
     // 递归子节点：DFS 索引推进，回填树父索引。
     let mut next = index + 1;
     for _ in 0..node.children.len() {
         let child_index = next;
-        next = walk(nodes, next, ctx, scope_stack, modal_stack);
+        next = walk(
+            nodes,
+            next,
+            ctx,
+            scope_stack,
+            modal_stack,
+            keymap_scope_stack,
+        );
         ctx.parents[child_index] = index;
     }
 
+    if entered_keymap_scope {
+        keymap_scope_stack.pop();
+    }
     if entered_scope {
         scope_stack.pop();
     }
     if teleport_entered {
         scope_stack.pop();
+        *keymap_scope_stack = teleport_keymap_restore.expect("Teleport 必有键位路径快照");
     }
     if entered_modal {
         modal_stack.pop();
@@ -331,20 +379,6 @@ pub(crate) fn exit_target(scope: &ScopeInfo, dir: Option<Direction>) -> Option<S
             .or(port.right.as_ref()),
     }
     .map(|FocusRef(key)| key.clone())
-}
-
-/// 按键 → 导航输入。
-pub(crate) fn nav_input_from_key(key: Key, shift: bool) -> Option<NavInput> {
-    match key {
-        Key::Tab => Some(NavInput::Tab { reverse: shift }),
-        Key::ArrowUp => Some(NavInput::Direction(Direction::Up)),
-        Key::ArrowDown => Some(NavInput::Direction(Direction::Down)),
-        Key::ArrowLeft => Some(NavInput::Direction(Direction::Left)),
-        Key::ArrowRight => Some(NavInput::Direction(Direction::Right)),
-        Key::Enter => Some(NavInput::Confirm),
-        Key::Escape => Some(NavInput::Cancel),
-        _ => None,
-    }
 }
 
 /// 命中区域是否包含点（点-in-rect，含预合并 clip，见 003-7）。

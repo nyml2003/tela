@@ -3,14 +3,13 @@
 //! - 交互层只消费 `interact` 维度；
 //! - 焦点转移为规约式纯函数（见 focus.rs），焦点状态存视图状态仓库（跨帧经 key）；
 //! - 模态栈拦截下层输入：命中测试只对栈顶模态生效；
-//! - 快捷键沿 FocusScope 冒泡（见 shortcut.rs）。
+//! - core 只消费应用解析后的键盘意图；键位表与原始平台按键留在宿主/应用层。
 
 pub(crate) mod focus;
-pub(crate) mod shortcut;
 
 use tela_contract::{
-    InputEvent, KeyState, NodeId, Point, PointerEvent, RawKeyboardEvent, SemanticKey, UiAction,
-    UiFrame, UiNode,
+    FocusDirection, InputEvent, KeyboardIntent, KeyboardIntentEvent, NodeId, Point, PointerEvent,
+    SemanticKey, UiAction, UiFrame, UiNode,
 };
 
 use crate::state::{FocusSlot, ViewStateStore};
@@ -32,7 +31,7 @@ pub fn handle_input(
     let mut session = Session::new(tree, frame, state);
     let actions = match event {
         InputEvent::Pointer(pointer) => session.handle_pointer(*pointer),
-        InputEvent::Key(key) => session.handle_key(key),
+        InputEvent::Keyboard(intent) => session.handle_keyboard_intent(intent),
     };
     session.commit();
     actions
@@ -59,9 +58,13 @@ pub fn restore_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction>
             saved.clone(),
             FocusSlot {
                 node_id: Some(node_id),
-                key: Some(saved),
+                key: Some(saved.clone()),
             },
         );
+        state.set_current_focus(FocusSlot {
+            node_id: Some(node_id),
+            key: Some(saved),
+        });
         return vec![UiAction::FocusChanged {
             from: None,
             to: Some(node_id),
@@ -69,6 +72,55 @@ pub fn restore_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction>
     }
     let _ = (nodes, ids);
     Vec::new()
+}
+
+/// 让活动模态取得默认焦点。
+///
+/// 模态打开后，常规页面不需要为首个控件手写焦点 key。若当前焦点不在栈顶模态内，
+/// core 按既有焦点树序选择模态子树中的首个可聚焦节点；没有可聚焦节点时保持原状。
+/// 这只改变 `ViewStateStore`，由下一次 resolve 投影可见焦点环。
+pub fn ensure_modal_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction> {
+    let Some(modal_key) = state.modal_stack().last().cloned() else {
+        return Vec::new();
+    };
+    let (nodes, ids, keys) = tree.node_table();
+    let Some(modal_index) = keys.iter().position(|key| *key == modal_key) else {
+        return Vec::new();
+    };
+    let focus = build_focus_context(&nodes, &ids, &keys);
+    let current_index = state
+        .current_focus_key()
+        .and_then(|key| keys.iter().position(|candidate| candidate == key));
+    if current_index.is_some_and(|index| {
+        nodes[index]
+            .interact
+            .as_ref()
+            .is_some_and(|interact| interact.focusable)
+            && is_descendant_of(index, modal_index, &focus.parents)
+    }) {
+        return Vec::new();
+    }
+    let Some(target) = focus
+        .focusables
+        .iter()
+        .copied()
+        .find(|node_id| is_descendant_of(node_id.0 as usize, modal_index, &focus.parents))
+    else {
+        return Vec::new();
+    };
+    let target_index = target.0 as usize;
+    let key = keys[target_index].clone();
+    let from = current_index.map(|index| ids[index]);
+    let slot = FocusSlot {
+        node_id: Some(target),
+        key: Some(key.clone()),
+    };
+    state.set_current_focus(slot.clone());
+    state.set_focus(key, slot);
+    vec![UiAction::FocusChanged {
+        from,
+        to: Some(target),
+    }]
 }
 
 /// 单次事件处理会话（收集动作，结束时提交焦点状态）。
@@ -260,21 +312,28 @@ impl<'a> Session<'a> {
 
     // ---------- 键盘 ----------
 
-    fn handle_key(&mut self, event: &RawKeyboardEvent) -> Vec<UiAction> {
-        if event.state != KeyState::Pressed {
+    fn handle_keyboard_intent(&mut self, event: &KeyboardIntentEvent) -> Vec<UiAction> {
+        // 自动重复只允许纯焦点移动。业务激活、取消和 Invoke 必须显式定义连续意图，
+        // 不能因键盘长按重复提交或重复关闭。
+        if event.repeat
+            && matches!(
+                event.intent,
+                KeyboardIntent::Activate | KeyboardIntent::Cancel | KeyboardIntent::Invoke(_)
+            )
+        {
             return std::mem::take(&mut self.actions);
         }
-        // 快捷键冒泡优先于导航转移（Esc 既是取消也是 ShortcutActivated，见 008-2.11）。
-        let mut consumed = false;
-        if let Some(shortcut) = self.bubble_shortcut(event) {
-            self.actions.push(UiAction::ShortcutActivated {
-                shortcut_id: shortcut,
-            });
-            consumed = true;
-        }
-        if !consumed && let Some(nav) = focus::nav_input_from_key(event.key, event.modifiers.shift)
-        {
-            self.handle_nav(nav);
+        match &event.intent {
+            KeyboardIntent::FocusNext => self.handle_nav(NavInput::Tab { reverse: false }),
+            KeyboardIntent::FocusPrevious => self.handle_nav(NavInput::Tab { reverse: true }),
+            KeyboardIntent::MoveFocus(direction) => {
+                self.handle_nav(NavInput::Direction(direction_from_contract(*direction)));
+            }
+            KeyboardIntent::Activate => self.handle_nav(NavInput::Confirm),
+            KeyboardIntent::Cancel => self.handle_nav(NavInput::Cancel),
+            KeyboardIntent::Invoke(shortcut_id) => self.actions.push(UiAction::ShortcutActivated {
+                shortcut_id: shortcut_id.clone(),
+            }),
         }
         std::mem::take(&mut self.actions)
     }
@@ -282,7 +341,30 @@ impl<'a> Session<'a> {
     /// 导航转移：Tab/方向键/确认/取消（纯函数转移 + 状态提交）。
     fn handle_nav(&mut self, nav: NavInput) {
         let focus = self.focus.as_ref().expect("焦点图已构建");
-        let Some(current) = self.current_focus_id() else {
+        let active_modal = self.top_modal_node_id();
+        let current = self.current_focus_id();
+        if let Some(modal) = active_modal
+            && matches!(nav, NavInput::Cancel)
+        {
+            // 取消键属于活动模态域，而不是当前背景焦点。这样打开模态后的第一下 Escape
+            // 不会依赖宿主是否已经完成首个焦点投射。
+            self.state.pop_modal();
+            self.actions.push(UiAction::CloseModal { node_id: modal });
+            return;
+        }
+        if let Some(modal) = active_modal
+            && current.is_none_or(|node_id| !self.is_in_modal(node_id, modal))
+        {
+            // 模态是当前输入域。首次 Tab/方向导航或过期的下层焦点都自动落入模态，
+            // 不要求页面为每个模态维护一组 focus key。
+            if matches!(nav, NavInput::Tab { .. } | NavInput::Direction(_))
+                && let Some(target) = self.modal_focus_target(modal, nav_is_reverse(nav))
+            {
+                self.request_focus(target);
+            }
+            return;
+        }
+        let Some(current) = current else {
             // 无焦点：Tab/方向 → 首个作用域的首个可聚焦（按 tab 序，见 focus.rs 排序）。
             match nav {
                 NavInput::Tab { .. } | NavInput::Direction(_) => {
@@ -312,8 +394,36 @@ impl<'a> Session<'a> {
                 None
             }
         };
+        let target = if let Some(modal) = active_modal
+            && matches!(nav, NavInput::Tab { .. } | NavInput::Direction(_))
+        {
+            match target {
+                Some(target) if self.is_in_modal(target, modal) => Some(target),
+                _ => self.modal_focus_target(modal, nav_is_reverse(nav)),
+            }
+        } else {
+            target
+        };
         if let Some(target) = target {
             self.request_focus(target);
+        }
+    }
+
+    fn is_in_modal(&self, node_id: NodeId, modal: NodeId) -> bool {
+        self.focus.as_ref().is_some_and(|focus| {
+            is_descendant_of(node_id.0 as usize, modal.0 as usize, &focus.parents)
+        })
+    }
+
+    fn modal_focus_target(&self, modal: NodeId, reverse: bool) -> Option<NodeId> {
+        let focus = self.focus.as_ref()?;
+        let mut candidates = focus.focusables.iter().copied().filter(|node_id| {
+            is_descendant_of(node_id.0 as usize, modal.0 as usize, &focus.parents)
+        });
+        if reverse {
+            candidates.next_back()
+        } else {
+            candidates.next()
         }
     }
 
@@ -421,16 +531,24 @@ impl<'a> Session<'a> {
             to: Some(node_id),
         });
     }
+}
 
-    /// 快捷键冒泡：从焦点节点沿祖先链向上（见 shortcut.rs，parents 表预计算）。
-    fn bubble_shortcut(&mut self, event: &RawKeyboardEvent) -> Option<tela_contract::ShortcutId> {
-        let current = self.current_focus_id()?;
-        let idx = current.0 as usize;
-        if idx >= self.nodes.len() {
-            return None;
-        }
-        let parents = self.focus.as_ref().map(|f| &f.parents);
-        shortcut::bubble_shortcut(&self.nodes, idx, parents.map(|v| &**v), event)
+fn direction_from_contract(direction: FocusDirection) -> focus::Direction {
+    match direction {
+        FocusDirection::Up => focus::Direction::Up,
+        FocusDirection::Down => focus::Direction::Down,
+        FocusDirection::Left => focus::Direction::Left,
+        FocusDirection::Right => focus::Direction::Right,
+    }
+}
+
+fn nav_is_reverse(nav: NavInput) -> bool {
+    match nav {
+        NavInput::Tab { reverse } => reverse,
+        NavInput::Direction(focus::Direction::Up | focus::Direction::Left) => true,
+        NavInput::Direction(focus::Direction::Down | focus::Direction::Right)
+        | NavInput::Confirm
+        | NavInput::Cancel => false,
     }
 }
 

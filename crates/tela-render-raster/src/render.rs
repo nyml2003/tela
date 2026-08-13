@@ -180,9 +180,19 @@ fn render_payload(
                 }
             }
         }
-        DrawPayload::Text { text } => {
+        DrawPayload::Text { text, baseline_y } => {
             if cfg.backend_caps.text {
-                text::draw_text(canvas, &geometry, clip, text, scale, cfg, logical);
+                text::draw_text(
+                    canvas,
+                    text::TextDrawInput {
+                        geometry: &geometry,
+                        clip,
+                        text,
+                        baseline_y: *baseline_y,
+                        scale,
+                        logical,
+                    },
+                );
             }
         }
         DrawPayload::LinearGradient { gradient } => {

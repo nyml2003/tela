@@ -116,11 +116,13 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
     ) -> Result<LayoutBox, UiLayoutError> {
         let w = children.iter().map(|c| c.x + c.w).fold(0.0, f32::max);
         let h = children.iter().map(|c| c.y + c.h).fold(0.0, f32::max);
+        let first_baseline = propagated_baseline(&children);
         Ok(LayoutBox {
             x: 0.0,
             y: 0.0,
             w,
             h,
+            first_baseline,
             children,
         })
     }
@@ -139,17 +141,32 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             constraints.min_h.to_bits(),
             constraints.max_h.to_bits(),
         );
-        if let Some((w, h)) = self.cache.map.get(&key) {
+        if let Some((w, h, first_baseline)) = self.cache.map.get(&key) {
             self.cache.hits += 1;
             return Ok(LayoutBox {
                 x: 0.0,
                 y: 0.0,
                 w: *w,
                 h: *h,
+                first_baseline: *first_baseline,
                 children: Vec::new(),
             });
         }
         self.cache.misses += 1;
+
+        let text_metrics = match &node.content {
+            Some(ContentConcern::Text(text)) => {
+                Some(self.text_measurer.measure(&TextMeasureRequest {
+                    text: &text.text,
+                    font: &text.font,
+                    font_size: text.font_size,
+                    line_height: text.line_height,
+                    // 文本 Auto 尺寸与换行依赖可用宽度（见 003-6）。
+                    max_width: Some(constraints.max_w),
+                }))
+            }
+            _ => None,
+        };
 
         let w = self.resolve_size_axis(
             node,
@@ -157,7 +174,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             AxisSize {
                 percent_base: constraints.max_w,
                 fill_base: constraints.max_w,
-                auto_fallback: self.auto_content(node, Axis::Width, Some(constraints.max_w)),
+                auto_fallback: text_metrics.map_or(0.0, |metrics| metrics.width),
                 min: constraints.min_w,
                 max: constraints.max_w,
             },
@@ -168,38 +185,21 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             AxisSize {
                 percent_base: constraints.max_h,
                 fill_base: constraints.max_h,
-                auto_fallback: self.auto_content(node, Axis::Height, Some(constraints.max_w)),
+                auto_fallback: text_metrics.map_or(0.0, |metrics| metrics.height),
                 min: constraints.min_h,
                 max: constraints.max_h,
             },
         )?;
-        self.cache.map.insert(key, (w, h));
+        let first_baseline = text_metrics.map(|metrics| metrics.first_baseline.clamp(0.0, h));
+        self.cache.map.insert(key, (w, h, first_baseline));
         Ok(LayoutBox {
             x: 0.0,
             y: 0.0,
             w,
             h,
+            first_baseline,
             children: Vec::new(),
         })
-    }
-
-    /// Auto 内容测量：文本走 `TextMeasurer`（纯函数），其余原语无内容尺寸（M3 接入资源尺寸）。
-    fn auto_content(&self, node: &UiNode, axis: Axis, max_width: Option<f32>) -> f32 {
-        let Some(ContentConcern::Text(text)) = &node.content else {
-            return 0.0;
-        };
-        let metrics = self.text_measurer.measure(&TextMeasureRequest {
-            text: &text.text,
-            font: &text.font,
-            font_size: text.font_size,
-            line_height: text.line_height,
-            // 文本 Auto 尺寸与换行依赖可用宽度（见 003-6）。
-            max_width,
-        });
-        match axis {
-            Axis::Width => metrics.width,
-            Axis::Height => metrics.height,
-        }
     }
 
     // ---------- Flex：统一容器 + wrap 开关（见 006-2.1） ----------
@@ -259,6 +259,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             y: 0.0,
             w: 0.0,
             h: 0.0,
+            first_baseline: None,
             children: Vec::new(),
         };
         set_axis_extent(&mut box_, main_axis, self_main);
@@ -294,6 +295,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 &layout,
             )
         };
+        box_.first_baseline = propagated_baseline(&box_.children);
         Ok(box_)
     }
 
@@ -385,19 +387,24 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 .sum::<f32>()
                 + layout.gap * node.children.len().saturating_sub(1) as f32
         };
-        let content_cross = measured
-            .iter()
-            .zip(&node.children)
-            .zip(&margins)
-            .map(|((b, child), m)| {
-                if layout.cross_align == CrossAlign::Stretch && stretch_implicit(child, cross_axis)
-                {
-                    0.0
-                } else {
-                    axis_extent_of(b, cross_axis) + margin_axis(m, cross_axis)
-                }
-            })
-            .fold(0.0, f32::max);
+        let content_cross = if baseline_alignment(layout, main_axis) {
+            baseline_cross_extent(&measured, &margins, cross_axis)
+        } else {
+            measured
+                .iter()
+                .zip(&node.children)
+                .zip(&margins)
+                .map(|((b, child), m)| {
+                    if layout.cross_align == CrossAlign::Stretch
+                        && stretch_implicit(child, cross_axis)
+                    {
+                        0.0
+                    } else {
+                        axis_extent_of(b, cross_axis) + margin_axis(m, cross_axis)
+                    }
+                })
+                .fold(0.0, f32::max)
+        };
         Ok((measured, final_main, content_main, content_cross))
     }
 
@@ -467,6 +474,8 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
 
         let mut result = Vec::with_capacity(boxes.len());
         let mut cursor = origin_main + leading;
+        let baseline_target = baseline_alignment(layout, main_axis)
+            .then(|| baseline_target(&boxes, margins, cross_axis));
         for (index, child) in node.children.iter().enumerate() {
             let mut child_box = std::mem::take(&mut boxes[index]);
             let margin = &margins[index];
@@ -477,6 +486,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 area_cross,
                 &child_box,
             );
+            let child_baseline = baseline_of(&child_box, cross_axis);
             set_axis_extent(&mut child_box, main_axis, final_main[index]);
             set_axis_extent(&mut child_box, cross_axis, child_cross);
             set_axis_pos(
@@ -487,13 +497,18 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             set_axis_pos(
                 &mut child_box,
                 cross_axis,
-                origin_cross
-                    + cross_align_pos(
-                        layout.cross_align,
-                        child_cross + margin_axis(margin, cross_axis),
-                        area_cross,
-                        margin_axis_start(margin, cross_axis),
-                    ),
+                match baseline_target {
+                    Some(target) => origin_cross + target - child_baseline,
+                    None => {
+                        origin_cross
+                            + cross_align_pos(
+                                layout.cross_align,
+                                child_cross + margin_axis(margin, cross_axis),
+                                area_cross,
+                                margin_axis_start(margin, cross_axis),
+                            )
+                    }
+                },
             );
             cursor += final_main[index] + margin_axis(margin, main_axis) + layout.gap + per_gap;
             result.push(child_box);
@@ -594,10 +609,21 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 + layout.gap * row.len().saturating_sub(1) as f32;
             let row_free = (area_main - row_content).max(0.0);
             let (leading, per_gap) = main_align_spacing(layout.main_align, row_free, row.len());
-            let row_height = row
-                .iter()
-                .map(|&i| boxes[i].h + margin_axis(&margins[i], cross_axis))
-                .fold(0.0, f32::max);
+            let row_boxes: Vec<LayoutBox> = row.iter().map(|&i| boxes[i].clone()).collect();
+            let row_margins: Vec<Insets> = row.iter().map(|&i| margins[i]).collect();
+            let row_height = if baseline_alignment(layout, main_axis) {
+                baseline_cross_extent(&row_boxes, &row_margins, cross_axis)
+            } else {
+                row_boxes
+                    .iter()
+                    .zip(&row_margins)
+                    .map(|(box_, margin)| {
+                        axis_extent_of(box_, cross_axis) + margin_axis(margin, cross_axis)
+                    })
+                    .fold(0.0, f32::max)
+            };
+            let row_baseline_target = baseline_alignment(layout, main_axis)
+                .then(|| baseline_target(&row_boxes, &row_margins, cross_axis));
 
             let mut row_cursor_main = origin_main + leading;
             for (slot, &i) in row.iter().enumerate() {
@@ -605,6 +631,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 let margin = &margins[i];
                 let child_cross =
                     placed_cross(layout.cross_align, child, cross_axis, area_cross, &boxes[i]);
+                let child_baseline = baseline_of(&boxes[i], cross_axis);
                 set_axis_extent(&mut boxes[i], main_axis, row_main[slot]);
                 set_axis_extent(&mut boxes[i], cross_axis, child_cross);
                 set_axis_pos(
@@ -615,13 +642,18 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 set_axis_pos(
                     &mut boxes[i],
                     cross_axis,
-                    row_cursor
-                        + cross_align_pos(
-                            layout.cross_align,
-                            child_cross + margin_axis(margin, cross_axis),
-                            row_height,
-                            margin_axis_start(margin, cross_axis),
-                        ),
+                    match row_baseline_target {
+                        Some(target) => row_cursor + target - child_baseline,
+                        None => {
+                            row_cursor
+                                + cross_align_pos(
+                                    layout.cross_align,
+                                    child_cross + margin_axis(margin, cross_axis),
+                                    row_height,
+                                    margin_axis_start(margin, cross_axis),
+                                )
+                        }
+                    },
                 );
                 row_cursor_main +=
                     row_main[slot] + margin_axis(margin, main_axis) + layout.gap + per_gap;
@@ -697,6 +729,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             y: 0.0,
             w: self_w,
             h: self_h,
+            first_baseline: None,
             children: Vec::new(),
         };
 
@@ -740,6 +773,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             boxes.push(cb);
         }
         box_.children = boxes;
+        box_.first_baseline = propagated_baseline(&box_.children);
         Ok(box_)
     }
 
@@ -776,6 +810,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             y: 0.0,
             w: self_w,
             h: self_h,
+            first_baseline: None,
             children: Vec::new(),
         };
         // 内容按 Column 语义纵向排布（gap + margin）。
@@ -790,6 +825,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             placed.push(cb);
         }
         box_.children = placed;
+        box_.first_baseline = propagated_baseline(&box_.children);
         Ok(box_)
     }
 
@@ -833,6 +869,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             y: 0.0,
             w: self_w,
             h: self_h,
+            first_baseline: None,
             children: Vec::new(),
         };
         let origin_x = layout.border_width + layout.padding.left;
@@ -846,6 +883,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             placed.push(cb);
         }
         box_.children = placed;
+        box_.first_baseline = propagated_baseline(&box_.children);
         Ok(box_)
     }
 
@@ -983,7 +1021,7 @@ type MeasureKey = (usize, u32, u32, u32, u32);
 /// 缓存只是输入→输出的查表加速，不引入运行时可变状态。
 #[derive(Default)]
 pub(crate) struct MeasureCache {
-    map: HashMap<MeasureKey, (f32, f32)>,
+    map: HashMap<MeasureKey, (f32, f32, Option<f32>)>,
     hits: usize,
     misses: usize,
 }
@@ -1151,6 +1189,50 @@ fn margin_axis_start(m: &Insets, axis: Axis) -> f32 {
     }
 }
 
+fn margin_axis_end(m: &Insets, axis: Axis) -> f32 {
+    match axis {
+        Axis::Width => m.right,
+        Axis::Height => m.bottom,
+    }
+}
+
+fn baseline_alignment(layout: &tela_contract::LayoutConcern, main_axis: Axis) -> bool {
+    layout.cross_align == CrossAlign::Baseline && main_axis == Axis::Width
+}
+
+fn baseline_of(box_: &LayoutBox, cross_axis: Axis) -> f32 {
+    box_.first_baseline
+        .unwrap_or_else(|| axis_extent_of(box_, cross_axis))
+        .clamp(0.0, axis_extent_of(box_, cross_axis))
+}
+
+fn baseline_target(boxes: &[LayoutBox], margins: &[Insets], cross_axis: Axis) -> f32 {
+    boxes
+        .iter()
+        .zip(margins)
+        .map(|(box_, margin)| margin_axis_start(margin, cross_axis) + baseline_of(box_, cross_axis))
+        .fold(0.0, f32::max)
+}
+
+fn baseline_cross_extent(boxes: &[LayoutBox], margins: &[Insets], cross_axis: Axis) -> f32 {
+    let ascent = baseline_target(boxes, margins, cross_axis);
+    let descent = boxes
+        .iter()
+        .zip(margins)
+        .map(|(box_, margin)| {
+            axis_extent_of(box_, cross_axis) - baseline_of(box_, cross_axis)
+                + margin_axis_end(margin, cross_axis)
+        })
+        .fold(0.0, f32::max);
+    ascent + descent
+}
+
+fn propagated_baseline(children: &[LayoutBox]) -> Option<f32> {
+    children
+        .iter()
+        .find_map(|child| child.first_baseline.map(|baseline| child.y + baseline))
+}
+
 /// 盒内容区尺寸（减 padding/border）。
 fn content_area(box_: &LayoutBox, layout: &tela_contract::LayoutConcern, axis: Axis) -> f32 {
     let extent = axis_extent_of(box_, axis);
@@ -1204,6 +1286,7 @@ fn cross_align_pos(
             ((area_extent - child_extent_with_margin) / 2.0).max(0.0) + margin_start
         }
         CrossAlign::End => (area_extent - child_extent_with_margin).max(0.0) + margin_start,
+        CrossAlign::Baseline => margin_start,
         CrossAlign::Stretch => margin_start,
     }
 }

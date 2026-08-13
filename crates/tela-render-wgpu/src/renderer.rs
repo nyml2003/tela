@@ -340,13 +340,21 @@ impl WgpuRenderer {
                         stats.missing_images += 1;
                     }
                 }
-                DrawPayload::Text { text: content } => {
+                DrawPayload::Text {
+                    text: content,
+                    baseline_y,
+                } => {
                     let texture = TextureRef(format!("__tela.text.{command_index}"));
                     let width = (command.geometry.w.max(1.0) * self.dpi).ceil() as u32;
                     let height = (command.geometry.h.max(1.0) * self.dpi).ceil() as u32;
-                    let signature = format!("{content:?};{width}x{height};dpi={:.3}", self.dpi);
+                    let local_baseline = (*baseline_y - command.geometry.y).max(0.0);
+                    let signature = format!(
+                        "{content:?};{width}x{height};baseline={local_baseline:.3};dpi={:.3}",
+                        self.dpi
+                    );
                     if self.text_images.get(&texture) != Some(&signature) {
-                        let pixels = text::rasterize(content, width, height, self.dpi);
+                        let pixels =
+                            text::rasterize(content, width, height, local_baseline, self.dpi);
                         self.upload_rgba8(texture.clone(), width, height, &pixels)
                             .expect("文字纹理尺寸和 RGBA8 数据必须匹配");
                         self.text_images.insert(texture.clone(), signature);

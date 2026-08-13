@@ -92,15 +92,15 @@ fn write_payload(output: &mut String, payload: &DrawPayload) {
             write_json_string(output, &texture.0);
             output.push('}');
         }
-        DrawPayload::Text { text } => {
+        DrawPayload::Text { text, baseline_y } => {
             output.push_str(r#"{"kind":"text","text":"#);
             write_json_string(output, &text.text);
             output.push_str(r#","font":"#);
             write_json_string(output, &text.font.0);
             write!(
                 output,
-                r#","font_size":{},"line_height":{},"color":"#,
-                text.font_size, text.line_height
+                r#","font_size":{},"line_height":{},"baseline_y":{},"color":"#,
+                text.font_size, text.line_height, baseline_y
             )
             .expect("写入 String 不会失败");
             write_color(output, text.color);

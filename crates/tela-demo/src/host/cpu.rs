@@ -47,10 +47,22 @@ pub extern "C" fn demo_pointer_scroll(x: f32, y: f32, dx: f32, dy: f32) -> u32 {
         })
     })
 }
+/// 平台归一化后的物理键进入应用键位表，再由 tela-core 消费语义意图。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_key_down(code: u32, modifier_bits: u32, repeat: u32) -> u32 {
+    with_app(|app| app.handle_raw_key_codes(code as u16, modifier_bits as u8, repeat != 0))
+}
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_input_focused() -> u32 {
     u32::from(with_app(|app| app.input_focused()))
+}
+/// 隐藏 DOM 编辑器获得焦点后，记录其对应的 tela 输入目标。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_focus() -> u32 {
+    with_app(|app| app.input_focus())
 }
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
@@ -101,6 +113,18 @@ pub extern "C" fn demo_input_value_begin(bytes: u32) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_input_value_finish(bytes: u32) -> u32 {
     with_app(|app| app.finish_input_upload(bytes as usize))
+}
+/// 分配运行时键位表 JSON 的 CPU WASM 上传缓冲区。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_keymap_begin(bytes: u32) -> *mut u8 {
+    with_app(|app| app.begin_keymap_upload(bytes as usize))
+}
+/// 校验并原子替换上传的完整键位表。返回 1 = 已替换，0 = 旧快照保留。
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_keymap_finish(bytes: u32) -> u32 {
+    with_app(|app| app.finish_keymap_upload(bytes as usize))
 }
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]

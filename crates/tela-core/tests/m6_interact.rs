@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    Color, Fill, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec, IdentityConcern,
-    InputEvent, InteractConcern, Key, KeyCombo, KeyState, KeyStrategy, LayoutConcern, Modifiers,
-    Point, RawKeyboardEvent, SemanticKey, ShortcutId, ShortcutMapping, ShortcutScopeSpec, Size,
-    TextMeasureRequest, TextMeasurer, TextMetrics, UiAction, Viewport, VirtualListSpec,
-    VisualConcern,
+    Color, Fill, FocusDirection, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec,
+    IdentityConcern, InputEvent, InteractConcern, KeyStrategy, KeyboardIntent, KeyboardIntentEvent,
+    LayoutConcern, Point, SemanticKey, ShortcutId, Size, TextMeasureRequest, TextMeasurer,
+    TextMetrics, UiAction, Viewport, VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
-use tela_core::{UiTree, ViewStateStore, handle_input, restore_focus, save_focus};
+use tela_core::{
+    UiTree, ViewStateStore, ensure_modal_focus, handle_input, restore_focus, save_focus,
+};
 
 const VIEWPORT: Viewport = Viewport {
     width: 200.0,
@@ -24,6 +25,7 @@ impl TextMeasurer for MockMeasurer {
             width: request.text.chars().count() as f32 * request.font_size * 0.5,
             height: request.line_height,
             line_count: 1,
+            first_baseline: request.font_size * 0.8,
         }
     }
 }
@@ -80,15 +82,17 @@ fn clickable_rect(width: f32, height: f32) -> tela_contract::UiNode {
     node
 }
 
-fn key(key: Key, shift: bool) -> InputEvent {
-    InputEvent::Key(RawKeyboardEvent {
-        key,
-        modifiers: Modifiers {
-            shift,
-            ..Modifiers::default()
-        },
-        state: KeyState::Pressed,
+fn key(intent: KeyboardIntent) -> InputEvent {
+    InputEvent::Keyboard(KeyboardIntentEvent {
+        intent,
         repeat: false,
+    })
+}
+
+fn repeated_key(intent: KeyboardIntent) -> InputEvent {
+    InputEvent::Keyboard(KeyboardIntentEvent {
+        intent,
+        repeat: true,
     })
 }
 
@@ -237,7 +241,7 @@ fn tab_moves_in_tree_order() {
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
     // 无焦点时 Tab → 首个可聚焦。
-    let actions = handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     let first = ids[1];
     assert!(
         actions
@@ -245,7 +249,7 @@ fn tab_moves_in_tree_order() {
             .any(|a| matches!(a, UiAction::FocusChanged { to: Some(id), .. } if *id == first))
     );
     // 再 Tab → 第二个。
-    let actions = handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     let second = ids[2];
     assert!(
         actions
@@ -253,7 +257,12 @@ fn tab_moves_in_tree_order() {
             .any(|a| matches!(a, UiAction::FocusChanged { to: Some(id), .. } if *id == second))
     );
     // Shift+Tab 回退 → 第一个。
-    let actions = handle_input(&tree, &frame, &mut state, &key(Key::Tab, true));
+    let actions = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::FocusPrevious),
+    );
     assert!(
         actions
             .iter()
@@ -275,10 +284,10 @@ fn tab_index_reorders_and_negative_excludes() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     // 首个 = tab_index 0 的第三个节点。
     assert!(state.current_focus().and_then(|f| f.node_id) == Some(ids[3]));
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(ids[1]),
         "tab_index 5 次之"
@@ -298,10 +307,10 @@ fn trap_focus_wraps_around() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     // 末尾再 Tab → 回绕到首项。
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(ids[1]),
         "trap 回绕到首项"
@@ -329,7 +338,12 @@ fn entry_port_resolves_direction() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 无焦点时按下方向键 → 根 scope 入口 → 首个可聚焦。
-    let actions = handle_input(&tree, &frame, &mut state, &key(Key::ArrowDown, false));
+    let actions = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::MoveFocus(FocusDirection::Down)),
+    );
     assert!(
         actions
             .iter()
@@ -360,8 +374,13 @@ fn focus_graph_edge_replaces_auto_rules() {
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
     // 聚焦到第一个 → 方向键 → 沿显式边到第二个。
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    handle_input(&tree, &frame, &mut state, &key(Key::ArrowDown, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::MoveFocus(FocusDirection::Down)),
+    );
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(ids[3]),
         "沿显式边转移"
@@ -379,8 +398,8 @@ fn confirm_triggers_active_action() {
     .unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    let actions = handle_input(&tree, &frame, &mut state, &key(Key::Enter, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::Activate));
     assert!(
         actions.iter().any(|a| matches!(a, UiAction::Click { .. })),
         "确认触发主动作"
@@ -393,11 +412,11 @@ fn save_and_restore_focus_explicit() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 聚焦第二个并保存。
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     save_focus(&mut state);
     // 焦点移开。
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(state.current_focus().and_then(|f| f.node_id) != Some(tree.node_ids()[2]));
     // 显式恢复 → 回到保存的焦点。
     let actions = restore_focus(&tree, &mut state);
@@ -406,94 +425,36 @@ fn save_and_restore_focus_explicit() {
     ));
 }
 
-// ---------- 验收：快捷键（ShortcutScope 冒泡 / consumed 终止 / 局部覆盖） ----------
+// ---------- 验收：core 只消费已解析的键盘意图 ----------
 
 #[test]
-fn shortcut_scope_activates_shortcut() {
-    // ShortcutScope 映射 Ctrl+S → SAVE。
-    let scope = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
-        mappings: vec![ShortcutMapping {
-            combo: KeyCombo {
-                modifiers: Modifiers {
-                    ctrl: true,
-                    ..Modifiers::default()
-                },
-                key: Key::Char('s'),
-            },
-            shortcut: ShortcutId::Save,
-        }],
-    })
-    .children([focusable_rect(50.0, 20.0, 0)]);
-    let tree = UiTree::new(scope).unwrap();
+fn keyboard_intent_activates_shortcut() {
+    let tree = UiTree::new(focusable_rect(50.0, 20.0, 0)).unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
     let actions = handle_input(
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Key(RawKeyboardEvent {
-            key: Key::Char('s'),
-            modifiers: Modifiers {
-                ctrl: true,
-                ..Modifiers::default()
-            },
-            state: KeyState::Pressed,
-            repeat: false,
-        }),
+        &key(KeyboardIntent::Invoke(ShortcutId::Save)),
     );
-    assert!(actions.iter().any(|a| matches!(a, UiAction::ShortcutActivated { shortcut_id } if *shortcut_id == ShortcutId::Save)));
+    assert!(actions.iter().any(
+        |action| matches!(action, UiAction::ShortcutActivated { shortcut_id } if *shortcut_id == ShortcutId::Save)
+    ));
 }
 
 #[test]
-fn nested_shortcut_scope_overrides_outer() {
-    // 外层 Ctrl+S → SAVE；内层 Ctrl+S → Custom("inner")；焦点在内层 → 内层覆盖。
-    let inner = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
-        mappings: vec![ShortcutMapping {
-            combo: KeyCombo {
-                modifiers: Modifiers {
-                    ctrl: true,
-                    ..Modifiers::default()
-                },
-                key: Key::Char('s'),
-            },
-            shortcut: ShortcutId::Custom("inner".to_string()),
-        }],
-    })
-    .children([focusable_rect(50.0, 20.0, 0)])
-    .into_node();
-    let outer = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
-        mappings: vec![ShortcutMapping {
-            combo: KeyCombo {
-                modifiers: Modifiers {
-                    ctrl: true,
-                    ..Modifiers::default()
-                },
-                key: Key::Char('s'),
-            },
-            shortcut: ShortcutId::Save,
-        }],
-    })
-    .children([inner]);
-    let tree = UiTree::new(outer).unwrap();
+fn repeated_command_intent_is_ignored() {
+    let tree = UiTree::new(focusable_rect(50.0, 20.0, 0)).unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
     let actions = handle_input(
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Key(RawKeyboardEvent {
-            key: Key::Char('s'),
-            modifiers: Modifiers {
-                ctrl: true,
-                ..Modifiers::default()
-            },
-            state: KeyState::Pressed,
-            repeat: false,
-        }),
+        &repeated_key(KeyboardIntent::Invoke(ShortcutId::Save)),
     );
-    assert!(actions.iter().any(|a| matches!(a, UiAction::ShortcutActivated { shortcut_id } if *shortcut_id == ShortcutId::Custom("inner".to_string()))));
+    assert!(actions.is_empty());
 }
 
 // ---------- 验收：模态栈拦截下层输入 + 取消键 ----------
@@ -560,14 +521,67 @@ fn cancel_closes_modal_when_focus_inside() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     state.push_modal(SemanticKey("modal".to_string()));
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    let actions = handle_input(&tree, &frame, &mut state, &key(Key::Escape, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::Cancel));
     assert!(
         actions
             .iter()
             .any(|a| matches!(a, UiAction::CloseModal { .. })),
         "取消先关当前模态"
     );
+}
+
+#[test]
+fn active_modal_captures_default_keyboard_focus() {
+    let modal = LogicalContainer::group()
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("modal".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .children([focusable_rect(50.0, 20.0, 0)])
+        .into_node();
+    let tree = UiTree::new(
+        LogicalContainer::modal_host().children([focusable_rect(50.0, 20.0, 0), modal]),
+    )
+    .unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    state.push_modal(SemanticKey("modal".to_owned()));
+    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let focused = actions.iter().find_map(|action| match action {
+        UiAction::FocusChanged {
+            to: Some(node_id), ..
+        } => Some(*node_id),
+        _ => None,
+    });
+    assert_eq!(focused, Some(tree.node_ids()[3]));
+    let activate = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::Activate));
+    assert!(activate.iter().any(
+        |action| matches!(action, UiAction::Click { node_id } if *node_id == tree.node_ids()[3])
+    ));
+}
+
+#[test]
+fn modal_opening_assigns_default_focus_without_a_component_focus_key() {
+    let modal = LogicalContainer::group()
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("modal".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .children([focusable_rect(50.0, 20.0, 0)])
+        .into_node();
+    let tree = UiTree::new(
+        LogicalContainer::modal_host().children([focusable_rect(50.0, 20.0, 0), modal]),
+    )
+    .unwrap();
+    let mut state = ViewStateStore::new();
+    state.push_modal(SemanticKey("modal".to_owned()));
+    let actions = ensure_modal_focus(&tree, &mut state);
+    assert!(matches!(
+        actions.as_slice(),
+        [UiAction::FocusChanged { to: Some(node_id), .. }] if *node_id == tree.node_ids()[3]
+    ));
+    assert_eq!(state.current_focus_key(), Some(&tree.keys()[3]));
 }
 
 // ---------- 验收：焦点图静态隔离 / Teleport 迁移 / DrawOrder 不改 Tab 序 ----------
@@ -618,8 +632,8 @@ fn teleport_focus_chain_mounts_to_modal_host_scope() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // Tab → 首个可聚焦（page-btn）；再 Tab → menu-item（Teleport 迁移进 ModalHost 遍历链）。
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) != Some(tree.node_ids()[1]),
         "Teleport 子树可 Tab 进入（焦点链迁移）"
@@ -642,8 +656,8 @@ fn draw_order_does_not_change_tab_order() {
     .unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     // 第二个 Tab 落在树序第二个（bottom），与绘制层级无关。
     assert!(state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[3]));
 }
@@ -672,12 +686,17 @@ fn entry_port_binding_lands_on_target() {
     let mut state = ViewStateStore::new();
     // 聚焦 a（树序第一个可聚焦 = inner-target？—— 父 scope focusables 只有 a；子 scope 的在其内）。
     // 先 Tab（首个可聚焦 = a），再 Down（越界 → 默认回退 → 进入子 scope entry_down）。
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[1]),
         "焦点在 a"
     );
-    handle_input(&tree, &frame, &mut state, &key(Key::ArrowDown, false));
+    handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::MoveFocus(FocusDirection::Down)),
+    );
     // entry_down 绑定 inner-target。
     let target_key = SemanticKey("inner-target".to_string());
     let target_idx = tree.keys().iter().position(|k| *k == target_key).unwrap();
@@ -715,8 +734,13 @@ fn parent_graph_may_target_child_scope_itself() {
     let _ = ok;
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(Key::Tab, false));
-    handle_input(&tree, &frame, &mut state, &key(Key::ArrowDown, false));
+    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::MoveFocus(FocusDirection::Down)),
+    );
     let target_key = SemanticKey("inner-btn".to_string());
     let target_idx = tree.keys().iter().position(|k| *k == target_key).unwrap();
     assert!(state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[target_idx]));

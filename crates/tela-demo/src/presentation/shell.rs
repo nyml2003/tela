@@ -1,9 +1,10 @@
 //! 客户端固定框架：顶栏、工具栏、路径栏和状态栏。
 
 use tela_contract::{
-    Fill, IdentityConcern, LayoutConcern, Size, UiNode, UpdateMode, Viewport, VisualConcern,
+    Fill, IdentityConcern, KeymapScopeId, LayoutConcern, ShortcutScopeSpec, Size, UiNode,
+    UpdateMode, Viewport, VisualConcern,
 };
-use tela_core::builder::LayoutContainer;
+use tela_core::builder::{LayoutContainer, LogicalContainer};
 use tela_ui::{DraftInput, DraftInputSnapshot, Toolbar, ToolbarItem, ToolbarStyle};
 use tela_widgets::IconName;
 
@@ -25,6 +26,7 @@ pub struct AppShellProps<'a> {
     pub session: &'a FileManagerSession,
     pub viewport: Viewport,
     pub search_focused: bool,
+    pub operation_focused: bool,
     pub search_input: DraftInputSnapshot,
     pub hovered_target: Option<String>,
     pub operation_input: Option<DraftInputSnapshot>,
@@ -32,27 +34,16 @@ pub struct AppShellProps<'a> {
 
 impl<'a> Component<AppShellProps<'a>> for AppShell {
     fn render(&self, props: &AppShellProps<'a>) -> UiNode {
-        build_app_shell(
-            props.model,
-            props.session,
-            props.viewport,
-            props.search_focused,
-            props.search_input.clone(),
-            props.hovered_target.clone(),
-            props.operation_input.clone(),
-        )
+        build_app_shell(props)
     }
 }
 
-pub fn build_app_shell(
-    model: &FileManagerModel,
-    session: &FileManagerSession,
-    viewport: Viewport,
-    search_focused: bool,
-    search_input: DraftInputSnapshot,
-    hovered_target: Option<String>,
-    operation_input: Option<DraftInputSnapshot>,
-) -> UiNode {
+fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
+    let model = props.model;
+    let session = props.session;
+    let viewport = props.viewport;
+    let search_focused = props.search_focused;
+    let operation_focused = props.operation_focused;
     let narrow = viewport.width < 1200.0;
     let compact = viewport.width < 900.0;
     let content_h = (viewport.height - TOP_BAR_H - TOOLBAR_H - STATUS_BAR_H).max(120.0);
@@ -63,11 +54,16 @@ pub fn build_app_shell(
     }
     workspace.push(detail_pane(model, session, detail_w, content_h, compact));
 
-    let shell = LayoutContainer::flex([
-        top_bar(search_input, search_focused, viewport.width),
-        command_toolbar(model, session, viewport.width, hovered_target.as_deref()),
+    let shell: UiNode = LayoutContainer::flex([
+        top_bar(props.search_input.clone(), search_focused, viewport.width),
+        command_toolbar(
+            model,
+            session,
+            viewport.width,
+            props.hovered_target.as_deref(),
+        ),
         workspace_stack(workspace, model, session, viewport.width, content_h, narrow),
-        status_bar(model, session, viewport.width, hovered_target),
+        status_bar(model, session, viewport.width, props.hovered_target.clone()),
     ])
     .layout(LayoutConcern {
         width: Some(Size::fixed(viewport.width)),
@@ -84,10 +80,16 @@ pub fn build_app_shell(
         ..IdentityConcern::default()
     })
     .into();
-    if session.operation.is_some() {
+    let root = if session.operation.is_some() {
         LayoutContainer::stack([
             shell,
-            operation_modal(session, operation_input, viewport.width, viewport.height),
+            operation_modal(
+                session,
+                props.operation_input.clone(),
+                operation_focused,
+                viewport.width,
+                viewport.height,
+            ),
         ])
         .layout(LayoutConcern {
             width: Some(Size::fixed(viewport.width)),
@@ -97,7 +99,12 @@ pub fn build_app_shell(
         .into()
     } else {
         shell
-    }
+    };
+    LogicalContainer::shortcut_scope(ShortcutScopeSpec {
+        id: KeymapScopeId("file-manager".to_owned()),
+    })
+    .children([root])
+    .into()
 }
 
 fn workspace_stack(
@@ -138,12 +145,17 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
         search_w,
         28.0,
     );
-    let mut children = vec![
+    let brand: UiNode = LayoutContainer::flex([
         icon(IconName::FolderOpen, PRIMARY),
         text("TELA 文件", 16.0, TEXT),
-        spacer(),
-        search,
-    ];
+    ])
+    .layout(LayoutConcern {
+        cross_align: tela_contract::CrossAlign::Baseline,
+        gap: 6.0,
+        ..LayoutConcern::default()
+    })
+    .into();
+    let mut children = vec![brand, spacer(), search];
     if width < 1200.0 {
         children.extend([
             spacer(),

@@ -90,7 +90,7 @@ fn inline_summary(
         height: Some(Size::fixed(DETAIL_HEADER_H)),
         padding: tela_contract::Insets::all(16.0),
         gap: 12.0,
-        cross_align: tela_contract::CrossAlign::Center,
+        cross_align: tela_contract::CrossAlign::Baseline,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
@@ -183,7 +183,7 @@ fn file_row(entry: &Entry, selected: bool, columns: &[(&str, f32)]) -> UiNode {
     ])
     .layout(LayoutConcern {
         gap: 8.0,
-        cross_align: tela_contract::CrossAlign::Center,
+        cross_align: tela_contract::CrossAlign::Baseline,
         ..LayoutConcern::default()
     })
     .into();
@@ -317,7 +317,7 @@ fn text_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
                     bottom: 0.0,
                     left: 12.0,
                 },
-                cross_align: tela_contract::CrossAlign::Center,
+                cross_align: tela_contract::CrossAlign::Baseline,
                 ..LayoutConcern::default()
             })
             .into();

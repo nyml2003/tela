@@ -24,6 +24,7 @@ impl TextMeasurer for MockMeasurer {
             width: request.text.chars().count() as f32 * request.font_size * 0.5,
             height: request.line_height,
             line_count: 1,
+            first_baseline: request.font_size * 0.8,
         }
     }
 }

@@ -197,10 +197,28 @@ pub fn pointer_scroll(x: f32, y: f32, delta_x: f32, delta_y: f32) -> u32 {
     })
 }
 
+/// 平台归一化后的物理键进入应用键位表，再由 tela-core 消费语义意图。
+#[wasm_bindgen]
+pub fn key_down(code: u16, modifier_bits: u8, repeat: bool) -> u32 {
+    crate::with_app(|app| app.handle_raw_key_codes(code, modifier_bits, repeat))
+}
+
+/// 校验并原子替换运行时键位表 JSON。失败时当前快照不变。
+#[wasm_bindgen]
+pub fn replace_keymap_json(json: String) -> u32 {
+    crate::with_app(|app| u32::from(app.replace_keymap_json(&json).is_ok()))
+}
+
 /// 当前 Input 是否为 tela-core 焦点；浏览器据此接管原生键盘与 IME 输入。
 #[wasm_bindgen]
 pub fn input_focused() -> bool {
     crate::with_app(|app| app.input_focused())
+}
+
+/// 隐藏 DOM 编辑器获得焦点后，记录其对应的 tela 输入目标。
+#[wasm_bindgen]
+pub fn input_focus() -> u32 {
+    crate::with_app(|app| app.input_focus())
 }
 
 /// 当前聚焦文本输入的受控显示值。

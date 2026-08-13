@@ -11,6 +11,11 @@ pub struct TextMetrics {
     pub height: f32,
     /// 行数。
     pub line_count: u32,
+    /// 从文本布局盒上边缘到首行字形基线的逻辑距离。
+    ///
+    /// 度量器必须根据 `FontRef` 对应的真实字体返回它；无字形的确定性回退也必须给出
+    /// 有限值，避免布局和 renderer 各自猜测垂直原点。
+    pub first_baseline: f32,
 }
 
 /// 文本度量请求。

@@ -105,6 +105,11 @@ pub struct LayoutBox {
     pub w: f32,
     /// 高度。
     pub h: f32,
+    /// 首个可用文本基线相对本盒上边缘的位置。
+    ///
+    /// 文本叶子写入真实度量；容器可向上传播首个子孙基线。`None` 的项目在
+    /// `CrossAlign::Baseline` 中按交叉轴末端参与对齐。
+    pub first_baseline: Option<f32>,
     /// 子盒子树。
     pub children: Vec<LayoutBox>,
 }
@@ -116,6 +121,7 @@ impl Default for LayoutBox {
             y: 0.0,
             w: 0.0,
             h: 0.0,
+            first_baseline: None,
             children: Vec::new(),
         }
     }
@@ -181,6 +187,8 @@ pub enum CrossAlign {
     Center,
     /// 终点。
     End,
+    /// 按首行文本基线对齐；仅横向 Flex 行生效。
+    Baseline,
     /// 拉伸填满交叉轴。
     Stretch,
 }
