@@ -2,7 +2,7 @@
 
 use tela_contract::{Color, Fill, Insets, LayoutConcern, Size, UiNode, VisualConcern};
 use tela_core::{LayoutContainer, Primitive};
-use tela_widgets::{Button, ButtonPalette, ButtonVariant};
+use tela_widgets::{ButtonPalette, IconButton, IconButtonPalette, IconButtonVariant, IconName};
 
 use crate::intent::IntentTarget;
 
@@ -48,6 +48,8 @@ impl Default for ToolbarStyle {
 pub struct ToolbarItem {
     label: String,
     target: IntentTarget,
+    icon: Option<IconName>,
+    show_label: bool,
     disabled: bool,
     destructive: bool,
     hovered: bool,
@@ -60,11 +62,25 @@ impl ToolbarItem {
         Self {
             label: label.into(),
             target: target.into(),
+            icon: None,
+            show_label: true,
             disabled: false,
             destructive: false,
             hovered: false,
             width: 52.0,
         }
+    }
+
+    /// 设置该命令的语义图标。
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// 控制图标项是否显示文字标签，窄屏可仅保留图标。
+    pub fn show_label(mut self, show_label: bool) -> Self {
+        self.show_label = show_label;
+        self
     }
 
     /// 设置禁用态。禁用项不会产生 `UiIntent`。
@@ -103,17 +119,48 @@ impl ToolbarItem {
         palette: Option<ButtonPalette>,
         destructive_palette: Option<ButtonPalette>,
     ) -> UiNode {
-        let mut button = Button::new(self.label)
-            .width(self.width)
-            .height(26.0)
-            .variant(if self.destructive {
-                ButtonVariant::Danger
+        let mut button = if let Some(icon) = self.icon {
+            let mut value = IconButton::new(icon)
+                .size(self.width, 30.0)
+                .variant(if self.destructive {
+                    IconButtonVariant::Danger
+                } else {
+                    IconButtonVariant::Primary
+                })
+                .state(tela_widgets::IconButtonState {
+                    hovered: self.hovered,
+                    selected: false,
+                    disabled: self.disabled,
+                });
+            if self.show_label {
+                value = value.label(self.label);
+            }
+            if let Some(palette) = if self.destructive {
+                destructive_palette.map(icon_palette)
             } else {
-                ButtonVariant::Primary
-            })
-            .disabled(self.disabled)
-            .hovered(self.hovered)
-            .text_metrics(12.0, 15.0);
+                palette.map(icon_palette)
+            } {
+                value = value.palette(palette);
+            }
+            let mut node = value.into_node();
+            if let Some(interact) = &mut node.interact {
+                interact.bind_id = Some(self.target.bind_id());
+            }
+            return node;
+        } else {
+            // 兼容无图标的调用方，继续使用已有原子按钮。
+            tela_widgets::Button::new(self.label)
+                .width(self.width)
+                .height(26.0)
+                .variant(if self.destructive {
+                    tela_widgets::ButtonVariant::Danger
+                } else {
+                    tela_widgets::ButtonVariant::Primary
+                })
+                .disabled(self.disabled)
+                .hovered(self.hovered)
+                .text_metrics(12.0, 15.0)
+        };
         if let Some(palette) = if self.destructive {
             destructive_palette.or(palette)
         } else {
@@ -126,6 +173,17 @@ impl ToolbarItem {
             interact.bind_id = Some(self.target.bind_id());
         }
         node
+    }
+}
+
+fn icon_palette(palette: ButtonPalette) -> IconButtonPalette {
+    IconButtonPalette {
+        normal: palette.normal,
+        hovered: palette.hovered,
+        selected: palette.selected,
+        disabled: palette.disabled,
+        text: palette.text,
+        disabled_text: palette.disabled_text,
     }
 }
 
@@ -181,6 +239,7 @@ impl ToolbarOverflow {
 pub struct Toolbar {
     items: Vec<ToolbarItem>,
     overflow: Option<ToolbarOverflow>,
+    prefix: Option<UiNode>,
     style: ToolbarStyle,
     hovered_target: Option<String>,
 }
@@ -197,6 +256,7 @@ impl Toolbar {
         Self {
             items: Vec::new(),
             overflow: None,
+            prefix: None,
             style: ToolbarStyle::default(),
             hovered_target: None,
         }
@@ -205,6 +265,12 @@ impl Toolbar {
     /// 追加一个可执行项。
     pub fn item(mut self, item: ToolbarItem) -> Self {
         self.items.push(item);
+        self
+    }
+
+    /// 在命令项之前放置一个非交互前缀，例如当前路径。
+    pub fn prefix(mut self, prefix: impl Into<UiNode>) -> Self {
+        self.prefix = Some(prefix.into());
         self
     }
 
@@ -243,6 +309,9 @@ impl Toolbar {
                 )
             })
             .collect();
+        if let Some(prefix) = self.prefix {
+            children.insert(0, prefix);
+        }
         if let Some(overflow) = self.overflow {
             children.push(
                 Primitive::rect()

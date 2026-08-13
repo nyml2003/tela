@@ -16,6 +16,8 @@ webgpu = ["dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:wasm-bindgen-fut
 [dependencies]
 tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
+tela-fonts = { path = "../tela-fonts" }
+ab_glyph = "0.2"
 tela-widgets = { path = "../tela-widgets" }
 tela-ui = { path = "../tela-ui" }
 tela-render-raster = { path = "../tela-render-raster" }

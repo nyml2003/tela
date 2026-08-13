@@ -71,7 +71,7 @@ fn inline_summary(
     })
     .into();
     LayoutContainer::flex([
-        icon(kind_label(entry.kind), kind_color(entry.kind)),
+        icon(kind_icon(entry.kind), kind_color(entry.kind)),
         name_stack,
         spacer(),
         text(
@@ -161,7 +161,7 @@ fn file_list(
             .map(|(label, w)| Td::text(*label).width(Size::fixed(*w - 2.0)).into())
             .collect(),
     )
-    .height(28.0)
+    .height(32.0)
     .background(MUTED_SURFACE);
     let rows: Vec<UiNode> = entries
         .iter()
@@ -170,15 +170,15 @@ fn file_list(
     Table::new(header)
         .virtual_rows(entries.len() as u32, 0, rows)
         .width(width.max(1.0))
-        .header_height(28.0)
-        .body_height((height - 28.0).max(30.0))
+        .header_height(32.0)
+        .body_height((height - 32.0).max(ROW_H))
         .row_metrics(ROW_H, 0.0, OVERSCAN)
         .into()
 }
 
 fn file_row(entry: &Entry, selected: bool, columns: &[(&str, f32)]) -> UiNode {
     let content: UiNode = LayoutContainer::flex([
-        icon(kind_label(entry.kind), kind_color(entry.kind)),
+        icon(kind_icon(entry.kind), kind_color(entry.kind)),
         text(&entry.name, 13.0, TEXT),
     ])
     .layout(LayoutConcern {
@@ -273,7 +273,7 @@ fn thumbnail_grid(
 
 fn thumbnail_card(entry: &Entry, selected: bool) -> UiNode {
     let card: UiNode = LayoutContainer::flex([
-        icon(kind_label(entry.kind), kind_color(entry.kind)),
+        icon(kind_icon(entry.kind), kind_color(entry.kind)),
         text(&entry.name, 12.0, TEXT),
         text(&bytes(entry.bytes), 11.0, SECONDARY),
     ])
@@ -355,7 +355,7 @@ fn text_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
 
 fn asset_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
     LayoutContainer::flex([
-        icon(kind_label(entry.kind), kind_color(entry.kind)),
+        icon(kind_icon(entry.kind), kind_color(entry.kind)),
         text("此文件在演示中提供类型化预览", 14.0, SECONDARY),
         text(&entry.name, 13.0, TEXT),
     ])

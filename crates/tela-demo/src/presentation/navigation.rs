@@ -4,6 +4,7 @@ use tela_contract::{Fill, LayoutConcern, Size, StackAlign, StackLayer, UiNode, V
 use tela_core::builder::LayoutContainer;
 
 use crate::domain::{Entry, EntryFilter, FileManagerModel, FileManagerSession};
+use tela_widgets::IconName;
 
 use super::shared::*;
 
@@ -20,15 +21,14 @@ pub fn directory_tree(
     };
     let row_width = (width - 20.0).max(1.0);
     let mut rows = vec![
+        text("快速访问", 11.0, SECONDARY),
         scope_row(
             "全部文件",
-            "全部",
             "filter.all",
             session.filter == EntryFilter::All,
             row_width,
         ),
         scope_row(
-            "收藏",
             "收藏",
             "filter.favorites",
             session.filter == EntryFilter::Favorites,
@@ -36,13 +36,11 @@ pub fn directory_tree(
         ),
         scope_row(
             "标签",
-            "标签",
             "filter.tagged",
             session.filter == EntryFilter::Tagged,
             row_width,
         ),
         scope_row(
-            "回收站",
             "回收站",
             "filter.trash",
             session.filter == EntryFilter::Trash,
@@ -95,12 +93,12 @@ pub fn navigation_overlay(
 fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
     let indent = if entry.parent.is_some() { 12.0 } else { 0.0 };
     let row: UiNode = LayoutContainer::flex([
-        icon("文件夹", FOLDER),
+        icon(IconName::Folder, if selected { PRIMARY } else { FOLDER }),
         text(&entry.name, 13.0, if selected { PRIMARY } else { TEXT }),
     ])
     .layout(LayoutConcern {
         width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(28.0)),
+        height: Some(Size::fixed(32.0)),
         gap: 8.0,
         padding: tela_contract::Insets {
             top: 0.0,
@@ -119,14 +117,21 @@ fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
     clickable(row, format!("folder.open.{}", entry.id))
 }
 
-fn scope_row(label: &str, glyph: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
+fn scope_row(label: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
+    let icon_name = match bind_id {
+        "filter.all" => IconName::AllFiles,
+        "filter.favorites" => IconName::Favorite,
+        "filter.tagged" => IconName::Tag,
+        "filter.trash" => IconName::Trash,
+        _ => IconName::Folder,
+    };
     let row: UiNode = LayoutContainer::flex([
-        icon(glyph, if selected { PRIMARY } else { SECONDARY }),
+        icon(icon_name, if selected { PRIMARY } else { SECONDARY }),
         text(label, 13.0, if selected { PRIMARY } else { TEXT }),
     ])
     .layout(LayoutConcern {
         width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(28.0)),
+        height: Some(Size::fixed(32.0)),
         gap: 8.0,
         padding: tela_contract::Insets {
             top: 0.0,

@@ -12,6 +12,7 @@
         packages = with pkgs; [
           cargo
           clippy
+          python3Packages.fonttools
           git
           lld
           mesa

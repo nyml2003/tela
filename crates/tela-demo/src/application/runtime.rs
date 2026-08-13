@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use ab_glyph::{Font, FontArc, ScaleFont};
 use tela_contract::{
     InputEvent, NodeId, NodeKind, PointerEvent, ScrollState, SemanticKey, TextMeasureRequest,
     TextMeasurer, TextMetrics, UiAction, UiFrame, UiNode, Viewport,
@@ -28,19 +29,15 @@ struct DemoTextMeasurer;
 
 impl TextMeasurer for DemoTextMeasurer {
     fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics {
+        let font = demo_font(request.font);
+        let scaled = font.as_scaled(em_pixel_height(font, request.font_size));
         let line_count = request.text.lines().count().max(1) as u32;
         let width = request
             .text
             .lines()
             .map(|line| {
                 line.chars()
-                    .map(|c| {
-                        if c.is_ascii() {
-                            request.font_size * 0.56
-                        } else {
-                            request.font_size
-                        }
-                    })
+                    .map(|character| scaled.h_advance(scaled.glyph_id(character)))
                     .sum::<f32>()
             })
             .fold(0.0, f32::max);
@@ -50,6 +47,25 @@ impl TextMeasurer for DemoTextMeasurer {
             line_count,
         }
     }
+}
+
+fn demo_font(font: &tela_contract::FontRef) -> &'static FontArc {
+    use std::sync::OnceLock;
+    static UI_FONT: OnceLock<FontArc> = OnceLock::new();
+    static ICON_FONT: OnceLock<FontArc> = OnceLock::new();
+    if font.0 == tela_fonts::ICON_FONT_NAME {
+        ICON_FONT.get_or_init(|| {
+            FontArc::try_from_slice(tela_fonts::ICON_FONT_BYTES).expect("图标字体必须可解析")
+        })
+    } else {
+        UI_FONT.get_or_init(|| {
+            FontArc::try_from_slice(tela_fonts::UI_FONT_BYTES).expect("正文字体必须可解析")
+        })
+    }
+}
+
+fn em_pixel_height(font: &FontArc, font_size: f32) -> f32 {
+    font_size * font.height_unscaled() / font.units_per_em().unwrap_or(1000.0)
 }
 
 /// 跨帧会话。业务数据、临时 view state 与 renderer 缓存各自隔离。
@@ -491,7 +507,12 @@ impl App {
         let Some(key) = node_key(tree, node_id).cloned() else {
             return false;
         };
-        let detail_h = (self.viewport.height - 48.0 - 40.0 - 36.0 - 28.0 - 92.0).max(80.0);
+        let detail_h = (self.viewport.height
+            - crate::presentation::shared::TOP_BAR_H
+            - crate::presentation::shared::TOOLBAR_H
+            - crate::presentation::shared::STATUS_BAR_H
+            - crate::presentation::shared::DETAIL_HEADER_H)
+            .max(80.0);
         let (state, max) = if self.nav_scroll_key.as_ref() == Some(&key) {
             (&mut self.nav_scroll, 360.0)
         } else if self.detail_scroll_key.as_ref() == Some(&key) {

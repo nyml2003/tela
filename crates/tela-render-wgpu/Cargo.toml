@@ -8,6 +8,7 @@ description = "tela wgpu 渲染后端（游戏内嵌/3D 贴图/浏览器 WebGPU�
 [dependencies]
 tela-contract = { path = "../tela-contract" }
 tela-log = { path = "../tela-log" }
+tela-fonts = { path = "../tela-fonts" }
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 ab_glyph = "0.2"

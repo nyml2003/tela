@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/tela-contract",
     "crates/tela-log",
+    "crates/tela-fonts",
     "crates/tela-resource-protocol",
     "crates/tela-core",
     "crates/tela-render-raster",

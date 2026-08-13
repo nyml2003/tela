@@ -1,31 +1,27 @@
 //! View 组件共用的设计令牌与小型构件。
 
-use tela_contract::{
-    BindId, BorderRadius, Color, Fill, InteractConcern, LayoutConcern, Size, TextContent, UiNode,
-    VisualConcern,
-};
+use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, Size, TextContent, UiNode};
 use tela_core::builder::{LayoutContainer, Primitive};
-use tela_widgets::{Button, ButtonPalette, ButtonVariant};
+use tela_widgets::{Button, ButtonPalette, ButtonVariant, Icon, IconName};
 
 use crate::domain::EntryKind;
 
-pub const TOP_BAR_H: f32 = 48.0;
-pub const TOOLBAR_H: f32 = 40.0;
-pub const PATH_BAR_H: f32 = 36.0;
+pub const TOP_BAR_H: f32 = 52.0;
+pub const TOOLBAR_H: f32 = 44.0;
 pub const STATUS_BAR_H: f32 = 28.0;
 pub const SIDEBAR_W: f32 = 264.0;
 pub const DETAIL_HEADER_H: f32 = 92.0;
-pub const ROW_H: f32 = 30.0;
+pub const ROW_H: f32 = 32.0;
 pub const PREVIEW_ROW_H: f32 = 20.0;
 pub const OVERSCAN: u32 = 3;
 
-pub const BG: Color = Color::rgba(0.96, 0.97, 0.99, 1.0);
+pub const BG: Color = Color::rgba(0.97, 0.98, 0.99, 1.0);
 pub const SURFACE: Color = Color::WHITE;
-pub const MUTED_SURFACE: Color = Color::rgba(0.94, 0.96, 0.99, 1.0);
-pub const TEXT: Color = Color::rgba(0.08, 0.12, 0.20, 1.0);
-pub const SECONDARY: Color = Color::rgba(0.35, 0.40, 0.48, 1.0);
+pub const MUTED_SURFACE: Color = Color::rgba(0.95, 0.97, 0.99, 1.0);
+pub const TEXT: Color = Color::rgba(0.06, 0.09, 0.15, 1.0);
+pub const SECONDARY: Color = Color::rgba(0.36, 0.42, 0.50, 1.0);
 pub const PRIMARY: Color = Color::rgba(0.15, 0.39, 0.92, 1.0);
-pub const SELECTED: Color = Color::rgba(0.88, 0.93, 1.0, 1.0);
+pub const SELECTED: Color = Color::rgba(0.86, 0.92, 1.0, 1.0);
 pub const CODE_BG: Color = Color::rgba(0.06, 0.09, 0.15, 1.0);
 pub const CODE_TEXT: Color = Color::rgba(0.84, 0.88, 0.96, 1.0);
 pub const FOLDER: Color = Color::rgba(0.11, 0.42, 0.93, 1.0);
@@ -35,7 +31,7 @@ pub const ARCHIVE: Color = Color::rgba(0.90, 0.48, 0.10, 1.0);
 pub fn text(value: &str, size: f32, color: Color) -> UiNode {
     Primitive::text(TextContent {
         text: value.to_owned(),
-        font: tela_contract::FontRef("WQYZenhei".to_owned()),
+        font: tela_contract::FontRef(tela_fonts::UI_FONT_NAME.to_owned()),
         font_size: size,
         line_height: size * 1.35,
         color,
@@ -92,23 +88,27 @@ pub fn command_button(
 pub fn command_button_palette(destructive: bool) -> ButtonPalette {
     ButtonPalette {
         normal: if destructive {
-            Color::rgba(0.78, 0.19, 0.20, 1.0)
+            Color::rgba(1.0, 0.95, 0.95, 1.0)
         } else {
-            Color::rgba(0.14, 0.25, 0.43, 1.0)
+            Color::rgba(0.95, 0.97, 1.0, 1.0)
         },
         hovered: if destructive {
-            Color::rgba(0.90, 0.25, 0.27, 1.0)
+            Color::rgba(1.0, 0.90, 0.90, 1.0)
         } else {
-            Color::rgba(0.19, 0.35, 0.58, 1.0)
+            Color::rgba(0.88, 0.93, 1.0, 1.0)
         },
         selected: if destructive {
-            Color::rgba(0.60, 0.10, 0.12, 1.0)
+            Color::rgba(1.0, 0.84, 0.84, 1.0)
         } else {
-            Color::rgba(0.09, 0.17, 0.30, 1.0)
+            Color::rgba(0.80, 0.88, 1.0, 1.0)
         },
         disabled: Color::rgba(0.75, 0.78, 0.83, 1.0),
-        text: Color::WHITE,
-        disabled_text: Color::rgba(0.48, 0.52, 0.58, 1.0),
+        text: if destructive {
+            Color::rgba(0.78, 0.12, 0.15, 1.0)
+        } else {
+            PRIMARY
+        },
+        disabled_text: Color::rgba(0.60, 0.65, 0.72, 1.0),
     }
 }
 
@@ -123,21 +123,8 @@ pub fn clickable(mut node: UiNode, bind_id: String) -> UiNode {
     node
 }
 
-pub fn icon(label: &str, color: Color) -> UiNode {
-    LayoutContainer::flex([text(label, 10.0, Color::WHITE)])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(34.0)),
-            height: Some(Size::fixed(24.0)),
-            main_align: tela_contract::MainAlign::Center,
-            cross_align: tela_contract::CrossAlign::Center,
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(color)),
-            border_radius: BorderRadius::all(4.0),
-            ..VisualConcern::default()
-        })
-        .into()
+pub fn icon(name: IconName, color: Color) -> UiNode {
+    Icon::new(name).size(20.0).color(color).into_node()
 }
 
 pub fn kind_label(kind: EntryKind) -> &'static str {
@@ -155,6 +142,15 @@ pub fn kind_color(kind: EntryKind) -> Color {
         EntryKind::Text => PRIMARY,
         EntryKind::Image => IMAGE,
         EntryKind::Archive => ARCHIVE,
+    }
+}
+
+pub fn kind_icon(kind: EntryKind) -> IconName {
+    match kind {
+        EntryKind::Folder => IconName::Folder,
+        EntryKind::Text => IconName::Document,
+        EntryKind::Image => IconName::Image,
+        EntryKind::Archive => IconName::Archive,
     }
 }
 

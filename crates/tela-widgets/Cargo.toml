@@ -8,6 +8,7 @@ description = "tela 上层组件套件：受控组件与可选 Signal 状态容�
 [dependencies]
 tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
+tela-fonts = { path = "../tela-fonts" }
 
 [lints]
 workspace = true

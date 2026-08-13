@@ -7,7 +7,7 @@ use tela_contract::{
 };
 use tela_core::{LayoutContainer, Primitive};
 
-pub(crate) const BORDER: Color = Color::rgba(0.78, 0.80, 0.84, 1.0);
+pub(crate) const BORDER: Color = Color::rgba(0.89, 0.92, 0.96, 1.0);
 pub(crate) const BORDER_HOVER: Color = Color::rgba(0.09, 0.42, 0.92, 1.0);
 pub(crate) const FIELD_BG: Color = Color::rgba(0.98, 0.98, 0.99, 1.0);
 pub(crate) const DISABLED_BG: Color = Color::rgba(0.90, 0.90, 0.92, 1.0);
@@ -18,7 +18,7 @@ pub(crate) const ERROR: Color = Color::rgba(0.87, 0.26, 0.22, 1.0);
 pub(crate) fn text(content: &str, size: f32, color: Color) -> UiNode {
     Primitive::text(TextContent {
         text: content.to_string(),
-        font: FontRef("noto".to_string()),
+        font: FontRef(tela_fonts::UI_FONT_NAME.to_owned()),
         font_size: size,
         line_height: size * 1.4,
         color,

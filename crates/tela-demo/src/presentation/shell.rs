@@ -1,10 +1,11 @@
 //! 客户端固定框架：顶栏、工具栏、路径栏和状态栏。
 
 use tela_contract::{
-    Color, Fill, IdentityConcern, LayoutConcern, Size, UiNode, UpdateMode, Viewport, VisualConcern,
+    Fill, IdentityConcern, LayoutConcern, Size, UiNode, UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::LayoutContainer;
 use tela_ui::{DraftInput, DraftInputSnapshot, Toolbar, ToolbarItem, ToolbarStyle};
+use tela_widgets::IconName;
 
 use crate::domain::{FileManagerModel, FileManagerSession};
 
@@ -54,8 +55,7 @@ pub fn build_app_shell(
 ) -> UiNode {
     let narrow = viewport.width < 1200.0;
     let compact = viewport.width < 900.0;
-    let content_h =
-        (viewport.height - TOP_BAR_H - TOOLBAR_H - PATH_BAR_H - STATUS_BAR_H).max(120.0);
+    let content_h = (viewport.height - TOP_BAR_H - TOOLBAR_H - STATUS_BAR_H).max(120.0);
     let detail_w = viewport.width - if narrow { 0.0 } else { SIDEBAR_W };
     let mut workspace = Vec::new();
     if !narrow {
@@ -65,8 +65,7 @@ pub fn build_app_shell(
 
     let shell = LayoutContainer::flex([
         top_bar(search_input, search_focused, viewport.width),
-        command_toolbar(session, viewport.width, hovered_target.as_deref()),
-        path_bar(model, session),
+        command_toolbar(model, session, viewport.width, hovered_target.as_deref()),
         workspace_stack(workspace, model, session, viewport.width, content_h, narrow),
         status_bar(model, session, viewport.width, hovered_target),
     ])
@@ -139,11 +138,16 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
         search_w,
         28.0,
     );
-    let mut children = vec![text("TELA 文件", 16.0, Color::WHITE), spacer(), search];
+    let mut children = vec![
+        icon(IconName::FolderOpen, PRIMARY),
+        text("TELA 文件", 16.0, TEXT),
+        spacer(),
+        search,
+    ];
     if width < 1200.0 {
         children.extend([
             spacer(),
-            command_button("目录", 52.0, "navigation.toggle", false, false),
+            command_button("目录", 64.0, "navigation.toggle", false, false),
         ]);
     }
     LayoutContainer::flex(children)
@@ -154,24 +158,27 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
                 top: 0.0,
                 right: 12.0,
                 bottom: 0.0,
-                left: 14.0,
+                left: 16.0,
             },
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
-            fill: Some(Fill::Solid(Color::rgba(0.08, 0.17, 0.34, 1.0))),
+            fill: Some(Fill::Solid(SURFACE)),
             ..VisualConcern::default()
         })
         .into()
 }
 
 fn command_toolbar(
+    model: &FileManagerModel,
     session: &FileManagerSession,
     width: f32,
     hovered_target: Option<&str>,
 ) -> UiNode {
     let selected = !session.selected.is_empty();
+    let compact = width < 900.0;
+    let control_width = if compact { 38.0 } else { 78.0 };
     let style = ToolbarStyle {
         background: SURFACE,
         button_palette: Some(command_button_palette(false)),
@@ -179,52 +186,112 @@ fn command_toolbar(
         ..ToolbarStyle::default()
     };
     let mut toolbar = Toolbar::new()
+        .prefix(path_bar(model, session))
         .style(style)
-        .item(ToolbarItem::new("新建", "command.new-folder").width(54.0))
         .item(
-            ToolbarItem::new("删除", "command.trash")
-                .width(52.0)
-                .disabled(!selected)
-                .destructive(true),
+            ToolbarItem::new("新建", "command.new-folder")
+                .icon(tela_widgets::IconName::Add)
+                .show_label(!compact)
+                .width(if compact { 38.0 } else { 76.0 }),
         );
-    if width >= 900.0 {
+    if selected {
+        let context_width = |wide| if compact { 38.0 } else { wide };
         toolbar = toolbar
             .item(
                 ToolbarItem::new("重命名", "command.rename")
-                    .width(58.0)
-                    .disabled(!selected),
+                    .icon(tela_widgets::IconName::Edit)
+                    .show_label(!compact)
+                    .width(context_width(78.0)),
             )
             .item(
                 ToolbarItem::new("复制", "command.copy")
-                    .width(52.0)
-                    .disabled(!selected),
+                    .icon(tela_widgets::IconName::Copy)
+                    .show_label(!compact)
+                    .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("移动", "command.move-design")
-                    .width(52.0)
-                    .disabled(!selected),
-            )
-            .item(
-                ToolbarItem::new("恢复", "command.restore")
-                    .width(52.0)
-                    .disabled(!selected || session.filter != crate::domain::EntryFilter::Trash),
+                    .icon(tela_widgets::IconName::Move)
+                    .show_label(!compact)
+                    .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("收藏", "command.favorite")
-                    .width(52.0)
-                    .disabled(!selected),
+                    .icon(tela_widgets::IconName::Favorite)
+                    .show_label(!compact)
+                    .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("标签", "command.add-tag")
-                    .width(52.0)
-                    .disabled(!selected),
+                    .icon(tela_widgets::IconName::Tag)
+                    .show_label(!compact)
+                    .width(context_width(68.0)),
+            )
+            .item(
+                ToolbarItem::new("删除", "command.trash")
+                    .icon(tela_widgets::IconName::Delete)
+                    .show_label(!compact)
+                    .width(context_width(68.0))
+                    .destructive(true),
             );
+        if session.filter == crate::domain::EntryFilter::Trash {
+            toolbar = toolbar.item(
+                ToolbarItem::new("恢复", "command.restore")
+                    .icon(tela_widgets::IconName::Restore)
+                    .show_label(!compact)
+                    .width(context_width(68.0)),
+            );
+        }
     }
     toolbar
-        .item(ToolbarItem::new("视图", "command.toggle-view").width(48.0))
-        .item(ToolbarItem::new("排序", "command.toggle-sort").width(48.0))
-        .item(ToolbarItem::new("筛选", "command.toggle-filter").width(48.0))
-        .item(ToolbarItem::new("撤销", "command.undo").width(48.0))
+        .item(
+            ToolbarItem::new(
+                match session.view {
+                    crate::domain::DirectoryView::List => "列表",
+                    crate::domain::DirectoryView::Grid => "网格",
+                },
+                "command.toggle-view",
+            )
+            .icon(match session.view {
+                crate::domain::DirectoryView::List => tela_widgets::IconName::List,
+                crate::domain::DirectoryView::Grid => tela_widgets::IconName::Grid,
+            })
+            .show_label(!compact)
+            .width(control_width),
+        )
+        .item(
+            ToolbarItem::new(
+                match session.sort {
+                    crate::domain::SortMode::Name => "名称",
+                    crate::domain::SortMode::Modified => "时间",
+                    crate::domain::SortMode::Size => "大小",
+                },
+                "command.toggle-sort",
+            )
+            .icon(tela_widgets::IconName::Sort)
+            .show_label(!compact)
+            .width(control_width),
+        )
+        .item(
+            ToolbarItem::new(
+                match session.filter {
+                    crate::domain::EntryFilter::All => "全部",
+                    crate::domain::EntryFilter::Favorites => "收藏",
+                    crate::domain::EntryFilter::Tagged => "标签",
+                    crate::domain::EntryFilter::Trash => "回收站",
+                },
+                "command.toggle-filter",
+            )
+            .icon(tela_widgets::IconName::Filter)
+            .show_label(!compact)
+            .width(if compact { 38.0 } else { 84.0 }),
+        )
+        .item(
+            ToolbarItem::new("撤销", "command.undo")
+                .icon(tela_widgets::IconName::Undo)
+                .show_label(!compact)
+                .width(control_width),
+        )
         .hovered_target(hovered_target)
         .into_node()
 }
@@ -241,7 +308,7 @@ fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {
     ])
     .layout(LayoutConcern {
         width: Some(Size::fill()),
-        height: Some(Size::fixed(PATH_BAR_H)),
+        height: Some(Size::fixed(TOOLBAR_H)),
         gap: 8.0,
         padding: tela_contract::Insets {
             top: 0.0,
@@ -253,7 +320,7 @@ fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
-        fill: Some(Fill::Solid(MUTED_SURFACE)),
+        fill: Some(Fill::Solid(SURFACE)),
         ..VisualConcern::default()
     })
     .into()
@@ -288,7 +355,9 @@ fn status_bar(
         crate::domain::SortMode::Modified => "修改时间",
         crate::domain::SortMode::Size => "大小",
     };
-    let right = hovered.unwrap_or_else(|| format!("{scope} · 按{sort}排序 · {}", session.notice));
+    let right = hovered
+        .map(|target| toolbar_label(&target).to_owned())
+        .unwrap_or_else(|| format!("{scope} · 按{sort}排序 · {}", session.notice));
     LayoutContainer::flex([
         text(&left, 12.0, SECONDARY),
         spacer(),
@@ -311,4 +380,22 @@ fn status_bar(
         ..VisualConcern::default()
     })
     .into()
+}
+
+fn toolbar_label(target: &str) -> &str {
+    match target {
+        "command.new-folder" => "新建文件夹",
+        "command.rename" => "重命名",
+        "command.copy" => "复制",
+        "command.move-design" => "移动到设计",
+        "command.trash" => "移至回收站",
+        "command.restore" => "恢复",
+        "command.favorite" => "收藏",
+        "command.add-tag" => "添加标签",
+        "command.toggle-view" => "切换视图",
+        "command.toggle-sort" => "切换排序",
+        "command.toggle-filter" => "切换筛选",
+        "command.undo" => "撤销",
+        _ => target,
+    }
 }

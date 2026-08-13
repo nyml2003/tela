@@ -3,13 +3,20 @@
 use std::sync::OnceLock;
 
 use ab_glyph::{Font, FontArc, ScaleFont, point};
-use tela_contract::TextContent;
+use tela_contract::{FontRef, TextContent};
 
-const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/WQYZenhei-subset.ttf");
-
-fn font() -> &'static FontArc {
-    static FONT: OnceLock<FontArc> = OnceLock::new();
-    FONT.get_or_init(|| FontArc::try_from_slice(FONT_BYTES).expect("内嵌字体必须可解析"))
+fn font(font_ref: &FontRef) -> &'static FontArc {
+    static UI_FONT: OnceLock<FontArc> = OnceLock::new();
+    static ICON_FONT: OnceLock<FontArc> = OnceLock::new();
+    if font_ref.0 == tela_fonts::ICON_FONT_NAME {
+        ICON_FONT.get_or_init(|| {
+            FontArc::try_from_slice(tela_fonts::ICON_FONT_BYTES).expect("内嵌图标字体必须可解析")
+        })
+    } else {
+        UI_FONT.get_or_init(|| {
+            FontArc::try_from_slice(tela_fonts::UI_FONT_BYTES).expect("内嵌字体必须可解析")
+        })
+    }
 }
 
 fn em_pixel_height(font: &FontArc, font_size: f32) -> f32 {
@@ -22,7 +29,7 @@ pub(crate) fn rasterize(text: &TextContent, width: u32, height: u32, scale: f32)
         return Vec::new();
     }
     let mut pixels = vec![0; width as usize * height as usize * 4];
-    let font = font();
+    let font = font(&text.font);
     let pixel_height = em_pixel_height(font, text.font_size) * scale;
     let scaled = font.as_scaled(pixel_height);
     let line_height = text.line_height * scale;
@@ -101,6 +108,23 @@ mod tests {
                 color: Color::WHITE,
             },
             64,
+            32,
+            1.0,
+        );
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    }
+
+    #[test]
+    fn rasterizes_icon_font_into_nontransparent_pixels() {
+        let pixels = rasterize(
+            &TextContent {
+                text: "\u{e145}".to_owned(),
+                font: FontRef(tela_fonts::ICON_FONT_NAME.to_owned()),
+                font_size: 24.0,
+                line_height: 24.0,
+                color: Color::WHITE,
+            },
+            32,
             32,
             1.0,
         );

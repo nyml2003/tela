@@ -46,9 +46,19 @@ impl Canvas2D for Recorder {
             gradient.stops.len()
         ));
     }
-    fn fill_text(&mut self, text: &str, x: f32, y: f32, size: f32, color: Color) {
-        self.calls
-            .push(format!("fill_text \"{text}\" ({x},{y}) {size} {color}"));
+    fn fill_text(
+        &mut self,
+        text: &str,
+        font: &tela_contract::FontRef,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: Color,
+    ) {
+        self.calls.push(format!(
+            "fill_text \"{text}\" {} ({x},{y}) {size} {color}",
+            font.0
+        ));
     }
     fn draw_image(&mut self, rect: Rect, texture: &tela_contract::TextureRef) {
         self.calls
@@ -123,6 +133,38 @@ fn translates_commands_in_tree_order_with_clip() {
     assert!(canvas.calls[2].starts_with("clip "));
     assert!(canvas.calls[3].starts_with("fill_rounded_rect "));
     assert_eq!(canvas.calls[4], "restore");
+}
+
+#[test]
+fn forwards_text_font_reference_to_canvas_host() {
+    let frame = UiFrame {
+        viewport: Viewport {
+            width: 50.0,
+            height: 50.0,
+        },
+        commands: vec![DrawCommand {
+            geometry: Rect {
+                x: 4.0,
+                y: 6.0,
+                w: 20.0,
+                h: 18.0,
+            },
+            clip: None,
+            payload: DrawPayload::Text {
+                text: tela_contract::TextContent {
+                    text: "\u{e2c7}".to_owned(),
+                    font: tela_contract::FontRef("tela-icons".to_owned()),
+                    font_size: 18.0,
+                    line_height: 18.0,
+                    color: Color::BLUE,
+                },
+            },
+        }],
+        hit_regions: vec![],
+    };
+    let mut canvas = Recorder::default();
+    render_frame(&mut canvas, &frame, &BackendCapabilities::full());
+    assert!(canvas.calls[0].contains("tela-icons"));
 }
 
 #[test]

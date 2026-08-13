@@ -26,7 +26,15 @@ pub trait Canvas2D {
     /// 线性渐变填充（几何 + 起止点 + 断点）。
     fn fill_linear_gradient(&mut self, rect: Rect, gradient: &Gradient);
     /// 文字。
-    fn fill_text(&mut self, text: &str, x: f32, y: f32, size: f32, color: Color);
+    fn fill_text(
+        &mut self,
+        text: &str,
+        font: &tela_contract::FontRef,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: Color,
+    );
     /// 图片（宿主按纹理 id 绘制；本后端留宿主实现）。
     fn draw_image(&mut self, rect: Rect, texture: &tela_contract::TextureRef);
     /// 九宫格（宿主实现；本后端提供默认降级为整体拉伸）。
@@ -138,6 +146,7 @@ fn render_payload(
             if caps.text {
                 canvas.fill_text(
                     &text.text,
+                    &text.font,
                     geometry.x,
                     geometry.y + text.font_size,
                     text.font_size,

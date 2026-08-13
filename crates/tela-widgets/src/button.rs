@@ -106,7 +106,7 @@ impl Button {
             width: 80.0,
             height: 26.0,
             border_radius: 6.0,
-            font: FontRef("noto".to_string()),
+            font: FontRef(tela_fonts::UI_FONT_NAME.to_owned()),
             font_size: 12.0,
             line_height: 16.8,
         }

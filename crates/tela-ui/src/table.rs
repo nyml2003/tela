@@ -30,9 +30,9 @@ impl Td {
             cross_align: tela_contract::CrossAlign::Center,
             padding: Insets {
                 top: 2.0,
-                right: 6.0,
+                right: 8.0,
                 bottom: 2.0,
-                left: 6.0,
+                left: 8.0,
             },
         }
     }
@@ -164,9 +164,9 @@ impl Tr {
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let bg = if self.selected {
-            Color::rgba(0.91, 0.95, 1.0, 1.0)
+            Color::rgba(0.86, 0.92, 1.0, 1.0)
         } else if self.hovered {
-            Color::rgba(0.96, 0.97, 0.99, 1.0)
+            Color::rgba(0.96, 0.98, 1.0, 1.0)
         } else {
             self.background.unwrap_or(Color::WHITE)
         };
@@ -181,7 +181,7 @@ impl Tr {
         let mut builder = LayoutContainer::flex(self.cells)
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(bg)),
-                border_color: Some(BORDER),
+                border_color: None,
                 ..VisualConcern::default()
             })
             .layout(layout);

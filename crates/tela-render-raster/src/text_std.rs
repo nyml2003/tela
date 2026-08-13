@@ -1,12 +1,12 @@
 //! std 文字渲染：ab_glyph 动态字形栅格 + 内嵌 Noto 子集字体（见 007-4、7.4）。
 
 use ab_glyph::{Font, FontArc, ScaleFont, point};
-use tela_contract::TextContent;
+use tela_contract::{FontRef, TextContent};
 
 use crate::render::{Canvas, IRect};
 
 /// 内嵌中文字体子集（wqy-zenhei 子集：中英文 + 常用标点，TrueType glyf 轮廓，度量标准）。
-pub const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/WQYZenhei-subset.ttf");
+pub const FONT_BYTES: &[u8] = tela_fonts::UI_FONT_BYTES;
 
 /// 内嵌字体字节（宿主/上层据此构造与渲染同一字体的度量器，见 007-4.0"同一不可变字体数据"）。
 pub fn embedded_font_bytes() -> &'static [u8] {
@@ -24,10 +24,23 @@ pub fn em_pixel_height(font: &ab_glyph::FontArc, font_size: f32) -> f32 {
 }
 
 /// 惰性解析的字体（首次使用初始化，结果确定不变）。
-fn font() -> &'static FontArc {
+fn ui_font() -> &'static FontArc {
     use std::sync::OnceLock;
     static FONT: OnceLock<FontArc> = OnceLock::new();
     FONT.get_or_init(|| FontArc::try_from_slice(FONT_BYTES).expect("内嵌字体必须可解析"))
+}
+
+/// 图标字体单独缓存；未知 `FontRef` 始终回退正文，确保旧调用方稳定。
+fn font(font_ref: &FontRef) -> &'static FontArc {
+    use std::sync::OnceLock;
+    static ICON_FONT: OnceLock<FontArc> = OnceLock::new();
+    if font_ref.0 == tela_fonts::ICON_FONT_NAME {
+        ICON_FONT.get_or_init(|| {
+            FontArc::try_from_slice(tela_fonts::ICON_FONT_BYTES).expect("内嵌图标字体必须可解析")
+        })
+    } else {
+        ui_font()
+    }
 }
 
 /// 文字绘制：逐字形轮廓栅格化覆盖蒙版，叠加文本颜色；`\n` 换行；缺失字形渲染实心方块。
@@ -38,7 +51,7 @@ pub(crate) fn draw_text_std(
     scale: f32,
     logical_width: f32,
 ) {
-    let font = font();
+    let font = font(&text.font);
     // 按 em 缩放（1em = font_size），见 em_pixel_height；dpi 统一乘入。
     let scaled = font.as_scaled(em_pixel_height(font, text.font_size) * scale);
     // 行高与布局侧对齐：布局行高 = TextMeasurer 返回的 line_height（见 007-4.0 同一度量）。

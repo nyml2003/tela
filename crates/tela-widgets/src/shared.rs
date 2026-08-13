@@ -21,7 +21,7 @@ pub(crate) const TEXT: Color = Color::rgba(0.17, 0.19, 0.24, 1.0);
 pub(crate) const TEXT_SECONDARY: Color = Color::rgba(0.55, 0.57, 0.62, 1.0);
 /// 默认字体。
 pub(crate) fn font() -> FontRef {
-    FontRef("noto".to_string())
+    FontRef(tela_fonts::UI_FONT_NAME.to_owned())
 }
 
 /// 文本节点。

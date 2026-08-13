@@ -949,9 +949,11 @@ dependencies = [
 name = "tela-demo"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "js-sys",
  "tela-contract",
  "tela-core",
+ "tela-fonts",
  "tela-render-raster",
  "tela-render-wgpu",
  "tela-ui",
@@ -961,6 +963,10 @@ dependencies = [
  "web-sys",
  "wgpu",
 ]
+
+[[package]]
+name = "tela-fonts"
+version = "0.1.0"
 
 [[package]]
 name = "tela-log"
@@ -982,6 +988,7 @@ dependencies = [
  "font8x8",
  "png",
  "tela-contract",
+ "tela-fonts",
 ]
 
 [[package]]
@@ -993,6 +1000,7 @@ dependencies = [
  "naga 26.0.0",
  "pollster",
  "tela-contract",
+ "tela-fonts",
  "tela-log",
  "wgpu",
 ]
@@ -1010,6 +1018,7 @@ version = "0.1.0"
 dependencies = [
  "tela-contract",
  "tela-core",
+ "tela-fonts",
  "tela-widgets",
 ]
 
@@ -1019,6 +1028,7 @@ version = "0.1.0"
 dependencies = [
  "tela-contract",
  "tela-core",
+ "tela-fonts",
 ]
 
 [[package]]

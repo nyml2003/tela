@@ -19,12 +19,12 @@ tela-core（值树、布局、身份、命中、焦点、ViewStateStore）
 | 层 | 负责 | 不负责 |
 |---|---|---|
 | `tela-core` | 原语、值语义 `UiNode`、布局、命中、焦点、滚动、modal 栈和跨帧视图状态 | Signal、业务数据、组件实例状态、调度、异步副作用 |
-| `tela-widgets` | Button/Input/Checkbox 等原子控件；受控值、`BindId`、IME 与基础焦点语义 | 组合工作流、业务命令、跨组件局部状态 |
-| `tela-ui` | Form/Table/Select/Cascader 等分子组件；Dialog/Popover/Menu/Tabs/Toolbar；实例状态、批处理和 `UiIntent` | 主题、领域模型、网络/存储、renderer、tela key 管理 |
+| `tela-widgets` | Button/Input/Checkbox、`Icon`/`IconButton` 等原子控件；受控值、`BindId`、IME 与基础焦点语义 | 组合工作流、业务命令、跨组件局部状态 |
+| `tela-ui` | Form/Table/Select/Cascader 等分子组件；Dialog/Popover/Menu/Tabs/支持图标的 Toolbar；实例状态、批处理和 `UiIntent` | 主题、领域模型、网络/存储、renderer、tela key 管理 |
 | 宿主 / Store | 业务 Signal、校验、命令、异步 port 与副作用 | tela-core 内部状态、组件私有交互实现 |
 
-`tela-ui` 主题无关：组件提供结构、slot、状态与交互契约；颜色、字体、间距和图标通过主题或
-宿主传入。它不提供文件管理器等领域组件。
+`tela-ui` 主题无关：组件提供结构、slot、状态与交互契约；颜色、字体、间距通过主题或宿主传入，
+图标语义来自 `tela-widgets::IconName`，具体领域映射留在调用方。它不提供文件管理器等领域组件。
 
 ## 2. 状态归属
 

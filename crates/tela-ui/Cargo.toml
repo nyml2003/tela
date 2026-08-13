@@ -8,6 +8,7 @@ description = "tela 主题无关的分子组件与结构化 UI 意图"
 [dependencies]
 tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
+tela-fonts = { path = "../tela-fonts" }
 tela-widgets = { path = "../tela-widgets" }
 
 [lints]

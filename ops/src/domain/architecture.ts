@@ -21,17 +21,17 @@ export interface ArchViolation {
 }
 
 /** 零依赖 crate（含 dev/build 依赖都算）。 */
-const ZERO_DEP_CRATES: readonly string[] = ['tela-contract', 'tela-log'];
+const ZERO_DEP_CRATES: readonly string[] = ['tela-contract', 'tela-log', 'tela-fonts'];
 
 /** 允许的普通依赖白名单：<crate> 只允许依赖 <列出的包>。 */
 const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
   ['tela-resource-protocol', ['tela-contract']],
   ['tela-core', ['tela-contract']],
-  ['tela-render-raster', ['tela-contract', 'ab_glyph', 'ab_glyph_rasterizer', 'png', 'font8x8']],
+  ['tela-render-raster', ['tela-contract', 'tela-fonts', 'ab_glyph', 'ab_glyph_rasterizer', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],
-  ['tela-render-wgpu', ['tela-contract', 'tela-log', 'ab_glyph', 'bytemuck', 'wgpu']],
-  ['tela-widgets', ['tela-contract', 'tela-core']],
-  ['tela-ui', ['tela-contract', 'tela-core', 'tela-widgets']],
+  ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-fonts', 'ab_glyph', 'bytemuck', 'wgpu']],
+  ['tela-widgets', ['tela-contract', 'tela-core', 'tela-fonts']],
+  ['tela-ui', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-widgets']],
 ];
 
 /** dev-dependencies 白名单：core 的 dev 依赖仅限测试专用后端（集成测试，不进入运行时）。 */
