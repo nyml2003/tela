@@ -17,6 +17,7 @@ webgpu = ["dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:wasm-bindgen-fut
 tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
 tela-widgets = { path = "../tela-widgets" }
+tela-ui = { path = "../tela-ui" }
 tela-render-raster = { path = "../tela-render-raster" }
 tela-render-wgpu = { path = "../tela-render-wgpu", optional = true }
 wgpu = { version = "30", optional = true }

@@ -7,9 +7,10 @@ use tela_contract::{
     TextMeasurer, TextMetrics, UiAction, UiFrame, UiNode, Viewport,
 };
 use tela_core::{LayoutCache, UiTree, ViewStateStore, handle_input};
+use tela_ui::{DraftInputEvent, IntentTarget, LocalStateRuntime, UiIntent, intent_from_action};
 
 use super::reactive::ComponentRuntime;
-use super::{apply_intent, intent_from_bind_id};
+use super::{Intent, apply_intent, intent_from_bind_id};
 use crate::domain::{FileManagerModel, FileManagerSession};
 use crate::presentation::operation::OPERATION_MODAL_KEY;
 use crate::presentation::{
@@ -65,6 +66,7 @@ pub struct App {
     nav_scroll_key: Option<SemanticKey>,
     detail_scroll_key: Option<SemanticKey>,
     clickable_keys: BTreeSet<SemanticKey>,
+    hovered_toolbar_target: Option<String>,
     nav_scroll: ScrollState,
     detail_scroll: ScrollState,
     frame_trace: Vec<u8>,
@@ -73,6 +75,7 @@ pub struct App {
     input_upload: Vec<u8>,
     revision: tela_widgets::Signal<u64>,
     component_runtime: ComponentRuntime,
+    local_state: LocalStateRuntime,
 }
 
 impl App {
@@ -93,6 +96,7 @@ impl App {
             nav_scroll_key: None,
             detail_scroll_key: None,
             clickable_keys: BTreeSet::new(),
+            hovered_toolbar_target: None,
             nav_scroll: ScrollState::default(),
             detail_scroll: ScrollState::default(),
             frame_trace: Vec::new(),
@@ -101,6 +105,7 @@ impl App {
             input_upload: Vec::new(),
             revision,
             component_runtime,
+            local_state: LocalStateRuntime::new(),
         }
     }
 
@@ -141,14 +146,34 @@ impl App {
         {
             self.view_state.pop_modal();
         }
+        self.local_state.begin_render();
+        let search_input = self
+            .local_state
+            .sync_draft_input(&self.session.query, "file.search");
+        let operation_input = self.session.operation.as_ref().and_then(|operation| {
+            if matches!(
+                operation.kind,
+                crate::domain::OperationKind::MoveToDesign | crate::domain::OperationKind::Trash
+            ) {
+                None
+            } else {
+                Some(
+                    self.local_state
+                        .sync_draft_input(&operation.value, "operation.value"),
+                )
+            }
+        });
         let props = AppShellProps {
             model: &self.model,
             session: &self.session,
             viewport: self.viewport,
             search_focused: self.search_focused(),
-            hovered: None,
+            hovered_target: self.hovered_toolbar_target.clone(),
+            search_input,
+            operation_input,
         };
         let tree = UiTree::new(AppShell.render(&props)).expect("文件管理器场景必须合法");
+        self.local_state.finish_render();
         let mut scroll_inputs = HashMap::new();
         if let Some(key) = &self.nav_scroll_key {
             scroll_inputs.insert(key.clone(), self.nav_scroll);
@@ -196,7 +221,30 @@ impl App {
         )
     }
     pub fn input_focused(&self) -> bool {
-        self.session.operation.is_some() || self.search_focused()
+        if self.session.operation.is_some() {
+            self.operation_accepts_input()
+        } else {
+            self.search_focused()
+        }
+    }
+    pub fn input_value(&self) -> String {
+        if self.operation_accepts_input() {
+            return self
+                .local_state
+                .snapshot(&IntentTarget::new("operation.value"))
+                .map(|snapshot| snapshot.value().to_owned())
+                .unwrap_or_else(|| {
+                    self.session
+                        .operation
+                        .as_ref()
+                        .map(|operation| operation.value.clone())
+                        .unwrap_or_default()
+                });
+        }
+        self.local_state
+            .snapshot(&IntentTarget::new("file.search"))
+            .map(|snapshot| snapshot.value().to_owned())
+            .unwrap_or_else(|| self.session.query.clone())
     }
     pub fn pointer_cursor(&self) -> u32 {
         if self.search_focused() {
@@ -243,9 +291,11 @@ impl App {
                 UiAction::Scroll { node_id, delta } => {
                     changed |= self.handle_scroll(*node_id, delta.y)
                 }
-                UiAction::Hover { .. }
-                | UiAction::RequestFocus { .. }
-                | UiAction::FocusChanged { .. } => changed = true,
+                UiAction::Hover { node_id, .. } => {
+                    self.hovered_toolbar_target = self.toolbar_target_at(*node_id);
+                    changed = true;
+                }
+                UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
                 _ => {}
             }
         }
@@ -256,22 +306,39 @@ impl App {
     }
 
     pub fn set_input_value(&mut self, value: String) -> u32 {
-        if let Some(operation) = &mut self.session.operation {
-            if operation.value == value {
-                return 0;
-            }
-            operation.value = value;
-            self.mark_view_dirty();
-            return 1;
-        }
-        if !self.search_focused() || self.session.query == value {
+        self.ensure_frame();
+        if self.session.operation.is_some() && !self.operation_accepts_input() {
             return 0;
         }
-        self.session.query = value;
-        self.session.notice = "已更新搜索结果".to_owned();
-        self.detail_scroll = ScrollState::default();
-        self.mark_view_dirty();
-        1
+        if self.session.operation.is_none() && !self.search_focused() {
+            return 0;
+        }
+        self.dispatch_draft_input(DraftInputEvent::Input(value))
+    }
+
+    pub fn composition_start(&mut self) -> u32 {
+        self.ensure_frame();
+        self.dispatch_draft_input(DraftInputEvent::CompositionStart)
+    }
+
+    pub fn composition_end(&mut self) -> u32 {
+        self.ensure_frame();
+        self.dispatch_draft_input(DraftInputEvent::CompositionEnd)
+    }
+
+    pub fn input_enter(&mut self) -> u32 {
+        self.ensure_frame();
+        self.dispatch_draft_input(DraftInputEvent::Enter)
+    }
+
+    pub fn input_cancel(&mut self) -> u32 {
+        self.ensure_frame();
+        self.dispatch_draft_input(DraftInputEvent::Cancel)
+    }
+
+    pub fn input_blur(&mut self) -> u32 {
+        self.ensure_frame();
+        self.dispatch_draft_input(DraftInputEvent::Blur)
     }
 
     #[cfg(test)]
@@ -279,7 +346,7 @@ impl App {
         let Some(intent) = intent_from_bind_id(bind_id) else {
             return false;
         };
-        apply_intent(&mut self.model, &mut self.session, intent);
+        self.dispatch_controller_intent(intent);
         self.mark_view_dirty();
         true
     }
@@ -287,6 +354,13 @@ impl App {
     pub fn begin_input_upload(&mut self, bytes: usize) -> *mut u8 {
         self.input_upload.resize(bytes, 0);
         self.input_upload.as_mut_ptr()
+    }
+    pub fn input_value_ptr(&mut self) -> *const u8 {
+        self.input_upload = self.input_value().into_bytes();
+        self.input_upload.as_ptr()
+    }
+    pub fn input_value_len(&mut self) -> u32 {
+        self.input_value().len() as u32
     }
     pub fn finish_input_upload(&mut self, bytes: usize) -> u32 {
         if bytes != self.input_upload.len() {
@@ -308,10 +382,74 @@ impl App {
     fn mark_view_dirty(&mut self) {
         self.revision.update(|value| *value = value.wrapping_add(1));
     }
+    fn dispatch_draft_input(&mut self, event: DraftInputEvent) -> u32 {
+        let target = if self.operation_accepts_input() {
+            IntentTarget::new("operation.value")
+        } else if self.session.operation.is_none() && self.search_focused() {
+            IntentTarget::new("file.search")
+        } else {
+            return 0;
+        };
+        let Some(outcome) = self.local_state.dispatch(&target, event) else {
+            return 0;
+        };
+        let mut changed = outcome.changed;
+        if let Some(UiIntent::Commit {
+            target,
+            value: tela_contract::Value::String(value),
+        }) = outcome.intent
+        {
+            let intent = match target.as_str() {
+                "operation.value" => Intent::SetOperationValue(value),
+                "file.search" => {
+                    self.detail_scroll = ScrollState::default();
+                    Intent::SetQuery(value)
+                }
+                _ => return u32::from(changed),
+            };
+            self.apply_controller_intent(intent);
+            changed = true;
+        }
+        if changed {
+            self.mark_view_dirty();
+        }
+        u32::from(changed)
+    }
+    fn apply_controller_intent(&mut self, intent: Intent) {
+        apply_intent(&mut self.model, &mut self.session, intent);
+        if self.session.operation.is_none() {
+            self.local_state
+                .release_target(&IntentTarget::new("operation.value"));
+        }
+    }
+    fn dispatch_controller_intent(&mut self, intent: Intent) {
+        if matches!(intent, Intent::ConfirmOperation) {
+            self.dispatch_draft_input(DraftInputEvent::Blur);
+        }
+        self.apply_controller_intent(intent);
+    }
     fn search_focused(&self) -> bool {
         self.view_state
             .current_focus_key()
             .is_some_and(|key| self.search_key.as_ref() == Some(key))
+    }
+    fn operation_accepts_input(&self) -> bool {
+        self.session.operation.as_ref().is_some_and(|operation| {
+            !matches!(
+                operation.kind,
+                crate::domain::OperationKind::MoveToDesign | crate::domain::OperationKind::Trash
+            )
+        })
+    }
+
+    fn toolbar_target_at(&self, node_id: NodeId) -> Option<String> {
+        self.tree
+            .as_ref()
+            .and_then(|tree| node_at(tree.root(), node_id.0 as usize, &mut 0))
+            .and_then(|node| node.interact.as_ref())
+            .and_then(|interact| interact.bind_id.as_ref())
+            .and_then(|bind_id| bind_id.0.strip_prefix("ui.invoke:"))
+            .map(str::to_owned)
     }
 
     fn handle_click(&mut self, node_id: NodeId) -> bool {
@@ -328,13 +466,20 @@ impl App {
         else {
             return false;
         };
-        let Some(intent) = intent_from_bind_id(&bind_id.0) else {
+        let action = UiAction::Click { node_id };
+        let intent = intent_from_action(&action, Some(bind_id))
+            .and_then(|intent| match intent {
+                tela_ui::UiIntent::Invoke { target } => intent_from_bind_id(target.as_str()),
+                tela_ui::UiIntent::Preview { .. } | tela_ui::UiIntent::Commit { .. } => None,
+            })
+            .or_else(|| intent_from_bind_id(&bind_id.0));
+        let Some(intent) = intent else {
             return false;
         };
         if self.session.operation.is_some() && !bind_id.0.starts_with("operation.") {
             return false;
         }
-        apply_intent(&mut self.model, &mut self.session, intent);
+        self.dispatch_controller_intent(intent);
         self.mark_view_dirty();
         true
     }
@@ -441,7 +586,9 @@ mod tests {
                 node_at(tree.root(), id.0 as usize, &mut 0)
                     .and_then(|node| node.interact.as_ref())
                     .and_then(|interact| interact.bind_id.as_ref())
-                    .is_some_and(|bound| bound.0 == bind_id)
+                    .is_some_and(|bound| {
+                        bound.0 == bind_id || bound.0 == format!("ui.invoke:{bind_id}")
+                    })
             })
             .expect("交互绑定应存在");
         let hit = app
@@ -554,6 +701,7 @@ mod tests {
             Some(&"新建文件夹".to_owned())
         );
         assert_eq!(app.set_input_value("验收目录".to_owned()), 1);
+        assert_eq!(app.input_enter(), 1);
         assert!(
             app.model
                 .entries_in_filtered(1, "", app.session.filter, app.session.sort)
@@ -572,6 +720,51 @@ mod tests {
         assert!(app.dispatch_bind_id("operation.cancel"));
         assert!(app.session.operation.is_none());
         assert_eq!(app.session.notice, "已取消操作");
+    }
+
+    #[test]
+    fn operation_draft_commits_at_boundaries_and_does_not_survive_a_reopen() {
+        let mut app = App::new();
+        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert_eq!(app.set_input_value("仅本地草稿".to_owned()), 1);
+        assert_eq!(
+            app.session
+                .operation
+                .as_ref()
+                .map(|draft| draft.value.as_str()),
+            Some("新建文件夹")
+        );
+        assert_eq!(app.composition_start(), 1);
+        assert_eq!(app.input_enter(), 0, "IME 组合期间不能提交");
+        assert_eq!(app.composition_end(), 1);
+        assert_eq!(app.input_blur(), 1);
+        assert_eq!(
+            app.session
+                .operation
+                .as_ref()
+                .map(|draft| draft.value.as_str()),
+            Some("仅本地草稿")
+        );
+        assert!(app.dispatch_bind_id("operation.cancel"));
+        assert!(app.dispatch_bind_id("command.add-tag"));
+        app.ensure_frame();
+        assert_eq!(app.input_value(), "重点");
+        assert_eq!(app.set_input_value("临时标签".to_owned()), 1);
+        assert_eq!(app.input_cancel(), 1);
+        assert_eq!(app.input_value(), "重点");
+        assert!(app.dispatch_bind_id("operation.cancel"));
+        assert!(app.dispatch_bind_id("command.add-tag"));
+        app.ensure_frame();
+        assert_eq!(app.input_value(), "重点");
+
+        app.session.select(5);
+        assert!(app.dispatch_bind_id("command.rename"));
+        assert_eq!(app.set_input_value("README-已重命名.md".to_owned()), 1);
+        assert!(app.dispatch_bind_id("operation.confirm"));
+        assert_eq!(
+            app.model.entry(5).map(|entry| entry.name.as_str()),
+            Some("README-已重命名.md")
+        );
     }
 
     #[test]
@@ -621,5 +814,40 @@ mod tests {
         click_bound(&mut app, "operation.confirm");
         assert!(app.session.operation.is_none());
         assert_eq!(app.model.entry(5).expect("README 存在").name, "README.md");
+    }
+
+    #[test]
+    fn toolbar_hover_is_projected_from_core_view_state_without_a_component_key() {
+        let mut app = App::new();
+        app.ensure_frame();
+        let tree = app.tree.as_ref().expect("tree");
+        let node_id = tree
+            .node_ids()
+            .iter()
+            .copied()
+            .find(|id| {
+                node_at(tree.root(), id.0 as usize, &mut 0)
+                    .and_then(|node| node.interact.as_ref())
+                    .and_then(|interact| interact.bind_id.as_ref())
+                    .is_some_and(|bind| bind.0 == "ui.invoke:command.new-folder")
+            })
+            .expect("Toolbar 新建项应存在");
+        let hit = app
+            .frame()
+            .hit_regions
+            .iter()
+            .find(|region| region.node_id == node_id)
+            .expect("Toolbar 新建项应可命中");
+        app.handle_pointer(PointerEvent::Move {
+            position: tela_contract::Point {
+                x: hit.rect.x + 1.0,
+                y: hit.rect.y + 1.0,
+            },
+        });
+        assert_eq!(
+            app.hovered_toolbar_target.as_deref(),
+            Some("command.new-folder")
+        );
+        assert!(app.ensure_frame());
     }
 }

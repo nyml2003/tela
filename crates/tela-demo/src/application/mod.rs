@@ -16,6 +16,8 @@ pub enum Intent {
     SetFilter(EntryFilter),
     ToggleNavigation,
     BeginOperation(OperationKind),
+    SetOperationValue(String),
+    SetQuery(String),
     ConfirmOperation,
     CancelOperation,
 }
@@ -126,6 +128,15 @@ pub fn apply_intent(
                 kind,
                 value: value.to_owned(),
             });
+        }
+        Intent::SetOperationValue(value) => {
+            if let Some(operation) = &mut session.operation {
+                operation.value = value;
+            }
+        }
+        Intent::SetQuery(value) => {
+            session.query = value;
+            session.notice = "已更新搜索结果".to_owned();
         }
         Intent::ConfirmOperation => {
             if let Some(draft) = session.operation.take() {

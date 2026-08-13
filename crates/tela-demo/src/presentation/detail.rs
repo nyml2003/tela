@@ -5,7 +5,7 @@ use tela_contract::{
     VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::LayoutContainer;
-use tela_widgets::{Table, Td, Tr};
+use tela_ui::{Table, Td, Tr};
 
 use crate::domain::{DirectoryView, Entry, EntryKind, FileManagerModel, FileManagerSession};
 

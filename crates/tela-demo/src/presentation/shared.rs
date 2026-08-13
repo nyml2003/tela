@@ -70,7 +70,27 @@ pub fn command_button(
     disabled: bool,
     destructive: bool,
 ) -> UiNode {
-    let palette = ButtonPalette {
+    let palette = command_button_palette(destructive);
+    let mut node = Button::new(label)
+        .width(width)
+        .height(26.0)
+        .variant(if destructive {
+            ButtonVariant::Danger
+        } else {
+            ButtonVariant::Primary
+        })
+        .palette(palette)
+        .disabled(disabled)
+        .text_metrics(12.0, 15.0)
+        .into_node();
+    if let Some(interact) = &mut node.interact {
+        interact.bind_id = Some(BindId(bind_id.to_owned()));
+    }
+    node
+}
+
+pub fn command_button_palette(destructive: bool) -> ButtonPalette {
+    ButtonPalette {
         normal: if destructive {
             Color::rgba(0.78, 0.19, 0.20, 1.0)
         } else {
@@ -89,23 +109,7 @@ pub fn command_button(
         disabled: Color::rgba(0.75, 0.78, 0.83, 1.0),
         text: Color::WHITE,
         disabled_text: Color::rgba(0.48, 0.52, 0.58, 1.0),
-    };
-    let mut node = Button::new(label)
-        .width(width)
-        .height(26.0)
-        .variant(if destructive {
-            ButtonVariant::Danger
-        } else {
-            ButtonVariant::Primary
-        })
-        .palette(palette)
-        .disabled(disabled)
-        .text_metrics(12.0, 15.0)
-        .into_node();
-    if let Some(interact) = &mut node.interact {
-        interact.bind_id = Some(BindId(bind_id.to_owned()));
     }
-    node
 }
 
 pub fn clickable(mut node: UiNode, bind_id: String) -> UiNode {

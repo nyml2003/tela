@@ -1,34 +1,24 @@
-//! 组件共享基础：统一视觉常量与节点构造 helper。
+//! 分子组件的默认视觉值与节点构造 helper。
+//!
+//! 它们只提供可替换的默认值，不携带任何领域主题或业务资源。
 
 use tela_contract::{
     Color, Fill, FontRef, Insets, LayoutConcern, Size, TextContent, UiNode, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
-/// AntD 风格主题色。
-pub(crate) const PRIMARY: Color = Color::rgba(0.09, 0.42, 0.92, 1.0);
-/// 边框色。
 pub(crate) const BORDER: Color = Color::rgba(0.78, 0.80, 0.84, 1.0);
-/// 悬停边框色。
 pub(crate) const BORDER_HOVER: Color = Color::rgba(0.09, 0.42, 0.92, 1.0);
-/// 输入背景。
 pub(crate) const FIELD_BG: Color = Color::rgba(0.98, 0.98, 0.99, 1.0);
-/// 禁用背景。
 pub(crate) const DISABLED_BG: Color = Color::rgba(0.90, 0.90, 0.92, 1.0);
-/// 正文文本色。
 pub(crate) const TEXT: Color = Color::rgba(0.17, 0.19, 0.24, 1.0);
-/// 次要文本色。
 pub(crate) const TEXT_SECONDARY: Color = Color::rgba(0.55, 0.57, 0.62, 1.0);
-/// 默认字体。
-pub(crate) fn font() -> FontRef {
-    FontRef("noto".to_string())
-}
+pub(crate) const ERROR: Color = Color::rgba(0.87, 0.26, 0.22, 1.0);
 
-/// 文本节点。
 pub(crate) fn text(content: &str, size: f32, color: Color) -> UiNode {
     Primitive::text(TextContent {
         text: content.to_string(),
-        font: font(),
+        font: FontRef("noto".to_string()),
         font_size: size,
         line_height: size * 1.4,
         color,
@@ -36,7 +26,6 @@ pub(crate) fn text(content: &str, size: f32, color: Color) -> UiNode {
     .into()
 }
 
-/// 字段容器（输入类组件公共视觉：边框 + 圆角 + 背景）。
 pub(crate) fn field_box(
     children: Vec<UiNode>,
     width: f32,

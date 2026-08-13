@@ -79,9 +79,31 @@ test('完整合法 workspace 通过', () => {
       ['bytemuck', 'normal'],
       ['wgpu', 'normal'],
     ]),
+    crate('tela-widgets', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+    ]),
+    crate('tela-ui', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-widgets', 'normal'],
+    ]),
     crate('tela-log', []),
   ];
   assert.deepEqual(checkArchitecture(crates), []);
+});
+
+test('tela-ui 禁止依赖渲染器或演示宿主', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-ui', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-widgets', 'normal'],
+      ['tela-render-raster', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /禁止依赖 renderer/.test(violation.message)));
 });
 
 test('wgpu 后端白名单之外依赖报违规', () => {

@@ -4,7 +4,7 @@ use tela_contract::{
     Color, Fill, IdentityConcern, LayoutConcern, Size, UiNode, UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::LayoutContainer;
-use tela_widgets::Input;
+use tela_ui::{DraftInput, DraftInputSnapshot, Toolbar, ToolbarItem, ToolbarStyle};
 
 use crate::domain::{FileManagerModel, FileManagerSession};
 
@@ -24,7 +24,9 @@ pub struct AppShellProps<'a> {
     pub session: &'a FileManagerSession,
     pub viewport: Viewport,
     pub search_focused: bool,
-    pub hovered: Option<String>,
+    pub search_input: DraftInputSnapshot,
+    pub hovered_target: Option<String>,
+    pub operation_input: Option<DraftInputSnapshot>,
 }
 
 impl<'a> Component<AppShellProps<'a>> for AppShell {
@@ -34,7 +36,9 @@ impl<'a> Component<AppShellProps<'a>> for AppShell {
             props.session,
             props.viewport,
             props.search_focused,
-            props.hovered.clone(),
+            props.search_input.clone(),
+            props.hovered_target.clone(),
+            props.operation_input.clone(),
         )
     }
 }
@@ -44,7 +48,9 @@ pub fn build_app_shell(
     session: &FileManagerSession,
     viewport: Viewport,
     search_focused: bool,
-    hovered: Option<String>,
+    search_input: DraftInputSnapshot,
+    hovered_target: Option<String>,
+    operation_input: Option<DraftInputSnapshot>,
 ) -> UiNode {
     let narrow = viewport.width < 1200.0;
     let compact = viewport.width < 900.0;
@@ -58,11 +64,11 @@ pub fn build_app_shell(
     workspace.push(detail_pane(model, session, detail_w, content_h, compact));
 
     let shell = LayoutContainer::flex([
-        top_bar(session, search_focused, viewport.width),
-        command_toolbar(session, viewport.width),
+        top_bar(search_input, search_focused, viewport.width),
+        command_toolbar(session, viewport.width, hovered_target.as_deref()),
         path_bar(model, session),
         workspace_stack(workspace, model, session, viewport.width, content_h, narrow),
-        status_bar(model, session, viewport.width, hovered),
+        status_bar(model, session, viewport.width, hovered_target),
     ])
     .layout(LayoutConcern {
         width: Some(Size::fixed(viewport.width)),
@@ -82,7 +88,7 @@ pub fn build_app_shell(
     if session.operation.is_some() {
         LayoutContainer::stack([
             shell,
-            operation_modal(session, viewport.width, viewport.height),
+            operation_modal(session, operation_input, viewport.width, viewport.height),
         ])
         .layout(LayoutConcern {
             width: Some(Size::fixed(viewport.width)),
@@ -123,12 +129,10 @@ fn workspace_stack(
         .into()
 }
 
-fn top_bar(session: &FileManagerSession, focused: bool, width: f32) -> UiNode {
+fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNode {
     let search_w = (width * 0.32).clamp(180.0, 420.0);
     let search = fixed(
-        Input::new()
-            .bind_id("file.search")
-            .value(&session.query)
+        DraftInput::new(search_input, "file.search")
             .placeholder("搜索文件和目录")
             .focused(focused)
             .into_node(),
@@ -162,54 +166,67 @@ fn top_bar(session: &FileManagerSession, focused: bool, width: f32) -> UiNode {
         .into()
 }
 
-fn command_toolbar(session: &FileManagerSession, width: f32) -> UiNode {
+fn command_toolbar(
+    session: &FileManagerSession,
+    width: f32,
+    hovered_target: Option<&str>,
+) -> UiNode {
     let selected = !session.selected.is_empty();
-    let mut buttons = vec![
-        command_button("新建", 54.0, "command.new-folder", false, false),
-        command_button("删除", 52.0, "command.trash", !selected, true),
-    ];
+    let style = ToolbarStyle {
+        background: SURFACE,
+        button_palette: Some(command_button_palette(false)),
+        destructive_button_palette: Some(command_button_palette(true)),
+        ..ToolbarStyle::default()
+    };
+    let mut toolbar = Toolbar::new()
+        .style(style)
+        .item(ToolbarItem::new("新建", "command.new-folder").width(54.0))
+        .item(
+            ToolbarItem::new("删除", "command.trash")
+                .width(52.0)
+                .disabled(!selected)
+                .destructive(true),
+        );
     if width >= 900.0 {
-        buttons.extend([
-            command_button("重命名", 58.0, "command.rename", !selected, false),
-            command_button("复制", 52.0, "command.copy", !selected, false),
-            command_button("移动", 52.0, "command.move-design", !selected, false),
-            command_button(
-                "恢复",
-                52.0,
-                "command.restore",
-                !selected || session.filter != crate::domain::EntryFilter::Trash,
-                false,
-            ),
-            command_button("收藏", 52.0, "command.favorite", !selected, false),
-            command_button("标签", 52.0, "command.add-tag", !selected, false),
-        ]);
+        toolbar = toolbar
+            .item(
+                ToolbarItem::new("重命名", "command.rename")
+                    .width(58.0)
+                    .disabled(!selected),
+            )
+            .item(
+                ToolbarItem::new("复制", "command.copy")
+                    .width(52.0)
+                    .disabled(!selected),
+            )
+            .item(
+                ToolbarItem::new("移动", "command.move-design")
+                    .width(52.0)
+                    .disabled(!selected),
+            )
+            .item(
+                ToolbarItem::new("恢复", "command.restore")
+                    .width(52.0)
+                    .disabled(!selected || session.filter != crate::domain::EntryFilter::Trash),
+            )
+            .item(
+                ToolbarItem::new("收藏", "command.favorite")
+                    .width(52.0)
+                    .disabled(!selected),
+            )
+            .item(
+                ToolbarItem::new("标签", "command.add-tag")
+                    .width(52.0)
+                    .disabled(!selected),
+            );
     }
-    buttons.extend([
-        spacer(),
-        command_button("视图", 48.0, "command.toggle-view", false, false),
-        command_button("排序", 48.0, "command.toggle-sort", false, false),
-        command_button("筛选", 48.0, "command.toggle-filter", false, false),
-        command_button("撤销", 48.0, "command.undo", false, false),
-    ]);
-    LayoutContainer::flex(buttons)
-        .layout(LayoutConcern {
-            width: Some(Size::fill()),
-            height: Some(Size::fixed(TOOLBAR_H)),
-            gap: 6.0,
-            padding: tela_contract::Insets {
-                top: 0.0,
-                right: 12.0,
-                bottom: 0.0,
-                left: 12.0,
-            },
-            cross_align: tela_contract::CrossAlign::Center,
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(SURFACE)),
-            ..VisualConcern::default()
-        })
-        .into()
+    toolbar
+        .item(ToolbarItem::new("视图", "command.toggle-view").width(48.0))
+        .item(ToolbarItem::new("排序", "command.toggle-sort").width(48.0))
+        .item(ToolbarItem::new("筛选", "command.toggle-filter").width(48.0))
+        .item(ToolbarItem::new("撤销", "command.undo").width(48.0))
+        .hovered_target(hovered_target)
+        .into_node()
 }
 
 fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {

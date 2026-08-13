@@ -13,6 +13,12 @@ interface GpuGlue {
   pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
   pointer_cursor(): number;
   input_focused(): boolean;
+  input_value(): string;
+  input_composition_start(): number;
+  input_composition_end(): number;
+  input_enter(): number;
+  input_cancel(): number;
+  input_blur(): number;
   set_input_value(value: string): number;
   frame_trace(): string;
   gpu_diagnostics(): string;
@@ -28,6 +34,13 @@ interface CpuExports {
   demo_pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): number;
   demo_pointer_cursor(): number;
   demo_input_focused(): number;
+  demo_input_composition_start(): number;
+  demo_input_composition_end(): number;
+  demo_input_enter(): number;
+  demo_input_cancel(): number;
+  demo_input_blur(): number;
+  demo_input_value_ptr(): number;
+  demo_input_value_len(): number;
   demo_input_value_begin(bytes: number): number;
   demo_input_value_finish(bytes: number): number;
   demo_frame_size(): number;
@@ -45,6 +58,12 @@ interface PointerBridge {
 
 interface InteractionBridge extends PointerBridge {
   input_focused(): boolean;
+  input_value(): string;
+  input_composition_start(): number;
+  input_composition_end(): number;
+  input_enter(): number;
+  input_cancel(): number;
+  input_blur(): number;
   pointer_cursor(): number;
   set_input_value(value: string): number;
 }
@@ -74,7 +93,7 @@ function installPointerEvents(
   canvas: HTMLCanvasElement,
   viewport: () => { width: number; height: number },
   bridge: InteractionBridge,
-): void {
+): () => void {
   const point = (event: PointerEvent): { x: number; y: number } => {
     const bounds = canvas.getBoundingClientRect();
     const logical = viewport();
@@ -144,7 +163,10 @@ function installPointerEvents(
   document.body.append(editor);
   const syncTextFocus = () => {
     if (bridge.input_focused()) {
-      editor.focus({ preventScroll: true });
+      if (document.activeElement !== editor) {
+        editor.value = bridge.input_value();
+        editor.focus({ preventScroll: true });
+      }
     } else if (document.activeElement === editor) {
       editor.blur();
     }
@@ -152,6 +174,26 @@ function installPointerEvents(
   editor.addEventListener('input', () => {
     bridge.set_input_value(editor.value);
   });
+  editor.addEventListener('compositionstart', () => {
+    bridge.input_composition_start();
+  });
+  editor.addEventListener('compositionend', () => {
+    bridge.input_composition_end();
+  });
+  editor.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      bridge.input_enter();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      bridge.input_cancel();
+      editor.value = bridge.input_value();
+    }
+  });
+  editor.addEventListener('blur', () => {
+    bridge.input_blur();
+  });
+  return syncTextFocus;
 }
 
 function unpackCanvasSize(packed: number): { width: number; height: number } {
@@ -234,6 +276,12 @@ function setRasterInputValue(wasm: CpuExports, value: string): number {
   return wasm.demo_input_value_finish(bytes.byteLength);
 }
 
+function rasterInputValue(wasm: CpuExports): string {
+  const ptr = wasm.demo_input_value_ptr();
+  const len = wasm.demo_input_value_len();
+  return new TextDecoder().decode(new Uint8Array(wasm.memory.buffer, ptr, len));
+}
+
 async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
   const { instance } = await WebAssembly.instantiateStreaming(fetch(`/tela_demo.wasm?v=${Date.now()}`), {
     env: { tela_now: () => performance.now() },
@@ -246,12 +294,18 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
     wasm.demo_set_raster_dpi(window.devicePixelRatio || 1);
   };
   syncViewport();
-  installPointerEvents(canvas, () => viewport, {
+  const syncTextFocus = installPointerEvents(canvas, () => viewport, {
     pointer_down: (x, y) => wasm.demo_pointer_down(x, y),
     pointer_move: (x, y) => wasm.demo_pointer_move(x, y),
     pointer_scroll: (x, y, deltaX, deltaY) => wasm.demo_pointer_scroll(x, y, deltaX, deltaY),
     pointer_cursor: () => wasm.demo_pointer_cursor(),
     input_focused: () => wasm.demo_input_focused() !== 0,
+    input_value: () => rasterInputValue(wasm),
+    input_composition_start: () => wasm.demo_input_composition_start(),
+    input_composition_end: () => wasm.demo_input_composition_end(),
+    input_enter: () => wasm.demo_input_enter(),
+    input_cancel: () => wasm.demo_input_cancel(),
+    input_blur: () => wasm.demo_input_blur(),
     set_input_value: (value) => setRasterInputValue(wasm, value),
   });
   const observer = new ResizeObserver(syncViewport);
@@ -259,6 +313,7 @@ async function startRaster(canvas: HTMLCanvasElement): Promise<() => void> {
   window.addEventListener('resize', syncViewport);
   let logged = false;
   return () => {
+    syncTextFocus();
     const submitted = wasm.demo_tick();
     if (submitted === 0) return;
     presentRaster(canvas, wasm);
@@ -279,7 +334,7 @@ async function startGpu(canvas: HTMLCanvasElement): Promise<() => void> {
   // WebGPU surface 必须在 canvas 物理尺寸确定后创建。
   const surfaceSize = syncGpuCanvasSize(canvas);
   await glue.start_gpu(canvas);
-  installPointerEvents(canvas, () => viewport, glue);
+  const syncTextFocus = installPointerEvents(canvas, () => viewport, glue);
   observeGpuCanvasSize(canvas, (size) => {
     viewport = { width: size.logicalWidth, height: size.logicalHeight };
     glue.set_viewport(viewport.width, viewport.height);
@@ -297,6 +352,7 @@ async function startGpu(canvas: HTMLCanvasElement): Promise<() => void> {
   );
   let lastFailure = '';
   return () => {
+    syncTextFocus();
     if (glue.tick_gpu() !== 0) {
       lastFailure = '';
       return;

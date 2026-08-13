@@ -139,8 +139,8 @@ impl From<Form> for UiNode {
 #[cfg(test)]
 mod tests {
     use super::{Form, FormItem};
-    use crate::Input;
     use tela_contract::ContentConcern;
+    use tela_widgets::Input;
 
     #[test]
     fn form_item_lays_out_label_control_error() {

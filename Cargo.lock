@@ -954,6 +954,7 @@ dependencies = [
  "tela-core",
  "tela-render-raster",
  "tela-render-wgpu",
+ "tela-ui",
  "tela-widgets",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1001,6 +1002,15 @@ name = "tela-resource-protocol"
 version = "0.1.0"
 dependencies = [
  "tela-contract",
+]
+
+[[package]]
+name = "tela-ui"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
+ "tela-widgets",
 ]
 
 [[package]]

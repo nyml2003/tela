@@ -30,6 +30,8 @@ const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
   ['tela-render-raster', ['tela-contract', 'ab_glyph', 'ab_glyph_rasterizer', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],
   ['tela-render-wgpu', ['tela-contract', 'tela-log', 'ab_glyph', 'bytemuck', 'wgpu']],
+  ['tela-widgets', ['tela-contract', 'tela-core']],
+  ['tela-ui', ['tela-contract', 'tela-core', 'tela-widgets']],
 ];
 
 /** dev-dependencies 白名单：core 的 dev 依赖仅限测试专用后端（集成测试，不进入运行时）。 */
@@ -80,6 +82,12 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
     if (info.name.startsWith('tela-render-') && info.deps.some((d) => d.name === 'tela-core')) {
       violations.push({ crate: info.name, message: 'render 后端禁止反向依赖 tela-core' });
     }
+  }
+
+  // 4. 上层组件只能向 core/contract 方向依赖；不得通过组件层耦合渲染器、宿主或业务 demo。
+  const ui = byName.get('tela-ui');
+  if (ui && ui.deps.some((d) => d.name.startsWith('tela-render-') || d.name === 'tela-demo')) {
+    violations.push({ crate: 'tela-ui', message: '分子组件层禁止依赖 renderer 或 tela-demo' });
   }
 
   return violations;

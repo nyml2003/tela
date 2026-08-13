@@ -1,7 +1,8 @@
 # 015-tela-ui 与局部交互状态
 
-> **状态：🔧 设计已确认，尚未实现。** 本文定义 `tela-ui` 作为 `tela-widgets` 之上的
-> 主题无关分子组件层，以及其局部交互状态、Signal 精准更新和命令调度边界。
+> **状态：🔧 前两阶段已实现。** `tela-ui` crate、`Form`/`Table`/`Select`/`Cascader` 迁移、
+> `UiIntent`、`Toolbar`、`LocalStateRuntime` 与 `DraftInput` 已落地；Signal 自动追踪和
+> Scheduler 仍未实现。本文定义这些后续能力的边界。
 
 ## 1. 分层
 
@@ -94,11 +95,15 @@ enum UiIntent {
 - IME composition 期间仅更新 `DraftInput` 草稿，不输出 Preview 或 Commit；`compositionend` 后才允许
   按组件策略合并，blur/Enter 才产生 Commit。
 
-## 6. 首版范围与开放问题
+## 6. 实施范围与开放问题
 
-已确认的首版：直接从 `tela-widgets` 移动 `Form`、`Table`、`Select`、`Cascader`；新增
-`Dialog`、`Popover`、`Menu`、`Tabs`、`Toolbar`、`EmptyState`、`DraftInput` 与 `Slider/DragValue`。
-迁移为直接移动，不保留 `tela-widgets` 的兼容 re-export。
+第一阶段已直接从 `tela-widgets` 移动 `Form`、`Table`、`Select`、`Cascader`，没有保留
+兼容 re-export；`Toolbar` 已作为 `UiIntent::Invoke` 的主题无关样板落地。第二阶段已实现
+`LocalStateRuntime` 与 `DraftInput`：运行时自动分配不可见 `InstancePath`，在未见组件或父容器
+显式卸载时释放草稿；脏草稿遇到外部更新会保留本地值并标记冲突。IME 组合不提交，`blur`、
+`Enter` 和弹窗确认前的提交边界通过 `UiIntent::Commit` 写回宿主。具体实现与验收见
+[018-tela-ui第二阶段DraftInput与局部状态.md](018-tela-ui第二阶段DraftInput与局部状态.md)。
+`Dialog`、`Popover`、`Menu`、`Tabs`、`EmptyState` 与 `Slider/DragValue` 仍是后续范围。
 
 以下问题必须在实现前做决策：
 
@@ -110,13 +115,12 @@ enum UiIntent {
 4. 自动依赖追踪的实现：扩展现有 `Signal` 以在 render scope 中收集依赖，或在 `tela-ui` runtime
    新建兼容 Signal facade；无论选项如何，`tela-core` 不依赖它。
 5. Scheduler 的宿主时钟、帧回调和微任务端口形状，以及离线测试使用的手动虚拟时钟。
-6. 输入的外部值在本地草稿尚未提交时如何处理：默认应以外部业务值覆盖草稿，还是检测冲突并保留
-   草稿。该规则需在 `DraftInput` API 定义前确定。
 
-## 7. 验收基线
+## 7. 后续验收基线
 
 - 未读取某 Signal 的组件不会被标脏；同批次多次写入只重投影一次。
-- Input 在 composition 中不提交；blur/Enter 才产生一个 Commit；显式 Preview 只按 Scheduler 策略输出。
+- `DraftInput` 在 composition 中不提交；blur/Enter 才产生一个 Commit；脏草稿的外部更新会显式
+  标记冲突而不覆盖本地输入；显式 Preview 只按后续 Scheduler 策略输出。
 - Dialog/Popover/Menu 的 local state 不泄漏到业务 Store；关闭或缓存域释放后按外部快照重新初始化。
 - Slider/drag 在一帧内多次更新只向宿主输出最后一个 Preview，最终释放产生一个 Commit。
 - 组件不要求调用方提供 tela key；集合组件的内部稳定 ID 映射在排序、过滤和虚拟窗口移动后保持。

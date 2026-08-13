@@ -31,6 +31,7 @@
 | [015-tela-ui 与局部交互状态](docs/015-tela-ui与局部交互状态.md) | 分子组件层、Signal 精准更新、局部草稿和调度如何分层？ | 设计或实现 `tela-ui` 时 |
 | [016-已解决问题归档](docs/016-已解决问题归档.md) | 哪些历史问题已经有源码和测试证据，不应继续作为待办？ | 清理路线图和限制清单时 |
 | [017-tela-ui 第一阶段实施目标](docs/017-tela-ui第一阶段实施目标.md) | 下一阶段如何迁移分子组件、建立 UiIntent 与 Toolbar 样板？ | 启动 `tela-ui` 第一阶段 Goal 时 |
+| [018-tela-ui 第二阶段 DraftInput 与局部状态](docs/018-tela-ui第二阶段DraftInput与局部状态.md) | 草稿、IME、提交语义和局部状态生命周期如何落地？ | 启动 `tela-ui` 第二阶段 Goal 时 |
 
 ## 开发工作流（ops）
 

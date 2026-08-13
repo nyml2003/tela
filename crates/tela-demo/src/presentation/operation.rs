@@ -5,7 +5,7 @@ use tela_contract::{
     StackLayer, UiNode, VisualConcern,
 };
 use tela_core::builder::LayoutContainer;
-use tela_widgets::Input;
+use tela_ui::{DraftInput, DraftInputSnapshot};
 
 use crate::domain::{FileManagerSession, OperationKind};
 
@@ -13,7 +13,12 @@ use super::shared::{SECONDARY, SURFACE, TEXT, command_button, fixed, text};
 
 pub const OPERATION_MODAL_KEY: &str = "operation-modal";
 
-pub fn operation_modal(session: &FileManagerSession, width: f32, height: f32) -> UiNode {
+pub fn operation_modal(
+    session: &FileManagerSession,
+    input: Option<DraftInputSnapshot>,
+    width: f32,
+    height: f32,
+) -> UiNode {
     let Some(operation) = &session.operation else {
         return LayoutContainer::flex(Vec::<UiNode>::new()).into();
     };
@@ -36,12 +41,13 @@ pub fn operation_modal(session: &FileManagerSession, width: f32, height: f32) ->
     let mut controls = vec![text(title, 16.0, TEXT), text(message, 13.0, SECONDARY)];
     if needs_input {
         controls.push(fixed(
-            Input::new()
-                .bind_id("operation.value")
-                .value(&operation.value)
-                .placeholder("输入名称")
-                .focused(true)
-                .into_node(),
+            DraftInput::new(
+                input.expect("有文本操作时必须同步 DraftInput 快照"),
+                "operation.value",
+            )
+            .placeholder("输入名称")
+            .focused(true)
+            .into_node(),
             300.0,
             32.0,
         ));

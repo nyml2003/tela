@@ -54,6 +54,41 @@ pub extern "C" fn demo_input_focused() -> u32 {
 }
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
+pub extern "C" fn demo_input_composition_start() -> u32 {
+    with_app(|app| app.composition_start())
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_composition_end() -> u32 {
+    with_app(|app| app.composition_end())
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_enter() -> u32 {
+    with_app(|app| app.input_enter())
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_cancel() -> u32 {
+    with_app(|app| app.input_cancel())
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_blur() -> u32 {
+    with_app(|app| app.input_blur())
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_value_ptr() -> *const u8 {
+    with_app(App::input_value_ptr)
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_input_value_len() -> u32 {
+    with_app(App::input_value_len)
+}
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
 pub extern "C" fn demo_pointer_cursor() -> u32 {
     with_app(|app| app.pointer_cursor())
 }

@@ -203,6 +203,42 @@ pub fn input_focused() -> bool {
     crate::with_app(|app| app.input_focused())
 }
 
+/// 当前聚焦文本输入的受控显示值。
+#[wasm_bindgen]
+pub fn input_value() -> String {
+    crate::with_app(|app| app.input_value())
+}
+
+/// 浏览器通知 IME 组合开始。
+#[wasm_bindgen]
+pub fn input_composition_start() -> u32 {
+    crate::with_app(|app| app.composition_start())
+}
+
+/// 浏览器通知 IME 组合结束；该事件不会自行提交草稿。
+#[wasm_bindgen]
+pub fn input_composition_end() -> u32 {
+    crate::with_app(|app| app.composition_end())
+}
+
+/// 浏览器通知当前文本输入确认。
+#[wasm_bindgen]
+pub fn input_enter() -> u32 {
+    crate::with_app(|app| app.input_enter())
+}
+
+/// 浏览器通知当前文本输入取消。
+#[wasm_bindgen]
+pub fn input_cancel() -> u32 {
+    crate::with_app(|app| app.input_cancel())
+}
+
+/// 浏览器通知隐藏文本编辑器失焦。
+#[wasm_bindgen]
+pub fn input_blur() -> u32 {
+    crate::with_app(|app| app.input_blur())
+}
+
 /// 当前 hover 目标的浏览器 cursor 意图：0=默认，1=文本，2=手型。
 #[wasm_bindgen]
 pub fn pointer_cursor() -> u32 {
