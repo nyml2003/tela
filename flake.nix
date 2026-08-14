@@ -23,7 +23,8 @@
           rustc
           rustfmt
           vulkan-loader
-          wasm-bindgen-cli
+          # wasm-bindgen-cli must match the Rust wasm-bindgen schema in Cargo.lock.
+          wasm-bindgen-cli_0_2_126
           (writeShellApplication {
             name = "check";
             # 统一走 ops 工作流（DDD，零运行时依赖；含 TS 版依赖方向检查，

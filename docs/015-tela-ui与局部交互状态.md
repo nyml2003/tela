@@ -10,21 +10,24 @@
 业务容器 / Store（业务 Signal、命令、异步副作用）
                          ▲ UiIntent
 tela-ui（分子组件、组件实例状态、Scheduler、UiIntent 路由）
-                         ▲ UiAction
+                         ▲ UiAction / Icon provider
 tela-widgets（原子控件、BindId、受控值、焦点、IME 宿主适配）
                          ▲
 tela-core（值树、布局、身份、命中、焦点、ViewStateStore）
+
+tela-icon（语义 IconKey、provider、光学度量，降级为 core 已有原语）
 ```
 
 | 层 | 负责 | 不负责 |
 |---|---|---|
 | `tela-core` | 原语、值语义 `UiNode`、布局、命中、焦点、滚动、modal 栈和跨帧视图状态 | Signal、业务数据、组件实例状态、调度、异步副作用 |
-| `tela-widgets` | Button/Input/Checkbox、`Icon`/`IconButton` 等原子控件；受控值、`BindId`、IME 与基础焦点语义 | 组合工作流、业务命令、跨组件局部状态 |
-| `tela-ui` | Form/Table/Select/Cascader 等分子组件；Dialog/Popover/Menu/Tabs/支持图标的 Toolbar；实例状态、批处理和 `UiIntent` | 主题、领域模型、网络/存储、renderer、tela key 管理 |
+| `tela-icon` | `IconKey`、来源 provider、受控 iconfont 映射与光学度量；只输出已有 core 原语 | Button 状态、业务映射、renderer 协议、tela key |
+| `tela-widgets` | Button/Input/Checkbox 等原子控件；受控值、`BindId`、IME 与基础焦点语义 | 图标来源、组合工作流、业务命令、跨组件局部状态 |
+| `tela-ui` | `Text`/`InlineSlot`/`IconButton`、Form/Table/Select/Cascader 等分子组件；Dialog/Popover/Menu/Tabs/Toolbar；实例状态、批处理和 `UiIntent` | 主题、领域模型、网络/存储、renderer、tela key 管理 |
 | 宿主 / Store | 业务 Signal、校验、命令、异步 port 与副作用 | tela-core 内部状态、组件私有交互实现 |
 
 `tela-ui` 主题无关：组件提供结构、slot、状态与交互契约；颜色、字体、间距通过主题或宿主传入，
-图标语义来自 `tela-widgets::IconName`，具体领域映射留在调用方。它不提供文件管理器等领域组件。
+图标语义来自 `tela-icon::IconName` / `IconKey`，具体领域映射留在调用方。`Text` 的 prefix/suffix 接收默认 `Icon`、已解析的 `IconVisual` 或任意 `InlineSlot`，而 `IconButton` 复用 widgets 的 Button 状态与调色板。它不提供文件管理器等领域组件。
 
 ## 2. 状态归属
 

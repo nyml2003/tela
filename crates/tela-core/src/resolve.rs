@@ -467,9 +467,16 @@ fn emit_draw_command(
     clip: Option<ClipRect>,
     ctx: &mut EmitContext<'_>,
 ) {
+    // `visual_offset` is deliberately applied only when projecting a layout box to a draw
+    // command. Layout, hit regions, scroll bounds, and ancestor clips remain logical.
+    let visual_offset = node
+        .visual
+        .as_ref()
+        .map(|visual| visual.visual_offset)
+        .unwrap_or_default();
     let geometry = Rect {
-        x: box_.x + offset.0,
-        y: box_.y + offset.1,
+        x: box_.x + offset.0 + visual_offset.x,
+        y: box_.y + offset.1 + visual_offset.y,
         w: box_.w,
         h: box_.h,
     };

@@ -8,23 +8,25 @@
 
 mod draft_input;
 mod form;
-mod icon_label;
+mod icon_button;
 mod intent;
 mod local_state;
 mod select;
 mod shared;
 mod table;
+mod text;
 mod toolbar;
 mod virtual_window;
 
 pub use draft_input::DraftInput;
 pub use form::{Form, FormItem};
-pub use icon_label::IconLabel;
+pub use icon_button::IconButton;
 pub use intent::{IntentTarget, UiIntent, intent_from_action};
 pub use local_state::{
     DraftInputEvent, DraftInputOutcome, DraftInputSnapshot, InstancePath, LocalStateRuntime,
 };
 pub use select::{CascadeOption, Cascader, OptionItem, Select};
 pub use table::{Table, Td, Tr};
+pub use text::{InlineSlot, Text};
 pub use toolbar::{Toolbar, ToolbarItem, ToolbarOverflow, ToolbarStyle};
 pub use virtual_window::VirtualWindow;

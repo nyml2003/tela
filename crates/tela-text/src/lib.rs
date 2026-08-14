@@ -12,6 +12,7 @@ mod glyphs;
 mod measure;
 
 pub use glyphs::{
-    GlyphInkBounds, GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, rasterize_glyphs,
+    GlyphInkBounds, GlyphInkMetrics, GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds,
+    glyph_ink_metrics, rasterize_glyphs,
 };
 pub use measure::{ControlledTextMeasurer, measure_text};

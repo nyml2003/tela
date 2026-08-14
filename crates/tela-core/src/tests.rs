@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use tela_contract::{
     BaseSize, ClipRect, Color, Constraints, ContentConcern, CrossAlign, Fill, FocusAppearance,
     FontRef, IdentityConcern, Insets, InteractConcern, KeyStrategy, KeymapScopeId, LayoutBox,
-    LayoutConcern, MainAlign, MinMax, Rect, ScrollState, SemanticKey, ShortcutScopeSpec, Size,
-    StackAlign, StackLayer, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics,
-    UiBuildError, UiLayoutError, UiNode, Viewport, VirtualListSpec, VisualConcern,
+    LayoutConcern, MainAlign, MinMax, PixelOffset, Rect, ScrollState, SemanticKey,
+    ShortcutScopeSpec, Size, StackAlign, StackLayer, TextContent, TextMeasureRequest, TextMeasurer,
+    TextMetrics, UiBuildError, UiLayoutError, UiNode, Viewport, VirtualListSpec, VisualConcern,
 };
 
 use crate::builder::{LayoutContainer, LogicalContainer, Primitive};
@@ -247,6 +247,47 @@ fn baseline_flex_aligns_text_and_emits_absolute_baselines() {
     assert!(
         (baseline_y[0] - baseline_y[1]).abs() < f32::EPSILON,
         "frame 协议必须保留布局计算的绝对基线"
+    );
+}
+
+#[test]
+fn visual_offset_moves_draw_commands_without_moving_layout_or_hit_regions() {
+    let mut node = text_node("offset");
+    node.visual = Some(VisualConcern {
+        visual_offset: PixelOffset { x: 3.0, y: -2.0 },
+        ..VisualConcern::default()
+    });
+    node.interact = Some(InteractConcern {
+        clickable: true,
+        ..InteractConcern::default()
+    });
+    let tree = UiTree::new(node).unwrap();
+    let frame = resolve(&tree);
+
+    let command = frame.commands.first().expect("text draw command");
+    assert_eq!(
+        command.geometry,
+        Rect {
+            x: 3.0,
+            y: -2.0,
+            w: 36.0,
+            h: 16.0,
+        }
+    );
+    assert!(matches!(
+        command.payload,
+        tela_contract::DrawPayload::Text { baseline_y, .. }
+            if (baseline_y - 7.6).abs() < 0.001
+    ));
+    assert_eq!(
+        frame.hit_regions.first().map(|region| region.rect),
+        Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 36.0,
+            h: 16.0,
+        }),
+        "visual offset must not change logical hit regions"
     );
 }
 
@@ -630,6 +671,37 @@ fn text_auto_size_uses_text_measurer() {
     // "Hello" 5 字符 × 12 字号 × 0.5 = 30 宽；高 = 行高 16。
     assert_eq!(frame.commands[0].geometry.w, 30.0);
     assert_eq!(frame.commands[0].geometry.h, 16.0);
+}
+
+#[test]
+fn fixed_width_flex_auto_height_keeps_padded_content_at_its_natural_height() {
+    let node: UiNode = LayoutContainer::flex([rect(40.0, 20.0)])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            padding: Insets {
+                top: 2.0,
+                right: 0.0,
+                bottom: 2.0,
+                left: 0.0,
+            },
+            ..LayoutConcern::default()
+        })
+        .into();
+    let box_ = measure(
+        node,
+        Constraints {
+            min_w: 0.0,
+            max_w: 200.0,
+            min_h: 0.0,
+            max_h: 100.0,
+        },
+    )
+    .expect("带 padding 的 Flex 应可测量");
+
+    assert_eq!(box_.w, 100.0);
+    assert_eq!(box_.h, 24.0, "Auto 外盒必须包含上下 padding");
+    assert_eq!(box_.children[0].y, 2.0);
+    assert_eq!(box_.children[0].h, 20.0, "重测不得压缩内容行盒");
 }
 
 #[test]

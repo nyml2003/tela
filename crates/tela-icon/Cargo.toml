@@ -1,17 +1,15 @@
 [package]
-name = "tela-ui"
+name = "tela-icon"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-description = "tela 主题无关的分子组件与结构化 UI 意图"
+description = "tela 图标语义、provider 与光学度量"
 
 [dependencies]
 tela-contract = { path = "../tela-contract" }
 tela-core = { path = "../tela-core" }
 tela-fonts = { path = "../tela-fonts" }
-tela-icon = { path = "../tela-icon" }
 tela-text = { path = "../tela-text" }
-tela-widgets = { path = "../tela-widgets" }
 
 [lints]
 workspace = true

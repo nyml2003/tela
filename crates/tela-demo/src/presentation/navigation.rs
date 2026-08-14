@@ -2,9 +2,9 @@
 
 use tela_contract::{Fill, LayoutConcern, Size, StackAlign, StackLayer, UiNode, VisualConcern};
 use tela_core::builder::LayoutContainer;
+use tela_icon::IconName;
 
 use crate::domain::{Entry, EntryFilter, FileManagerModel, FileManagerSession};
-use tela_widgets::IconName;
 
 use super::shared::*;
 

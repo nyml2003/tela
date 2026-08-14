@@ -221,11 +221,13 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         let (mut measured, mut final_main, content_main, content_cross) =
             self.flex_child_pipeline(node, measured, &inner, &layout, main_axis, cross_axis)?;
 
-        // 容器自身尺寸：声明 or Auto → 内容尺寸（三层解析）。
+        // 容器自身尺寸：声明 or Auto → 外盒尺寸（三层解析）。内容尺寸不含 border/padding，
+        // 因此 Auto 必须先加回本轴 inset；否则带 padding 的定宽容器在重测时会把内容区
+        // 再减小一次。
         let self_main = self.resolve_self_axis(
             node,
             main_axis,
-            content_main,
+            content_main + axis_insets(&layout, main_axis),
             axis_max(&constraints, main_axis),
             axis_min(&constraints, main_axis),
             axis_max(&constraints, main_axis),
@@ -233,7 +235,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         let self_cross = self.resolve_self_axis(
             node,
             cross_axis,
-            content_cross,
+            content_cross + axis_insets(&layout, cross_axis),
             axis_max(&constraints, cross_axis),
             axis_min(&constraints, cross_axis),
             axis_max(&constraints, cross_axis),
@@ -1092,11 +1094,9 @@ fn content_area_constraints(
     };
     Constraints {
         min_w: 0.0,
-        max_w: (width - 2.0 * layout.border_width - layout.padding.left - layout.padding.right)
-            .max(0.0),
+        max_w: (width - axis_insets(layout, Axis::Width)).max(0.0),
         min_h: 0.0,
-        max_h: (height - 2.0 * layout.border_width - layout.padding.top - layout.padding.bottom)
-            .max(0.0),
+        max_h: (height - axis_insets(layout, Axis::Height)).max(0.0),
     }
 }
 
@@ -1110,27 +1110,20 @@ fn inner_constraints(
     layout: &tela_contract::LayoutConcern,
 ) -> Constraints {
     Constraints {
-        min_w: (constraints.min_w
-            - 2.0 * layout.border_width
-            - layout.padding.left
-            - layout.padding.right)
-            .max(0.0),
-        max_w: (constraints.max_w
-            - 2.0 * layout.border_width
-            - layout.padding.left
-            - layout.padding.right)
-            .max(0.0),
-        min_h: (constraints.min_h
-            - 2.0 * layout.border_width
-            - layout.padding.top
-            - layout.padding.bottom)
-            .max(0.0),
-        max_h: (constraints.max_h
-            - 2.0 * layout.border_width
-            - layout.padding.top
-            - layout.padding.bottom)
-            .max(0.0),
+        min_w: (constraints.min_w - axis_insets(layout, Axis::Width)).max(0.0),
+        max_w: (constraints.max_w - axis_insets(layout, Axis::Width)).max(0.0),
+        min_h: (constraints.min_h - axis_insets(layout, Axis::Height)).max(0.0),
+        max_h: (constraints.max_h - axis_insets(layout, Axis::Height)).max(0.0),
     }
+}
+
+/// 某轴上外盒相对内容区增加的 border 与 padding。
+fn axis_insets(layout: &tela_contract::LayoutConcern, axis: Axis) -> f32 {
+    let padding = match axis {
+        Axis::Width => layout.padding.left + layout.padding.right,
+        Axis::Height => layout.padding.top + layout.padding.bottom,
+    };
+    padding + 2.0 * layout.border_width
 }
 
 fn axis_extent(c: &Constraints, axis: Axis) -> f32 {

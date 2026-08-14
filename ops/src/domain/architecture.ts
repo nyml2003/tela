@@ -28,11 +28,12 @@ const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
   ['tela-resource-protocol', ['tela-contract']],
   ['tela-core', ['tela-contract']],
   ['tela-text', ['tela-contract', 'tela-fonts', 'ab_glyph']],
+  ['tela-icon', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-text']],
   ['tela-render-raster', ['tela-contract', 'tela-text', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],
   ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-text', 'bytemuck', 'wgpu']],
   ['tela-widgets', ['tela-contract', 'tela-core', 'tela-fonts']],
-  ['tela-ui', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-widgets']],
+  ['tela-ui', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-icon', 'tela-text', 'tela-widgets']],
 ];
 
 /** dev-dependencies 白名单：core 的 dev 依赖仅限测试专用后端（集成测试，不进入运行时）。 */

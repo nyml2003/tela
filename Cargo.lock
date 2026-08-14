@@ -980,6 +980,7 @@ dependencies = [
  "tela-contract",
  "tela-core",
  "tela-fonts",
+ "tela-icon",
  "tela-render-raster",
  "tela-render-wgpu",
  "tela-text",
@@ -994,6 +995,16 @@ dependencies = [
 [[package]]
 name = "tela-fonts"
 version = "0.1.0"
+
+[[package]]
+name = "tela-icon"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
+ "tela-fonts",
+ "tela-text",
+]
 
 [[package]]
 name = "tela-log"
@@ -1054,6 +1065,8 @@ dependencies = [
  "tela-contract",
  "tela-core",
  "tela-fonts",
+ "tela-icon",
+ "tela-text",
  "tela-widgets",
 ]
 

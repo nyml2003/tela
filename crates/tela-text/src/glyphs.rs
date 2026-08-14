@@ -60,6 +60,30 @@ pub struct GlyphInkBounds {
     pub height: u32,
 }
 
+/// 一段文本在逻辑坐标空间中的实际墨迹度量。
+///
+/// 坐标以文本布局盒的左上角为原点，首行基线由受控字体的 ascent 推导。这是字体逻辑
+/// 度量，不经过设备像素比、取整或覆盖度栅格化；适合图标等单一视觉单元计算 optical
+/// offset。它不描述布局尺寸，也不隐含裁剪语义。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlyphInkMetrics {
+    /// 墨迹左边缘的逻辑 x 坐标。
+    pub x: f32,
+    /// 墨迹上边缘的逻辑 y 坐标。
+    pub y: f32,
+    /// 墨迹逻辑宽度。
+    pub width: f32,
+    /// 墨迹逻辑高度。
+    pub height: f32,
+}
+
+impl GlyphInkMetrics {
+    /// 墨迹在逻辑坐标中的垂直中心。
+    pub fn center_y(self) -> f32 {
+        self.y + self.height * 0.5
+    }
+}
+
 impl GlyphInkBounds {
     fn from_extents(min_x: i32, min_y: i32, max_x: i32, max_y: i32) -> Self {
         Self {
@@ -99,6 +123,73 @@ pub fn glyph_ink_bounds(text: &TextContent, options: GlyphRasterOptions) -> Opti
     });
     (min_x <= max_x && min_y <= max_y)
         .then(|| GlyphInkBounds::from_extents(min_x, min_y, max_x, max_y))
+}
+
+/// 返回文字实际墨迹的逻辑度量。
+///
+/// 此函数与 [`rasterize_glyphs`] 使用同一套受控字体、em 缩放和显式换行规则，但不产生
+/// 物理像素覆盖事件，因此不受 DPR 或像素取整影响。空白文本没有可绘制墨迹，返回
+/// `None`。
+pub fn glyph_ink_metrics(text: &TextContent) -> Option<GlyphInkMetrics> {
+    if !(text.font_size.is_finite() && text.font_size > 0.0) {
+        return None;
+    }
+
+    let font = font_for(&text.font);
+    let glyph_scale = em_pixel_height(font, text.font_size);
+    if !(glyph_scale.is_finite() && glyph_scale > 0.0) {
+        return None;
+    }
+    let scaled = font.as_scaled(glyph_scale);
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut pen_x = 0.0f32;
+    // Mirror tela-core's leaf layout: `first_baseline` is clamped into the first line box
+    // before it reaches DrawPayload::Text. Icon fonts can have an ascent larger than their
+    // requested line height, so the raw ascent would misplace optical metrics.
+    let mut baseline_y = scaled.ascent().clamp(0.0, text.line_height.max(0.0));
+
+    for character in text.text.chars() {
+        if character == '\n' {
+            pen_x = 0.0;
+            baseline_y += text.line_height;
+            continue;
+        }
+
+        let glyph_id = scaled.glyph_id(character);
+        if let Some(outline) = font.outline(glyph_id) {
+            let scale = scaled.scale_factor();
+            let bounds = outline.bounds;
+            let x0 = pen_x + bounds.min.x * scale.horizontal;
+            let x1 = pen_x + bounds.max.x * scale.horizontal;
+            // Font outline y grows upward while tela's logical y grows downward. Raw outline
+            // bounds are therefore deliberately reversed after applying the vertical scale.
+            let y0 = baseline_y - bounds.min.y * scale.vertical;
+            let y1 = baseline_y - bounds.max.y * scale.vertical;
+            min_x = min_x.min(x0.min(x1));
+            min_y = min_y.min(y0.min(y1));
+            max_x = max_x.max(x0.max(x1));
+            max_y = max_y.max(y0.max(y1));
+        } else if glyph_id.0 == 0 {
+            let size = text.font_size;
+            min_x = min_x.min(pen_x);
+            min_y = min_y.min(baseline_y - scaled.ascent());
+            max_x = max_x.max(pen_x + size);
+            max_y = max_y.max(baseline_y - scaled.ascent() + size);
+        }
+        pen_x += scaled.h_advance(glyph_id);
+    }
+
+    (min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()).then(|| {
+        GlyphInkMetrics {
+            x: min_x,
+            y: min_y,
+            width: (max_x - min_x).max(0.0),
+            height: (max_y - min_y).max(0.0),
+        }
+    })
 }
 
 /// 按受控字体生成字形覆盖事件。
@@ -171,7 +262,9 @@ pub fn rasterize_glyphs(
 mod tests {
     use tela_contract::{Color, FontRef, TextContent};
 
-    use super::{GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, rasterize_glyphs};
+    use super::{
+        GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, glyph_ink_metrics, rasterize_glyphs,
+    };
 
     fn text(font: &str, value: &str) -> TextContent {
         TextContent {
@@ -286,5 +379,25 @@ mod tests {
         assert_eq!(bounds.y, -2);
         assert_eq!(bounds.width, 16);
         assert_eq!(bounds.height, 16);
+    }
+
+    #[test]
+    fn logical_ink_metrics_follow_the_layout_baseline_and_expose_optical_center() {
+        let icon_content = TextContent {
+            text: "\u{e2c7}".to_owned(),
+            font: FontRef(tela_fonts::ICON_FONT_NAME.to_owned()),
+            font_size: 20.0,
+            line_height: 20.0,
+            color: Color::WHITE,
+        };
+        let icon = glyph_ink_metrics(&icon_content).expect("受控图标必须有逻辑墨迹");
+        let repeated = glyph_ink_metrics(&icon_content).expect("相同受控图标必须有逻辑墨迹");
+
+        assert!(icon.width > 0.0 && icon.height > 0.0);
+        assert_eq!(icon, repeated, "逻辑度量不得依赖当前 raster 或设备像素比");
+        assert!(
+            (icon.center_y() - 10.0).abs() <= 1.0,
+            "20px 行盒中的图标度量必须使用 core 已钳制的基线: {icon:?}"
+        );
     }
 }

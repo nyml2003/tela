@@ -5,8 +5,8 @@ use tela_contract::{
     UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer};
-use tela_ui::{DraftInput, DraftInputSnapshot, IconLabel, Toolbar, ToolbarItem, ToolbarStyle};
-use tela_widgets::IconName;
+use tela_icon::IconName;
+use tela_ui::{DraftInput, DraftInputSnapshot, Text, Toolbar, ToolbarItem, ToolbarStyle};
 
 use crate::domain::{FileManagerModel, FileManagerSession};
 
@@ -153,11 +153,14 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
         search_w,
         28.0,
     );
-    let brand: UiNode = IconLabel::new(IconName::FolderOpen, "TELA 文件")
-        .icon_size(20.0)
-        .label_metrics(16.0, 16.0 * 1.35)
-        .icon_color(PRIMARY)
-        .label_color(TEXT)
+    let brand: UiNode = Text::new("TELA 文件")
+        .text_metrics(16.0, 16.0 * 1.35)
+        .color(TEXT)
+        .prefix(
+            tela_icon::Icon::new(IconName::FolderOpen)
+                .size(20.0)
+                .color(PRIMARY),
+        )
         .gap(6.0)
         .into_node();
     let mut children = vec![brand, spacer(), search];
@@ -207,7 +210,7 @@ fn command_toolbar(
         .style(style)
         .item(
             ToolbarItem::new("新建", "command.new-folder")
-                .icon(tela_widgets::IconName::Add)
+                .icon(IconName::Add)
                 .show_label(!compact)
                 .width(if compact { 38.0 } else { 76.0 }),
         );
@@ -216,37 +219,37 @@ fn command_toolbar(
         toolbar = toolbar
             .item(
                 ToolbarItem::new("重命名", "command.rename")
-                    .icon(tela_widgets::IconName::Edit)
+                    .icon(IconName::Edit)
                     .show_label(!compact)
                     .width(context_width(78.0)),
             )
             .item(
                 ToolbarItem::new("复制", "command.copy")
-                    .icon(tela_widgets::IconName::Copy)
+                    .icon(IconName::Copy)
                     .show_label(!compact)
                     .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("移动", "command.move-design")
-                    .icon(tela_widgets::IconName::Move)
+                    .icon(IconName::Move)
                     .show_label(!compact)
                     .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("收藏", "command.favorite")
-                    .icon(tela_widgets::IconName::Favorite)
+                    .icon(IconName::Favorite)
                     .show_label(!compact)
                     .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("标签", "command.add-tag")
-                    .icon(tela_widgets::IconName::Tag)
+                    .icon(IconName::Tag)
                     .show_label(!compact)
                     .width(context_width(68.0)),
             )
             .item(
                 ToolbarItem::new("删除", "command.trash")
-                    .icon(tela_widgets::IconName::Delete)
+                    .icon(IconName::Delete)
                     .show_label(!compact)
                     .width(context_width(68.0))
                     .destructive(true),
@@ -254,7 +257,7 @@ fn command_toolbar(
         if session.filter == crate::domain::EntryFilter::Trash {
             toolbar = toolbar.item(
                 ToolbarItem::new("恢复", "command.restore")
-                    .icon(tela_widgets::IconName::Restore)
+                    .icon(IconName::Restore)
                     .show_label(!compact)
                     .width(context_width(68.0)),
             );
@@ -270,8 +273,8 @@ fn command_toolbar(
                 "command.toggle-view",
             )
             .icon(match session.view {
-                crate::domain::DirectoryView::List => tela_widgets::IconName::List,
-                crate::domain::DirectoryView::Grid => tela_widgets::IconName::Grid,
+                crate::domain::DirectoryView::List => IconName::List,
+                crate::domain::DirectoryView::Grid => IconName::Grid,
             })
             .show_label(!compact)
             .width(control_width),
@@ -285,7 +288,7 @@ fn command_toolbar(
                 },
                 "command.toggle-sort",
             )
-            .icon(tela_widgets::IconName::Sort)
+            .icon(IconName::Sort)
             .show_label(!compact)
             .width(control_width),
         )
@@ -299,13 +302,13 @@ fn command_toolbar(
                 },
                 "command.toggle-filter",
             )
-            .icon(tela_widgets::IconName::Filter)
+            .icon(IconName::Filter)
             .show_label(!compact)
             .width(if compact { 38.0 } else { 84.0 }),
         )
         .item(
             ToolbarItem::new("撤销", "command.undo")
-                .icon(tela_widgets::IconName::Undo)
+                .icon(IconName::Undo)
                 .show_label(!compact)
                 .width(control_width),
         )

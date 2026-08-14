@@ -4,9 +4,10 @@ use tela_contract::{
     Color, Fill, IdentityConcern, Insets, KeyStrategy, LayoutConcern, Size, UiNode, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
-use tela_widgets::{ButtonPalette, IconButton, IconButtonPalette, IconButtonVariant, IconName};
+use tela_icon::IconName;
+use tela_widgets::{Button, ButtonPalette, ButtonState, ButtonVariant};
 
-use crate::intent::IntentTarget;
+use crate::{IconButton, intent::IntentTarget};
 
 /// Toolbar 的视觉与布局参数。
 ///
@@ -125,11 +126,11 @@ impl ToolbarItem {
             let mut value = IconButton::new(icon)
                 .size(self.width, 30.0)
                 .variant(if self.destructive {
-                    IconButtonVariant::Danger
+                    ButtonVariant::Danger
                 } else {
-                    IconButtonVariant::Primary
+                    ButtonVariant::Primary
                 })
-                .state(tela_widgets::IconButtonState {
+                .state(ButtonState {
                     hovered: self.hovered,
                     selected: false,
                     disabled: self.disabled,
@@ -138,9 +139,9 @@ impl ToolbarItem {
                 value = value.label(self.label);
             }
             if let Some(palette) = if self.destructive {
-                destructive_palette.map(icon_palette)
+                destructive_palette
             } else {
-                palette.map(icon_palette)
+                palette
             } {
                 value = value.palette(palette);
             }
@@ -151,13 +152,13 @@ impl ToolbarItem {
             return node;
         } else {
             // 兼容无图标的调用方，继续使用已有原子按钮。
-            tela_widgets::Button::new(self.label)
+            Button::new(self.label)
                 .width(self.width)
                 .height(26.0)
                 .variant(if self.destructive {
-                    tela_widgets::ButtonVariant::Danger
+                    ButtonVariant::Danger
                 } else {
-                    tela_widgets::ButtonVariant::Primary
+                    ButtonVariant::Primary
                 })
                 .disabled(self.disabled)
                 .hovered(self.hovered)
@@ -175,17 +176,6 @@ impl ToolbarItem {
             interact.bind_id = Some(self.target.bind_id());
         }
         node
-    }
-}
-
-fn icon_palette(palette: ButtonPalette) -> IconButtonPalette {
-    IconButtonPalette {
-        normal: palette.normal,
-        hovered: palette.hovered,
-        selected: palette.selected,
-        disabled: palette.disabled,
-        text: palette.text,
-        disabled_text: palette.disabled_text,
     }
 }
 

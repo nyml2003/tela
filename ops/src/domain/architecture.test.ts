@@ -74,6 +74,12 @@ test('完整合法 workspace 通过', () => {
       ['tela-fonts', 'normal'],
       ['ab_glyph', 'normal'],
     ]),
+    crate('tela-icon', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-fonts', 'normal'],
+      ['tela-text', 'normal'],
+    ]),
     crate('tela-render-raster', [
       ['tela-contract', 'normal'],
       ['tela-text', 'normal'],
@@ -91,15 +97,34 @@ test('完整合法 workspace 通过', () => {
     crate('tela-widgets', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
+      ['tela-fonts', 'normal'],
     ]),
     crate('tela-ui', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
+      ['tela-fonts', 'normal'],
+      ['tela-icon', 'normal'],
+      ['tela-text', 'normal'],
       ['tela-widgets', 'normal'],
     ]),
     crate('tela-log', []),
   ];
   assert.deepEqual(checkArchitecture(crates), []);
+});
+
+test('tela-icon 禁止依赖 renderer、widgets 或演示宿主', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-icon', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-fonts', 'normal'],
+      ['tela-text', 'normal'],
+      ['tela-render-raster', 'normal'],
+    ]),
+  ]);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /tela-render-raster/);
 });
 
 test('tela-ui 禁止依赖渲染器或演示宿主', () => {

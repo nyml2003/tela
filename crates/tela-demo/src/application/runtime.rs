@@ -611,6 +611,7 @@ fn node_at<'a>(node: &'a UiNode, target: usize, i: &mut usize) -> Option<&'a UiN
 mod tests {
     use super::*;
     use crate::domain::FileCommand;
+    use tela_icon::{Icon, IconName};
 
     fn click_bound(app: &mut App, bind_id: &str) {
         app.ensure_frame();
@@ -741,12 +742,12 @@ mod tests {
     }
 
     #[test]
-    fn hero_image_icon_keeps_ink_above_its_constrained_layout_box() {
+    fn hero_image_icon_uses_its_full_layout_box_without_overflow() {
         let mut app = App::new();
         app.set_viewport(2048.0, 488.0);
         assert!(app.ensure_frame());
 
-        let image_icon = tela_widgets::IconName::Image.codepoint().to_string();
+        let image_icon = icon_glyph(IconName::Image);
         let (geometry, baseline_y, text) = app
             .frame()
             .commands
@@ -760,6 +761,13 @@ mod tests {
                 _ => None,
             })
             .expect("根目录应显示 hero.png 的图片图标");
+        assert_eq!(
+            geometry.h, text.line_height,
+            "图片图标的布局盒不得被表格单元格压缩"
+        );
+        let top = geometry.y.floor() as i32;
+        let bottom = (geometry.y + geometry.h).ceil() as i32;
+        let mut ink_pixels = Vec::new();
         let mut overflow_pixels = Vec::new();
         tela_text::rasterize_glyphs(
             &text,
@@ -772,22 +780,25 @@ mod tests {
             |event| {
                 if let tela_text::GlyphRasterEvent::Coverage { x, y, coverage } = event
                     && coverage > 0.75
-                    && y < geometry.y as i32
                 {
-                    overflow_pixels.push((x, y));
+                    ink_pixels.push((x, y));
+                    if y < top || y >= bottom {
+                        overflow_pixels.push((x, y));
+                    }
                 }
             },
         );
         assert!(
-            !overflow_pixels.is_empty(),
-            "受控图片字形必须真实溢出 16px 的布局盒顶部"
+            overflow_pixels.is_empty(),
+            "完整 20px 图标行盒内不应再有溢出墨迹: {overflow_pixels:?}"
         );
+        assert!(!ink_pixels.is_empty(), "图片图标必须产生可见墨迹");
 
         assert!(app.render_cpu_if_needed());
         let (width, height) = app.raster_size();
         let pixels = app.cpu_bitmap();
         assert!(
-            overflow_pixels.iter().any(|&(x, y)| {
+            ink_pixels.iter().any(|&(x, y)| {
                 if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
                     return false;
                 }
@@ -795,7 +806,7 @@ mod tests {
                 let pixel = &pixels[offset..offset + 4];
                 pixel[2] > pixel[0].saturating_add(12) && pixel[0] < 240
             }),
-            "hero.png 图标溢出布局盒的顶部墨迹不得被 Raster 裁掉"
+            "hero.png 图标的完整墨迹必须由 Raster 绘制"
         );
     }
 
@@ -804,7 +815,7 @@ mod tests {
         let mut app = App::new();
         app.ensure_frame();
 
-        let brand_icon = tela_widgets::IconName::FolderOpen.codepoint().to_string();
+        let brand_icon = icon_glyph(IconName::FolderOpen);
         let commands: Vec<_> = app
             .frame()
             .commands
@@ -833,7 +844,7 @@ mod tests {
         let mut app = App::new();
         app.ensure_frame();
 
-        let folder = tela_widgets::IconName::Folder.codepoint().to_string();
+        let folder = icon_glyph(IconName::Folder);
         let label = app
             .frame()
             .commands
@@ -868,11 +879,50 @@ mod tests {
     }
 
     #[test]
+    fn file_list_icon_and_label_align_their_visible_ink_centers() {
+        let mut app = App::new();
+        app.session.current_dir = 3;
+        app.ensure_frame();
+
+        let document = icon_glyph(IconName::Document);
+        let label = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                matches!(&command.payload,
+                    tela_contract::DrawPayload::Text { text, .. } if text.text == "layout.rs")
+            })
+            .expect("源码目录应显示 layout.rs");
+        let icon = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.x < label.geometry.x
+                    && (command.geometry.y - label.geometry.y).abs() <= 4.0
+                    && matches!(
+                        &command.payload,
+                        tela_contract::DrawPayload::Text { text, .. }
+                            if text.text == document && text.font.0 == tela_fonts::ICON_FONT_NAME
+                    )
+            })
+            .expect("layout.rs 同一行应显示文本文档图标");
+
+        let icon_center = visible_ink_center(icon);
+        let label_center = visible_ink_center(label);
+        assert!(
+            (icon_center - label_center).abs() <= 1.0,
+            "文件列表图标和标题的可见中心应对齐: {icon_center} != {label_center}"
+        );
+    }
+
+    #[test]
     fn toolbar_icon_and_label_align_their_visible_ink_centers() {
         let mut app = App::new();
         app.ensure_frame();
 
-        let add = tela_widgets::IconName::Add.codepoint().to_string();
+        let add = icon_glyph(IconName::Add);
         let label = app
             .frame()
             .commands
@@ -930,6 +980,14 @@ mod tests {
         );
         assert!(min_y <= max_y, "文本必须产生可见墨迹");
         (min_y + max_y) as f32 * 0.5
+    }
+
+    fn icon_glyph(name: IconName) -> String {
+        let node = Icon::new(name).into_node();
+        match node.content {
+            Some(tela_contract::ContentConcern::Text(text)) => text.text,
+            other => panic!("default Icon must lower to text, got {other:?}"),
+        }
     }
 
     #[test]

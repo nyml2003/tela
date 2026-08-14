@@ -8,7 +8,6 @@
 
 mod button;
 mod checkbox;
-mod icon;
 mod image_background;
 mod input;
 mod shared;
@@ -17,10 +16,6 @@ mod switch;
 
 pub use button::{Button, ButtonPalette, ButtonState, ButtonVariant};
 pub use checkbox::{Checkbox, Radio};
-pub use icon::{
-    ButtonPalette as IconButtonPalette, ButtonState as IconButtonState,
-    ButtonVariant as IconButtonVariant, Icon, IconButton, IconName,
-};
 pub use image_background::ImageBackground;
 pub use input::{Input, InputNumber};
 pub use signal::{Signal, SignalSubscription};

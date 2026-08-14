@@ -83,7 +83,7 @@ impl ButtonVariant {
 
 /// 上层可复用的可点击 Button。
 pub struct Button {
-    label: String,
+    content: ButtonContent,
     variant: ButtonVariant,
     palette: Option<ButtonPalette>,
     state: ButtonState,
@@ -95,11 +95,19 @@ pub struct Button {
     line_height: f32,
 }
 
+/// `Button` 根节点内部承载的内容。
+///
+/// 普通文本保留既有的调色板自动着色路径；复杂内容由上层分子组件在构建期完成配色后传入。
+enum ButtonContent {
+    Label(String),
+    Node(Box<UiNode>),
+}
+
 impl Button {
     /// 用显示文字构建一个 primary Button；identity 由 `tela-core` 默认策略生成。
     pub fn new(label: impl Into<String>) -> Self {
         Self {
-            label: label.into(),
+            content: ButtonContent::Label(label.into()),
             variant: ButtonVariant::Primary,
             palette: None,
             state: ButtonState::default(),
@@ -110,6 +118,15 @@ impl Button {
             font_size: 12.0,
             line_height: 16.8,
         }
+    }
+
+    /// 用任意节点替换默认文字内容。
+    ///
+    /// Button 仍然独占背景、状态、交互与 core 默认身份；调用方只提供内部视觉内容。这使
+    /// `tela-ui` 可以组合图标、文字或其他行内结构，而不用复制 Button 的状态机。
+    pub fn content(mut self, content: impl Into<UiNode>) -> Self {
+        self.content = ButtonContent::Node(Box::new(content.into()));
+        self
     }
 
     /// 选择语义变体。
@@ -197,26 +214,32 @@ impl Button {
             palette.text
         };
 
-        let mut node: UiNode = LayoutContainer::flex(vec![Primitive::text(TextContent {
-            text: self.label,
-            font: self.font,
-            font_size: self.font_size,
-            line_height: self.line_height,
-            color: text_color,
-        })])
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(fill)),
-            border_radius: BorderRadius::all(self.border_radius),
-            ..VisualConcern::default()
-        })
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(self.width)),
-            height: Some(Size::fixed(self.height)),
-            main_align: MainAlign::Center,
-            cross_align: tela_contract::CrossAlign::Center,
-            ..LayoutConcern::default()
-        })
-        .into();
+        let content = match self.content {
+            ButtonContent::Label(label) => Primitive::text(TextContent {
+                text: label,
+                font: self.font,
+                font_size: self.font_size,
+                line_height: self.line_height,
+                color: text_color,
+            })
+            .into(),
+            ButtonContent::Node(node) => *node,
+        };
+
+        let mut node: UiNode = LayoutContainer::flex(vec![content])
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(fill)),
+                border_radius: BorderRadius::all(self.border_radius),
+                ..VisualConcern::default()
+            })
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(self.width)),
+                height: Some(Size::fixed(self.height)),
+                main_align: MainAlign::Center,
+                cross_align: tela_contract::CrossAlign::Center,
+                ..LayoutConcern::default()
+            })
+            .into();
 
         if !self.state.disabled {
             node.interact = Some(InteractConcern {
@@ -239,7 +262,8 @@ impl From<Button> for UiNode {
 #[cfg(test)]
 mod tests {
     use super::{Button, ButtonState, ButtonVariant};
-    use tela_contract::{ContentConcern, NodeKind};
+    use tela_contract::{Color, ContentConcern, LayoutConcern, NodeKind, Size, VisualConcern};
+    use tela_core::Primitive;
 
     fn fill(button: &tela_contract::UiNode) -> tela_contract::Color {
         match button
@@ -305,5 +329,24 @@ mod tests {
             })
             .into_node();
         assert_eq!(fill(&node), ButtonVariant::Warning.palette().selected);
+    }
+
+    #[test]
+    fn arbitrary_content_keeps_a_single_interactive_button_root() {
+        let content = Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(12.0)),
+                height: Some(Size::fixed(12.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(tela_contract::Fill::Solid(Color::WHITE)),
+                ..VisualConcern::default()
+            });
+        let node = Button::new("unused").content(content).into_node();
+
+        assert!(node.interact.is_some());
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].kind, NodeKind::Rect);
     }
 }
