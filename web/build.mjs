@@ -1,17 +1,27 @@
-// esbuild 构建：浏览器演示入口 → demo/assets/tela-web/。
-// 每次先清理受控输出目录，避免静态服务意外保留已删除页面的旧 bundle。
+// esbuild 构建：web/ 源码与静态页面模板 → 可删除的 dist/ 发布目录。
+// 只清理自己的 bundle 子目录，不能删除由 Rust 构建写入的 wasm 工件。
 import esbuild from 'esbuild';
-import { rm } from 'node:fs/promises';
+import { cp, mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const entries = { app: 'src/main.ts' };
+const distDir = fileURLToPath(new URL('../dist', import.meta.url));
+const publicDir = fileURLToPath(new URL('./public', import.meta.url));
+const assetDir = join(distDir, 'assets/tela-web');
+const entries = { app: 'src/main.ts', rawgpu: 'src/rawgpu.ts' };
 
-await rm('../demo/assets/tela-web', { recursive: true, force: true });
+await mkdir(distDir, { recursive: true });
+await rm(assetDir, { recursive: true, force: true });
+await Promise.all([
+  cp(join(publicDir, 'index.html'), join(distDir, 'index.html')),
+  cp(join(publicDir, 'rawgpu.html'), join(distDir, 'rawgpu.html')),
+]);
 
 await esbuild.build({
   entryPoints: entries,
   bundle: true,
   format: 'esm',
-  outdir: '../demo/assets/tela-web',
+  outdir: assetDir,
   entryNames: '[name]',
   plugins: [],
   sourcemap: true,
@@ -19,4 +29,4 @@ await esbuild.build({
   logLevel: 'info',
 });
 
-console.log('tela-web 构建完成 → demo/assets/tela-web/');
+console.log('tela-web 构建完成 → dist/assets/tela-web/');

@@ -1,5 +1,5 @@
 // 领域层：工作区模型（纯数据 + 路径推导，无 I/O）。
-// tela 仓库布局约定：根 Cargo.toml workspace，crates/ 下各 crate，demo/ 存放 wasm 演示。
+// tela 仓库布局约定：源码位于 crates/、web/、ops/；dist/ 只存放可删除的构建产物。
 
 export type BuildProfile = 'dev' | 'release';
 
@@ -9,32 +9,32 @@ export interface WorkspacePaths {
   root: string;
   /** crates 目录。 */
   cratesDir: string;
-  /** demo 静态目录（index.html / wasm / 前端 bundle）。 */
-  demoDir: string;
-  /** web 前端源码目录（TypeScript，esbuild 构建到 demo/assets/tela-web）。 */
+  /** 静态发布目录（index.html / wasm / 前端 bundle；始终由构建生成）。 */
+  distDir: string;
+  /** web 前端源码目录（TypeScript，esbuild 构建到 dist/assets/tela-web）。 */
   webDir: string;
   /** 演示 wasm 工件目标路径（构建输出）。 */
   wasmArtifactPath(profile: BuildProfile): string;
-  /** 演示 wasm 发布位置（demo 目录内）。 */
-  wasmDemoPath(): string;
+  /** 演示 wasm 发布位置（dist 目录内）。 */
+  wasmDistPath(): string;
 }
 
 /** 根据仓库根构造路径模型（纯函数）。 */
 export function resolveWorkspace(root: string): WorkspacePaths {
   const cratesDir = `${root}/crates`;
-  const demoDir = `${root}/demo`;
+  const distDir = `${root}/dist`;
   const webDir = `${root}/web`;
   return {
     root,
     cratesDir,
-    demoDir,
+    distDir,
     webDir,
     wasmArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
       return `${root}/target/wasm32-unknown-unknown/${dir}/tela_demo.wasm`;
     },
-    wasmDemoPath() {
-      return `${demoDir}/tela_demo.wasm`;
+    wasmDistPath() {
+      return `${distDir}/tela_demo.wasm`;
     },
   };
 }

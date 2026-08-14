@@ -3,7 +3,7 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build demo [--release]   构建演示 wasm 并发布到 demo/
+//   ops build [demo|frontend|all] [--release]   构建发布物到 dist/
 //   ops verify demo [--build]    冒烟测试（可先自动构建）
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
@@ -14,6 +14,7 @@ import type { Reporter } from '../domain/ports.ts';
 import { TerminalReporter } from '../infrastructure/reporter.ts';
 import { NodeProcessPort } from '../infrastructure/process.ts';
 import { NodeFsPort } from '../infrastructure/fs.ts';
+import { NodeWasmSmokePort } from '../infrastructure/wasm-smoke.ts';
 import { CargoPort } from '../infrastructure/cargo.ts';
 import { HttpServerPort } from '../infrastructure/server.ts';
 import { runCheck } from '../application/check.ts';
@@ -28,8 +29,8 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build demo [--release] [--gpu]
-                              构建演示 wasm 并发布到 demo/（--gpu：WebGPU 后端
+  ops build [demo|frontend|all] [--release] [--gpu]
+                              构建发布物到 dist/；all 会先重建目录（--gpu：WebGPU 后端
                               + wasm-bindgen glue，强制 release）
   ops verify [demo|gpu] [--build] [--port N]
                               验证（默认 demo）：demo = 冒烟测试（--build 先构建）；
@@ -82,6 +83,12 @@ async function main(): Promise<number> {
     case 'build': {
       const targets = target === 'all' ? ['demo', 'frontend'] : [target ?? 'demo'];
       const process = new NodeProcessPort();
+      const fs = new NodeFsPort();
+      if (target === 'all') {
+        reporter.section('准备发布目录（dist/）');
+        await fs.resetDir(workspace.distDir);
+        reporter.ok(`已重建 ${workspace.distDir}`);
+      }
       for (const t of targets) {
         if (t === 'demo') {
           // `all --gpu` 必须留下可直接切换的 CPU 与 GPU 产物；只构建
@@ -89,7 +96,6 @@ async function main(): Promise<number> {
           const modes = target === 'all' && values.gpu ? [false, true] : [values.gpu];
           for (const gpu of modes) {
             const cargo = new CargoPort(new NodeProcessPort(), workspace);
-            const fs = new NodeFsPort();
             const result = await runBuildDemo(
               { cargo, process, fs, reporter, workspace },
               {
@@ -115,7 +121,7 @@ async function main(): Promise<number> {
         const port = values.port ? Number(values.port) : 8200;
         const telemetry = new TelemetryStore();
         const ok = await runVerifyGpu(
-          { server: new HttpServerPort(), telemetry, reporter, workspace },
+          { process: new NodeProcessPort(), server: new HttpServerPort(), telemetry, reporter, workspace },
           { preferredPort: port, timeoutMs: 45_000 },
         );
         return ok ? 0 : 1;
@@ -123,9 +129,17 @@ async function main(): Promise<number> {
       if (target === 'demo') {
         const process = new NodeProcessPort();
         const fs = new NodeFsPort();
+        if (values.build) {
+          reporter.info('--build 已指定，先构建 CPU wasm…');
+          const cargo = new CargoPort(process, workspace);
+          const build = await runBuildDemo(
+            { cargo, process, fs, reporter, workspace },
+            { profile: values.release ? 'release' : 'dev', gpu: false },
+          );
+          if (!build.ok) return 1;
+        }
         const vresult = await runVerifyDemo(
-          { process, fs, reporter, workspace },
-          { autoBuild: values.build },
+          { fs, smoke: new NodeWasmSmokePort(), reporter, workspace },
         );
         return vresult.ok ? 0 : 1;
       }
@@ -139,9 +153,10 @@ async function main(): Promise<number> {
         return 1;
       }
       const result = await runServe(
-        { server: new HttpServerPort(), reporter, workspace },
+        { fs: new NodeFsPort(), server: new HttpServerPort(), reporter, workspace },
         port,
       );
+      if (!result) return 1;
       // 常驻：SIGINT/SIGTERM 优雅关闭。
       let shuttingDown = false;
       const shutdown = async (): Promise<void> => {

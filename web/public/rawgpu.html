@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>tela GPU 环境自检 — 原生 JS WebGPU（不经 wgpu）</title>
+<style>
+  body { margin: 0; background: #101218; color: #ddd; font: 13px/1.6 ui-monospace, monospace;
+         display: flex; gap: 20px; padding: 20px; align-items: flex-start; }
+  canvas { border: 1px solid #333; width: 300px; height: 150px; }
+  #log { white-space: pre-wrap; color: #8f8; max-width: 460px; }
+  #log .err { color: #f66; }
+  #log .info { color: #8af; }
+</style>
+</head>
+<body>
+<canvas id="ui"></canvas>
+<div id="log">自检中…</div>
+<script type="module" src="./assets/tela-web/rawgpu.js"></script>
+</body>
+</html>

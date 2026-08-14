@@ -14,7 +14,6 @@ members = [
     "crates/tela-widgets",
     "crates/tela-ui",
     "crates/tela-demo",
-    "crates/wgpu-mvp",
 ]
 
 [workspace.package]

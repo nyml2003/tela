@@ -7,7 +7,7 @@
 
 旧开发方式是散装脚本：`scripts/check-architecture.sh`（bash 正则解析 Cargo.toml）、
 `scripts/serve-demo.mjs`、手工三步构建（`cargo build --target wasm32-unknown-unknown`
-→ `cp` → `node smoke.cjs`）。痛点：
+→ `cp` → 外部冒烟脚本）。痛点：
 
 - 构建 wasm 要手工三步，容易忘步骤；
 - 验证门没有统一入口（fmt/clippy/test/arch 散在 flake 脚本里）；
@@ -39,9 +39,12 @@
 | 命令 | 做什么 | 对应旧方式 |
 |---|---|---|
 | `ops check` | 四道验证门：fmt / clippy / test / **依赖方向检查**（TS 版，cargo metadata 真实依赖树，替代 bash 正则） | flake `check` + check-architecture.sh |
-| `ops build demo [--release] [--gpu]` | 构建演示 wasm 并发布到 `demo/`；`--gpu` 走 WebGPU 后端（webgpu feature + wasm-bindgen glue，强制 release，产出 `tela_demo_gpu.js`/`_bg.wasm`） | 手工三步 |
-| `ops verify demo [--build]` | 冒烟测试 `demo/smoke.cjs`（--build 先构建） | `node demo/smoke.cjs` |
+| `ops build [demo\|frontend\|all] [--release] [--gpu]` | 构建发布物到 `dist/`；`all` 先重建目录，`--gpu` 走 WebGPU 后端（webgpu feature + wasm-bindgen glue，强制 release，产出 `tela_demo_gpu.js`/`_bg.wasm`） | 手工三步 |
+| `ops verify demo [--build]` | 由 `ops` 内置的 Node wasm 适配器验证 `dist/tela_demo.wasm`（--build 真的先构建） | 外部 smoke 脚本 |
 | `ops serve [port]` | 开发静态服务器（默认 8000，端口占用自动递增，MIME/防穿越同旧脚本） | serve-demo.mjs |
+
+`ops build all [--gpu]` 是完整发布组合：它先重建 `dist/`，再生成 CPU wasm、可选 GPU glue
+和浏览器 bundle。单目标 `build demo` / `build frontend` 只更新自己拥有的工件，不清除其他输出。
 
 ## DDD 分层
 

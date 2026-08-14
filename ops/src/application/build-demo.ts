@@ -1,4 +1,4 @@
-// 应用层：build demo 用例——构建演示 wasm 并发布到 demo/。
+// 应用层：build demo 用例——构建演示 wasm 并发布到 dist/。
 import type { FsPort, ProcessPort, Reporter } from '../domain/ports.ts';
 import type { BuildProfile, WorkspacePaths } from '../domain/workspace.ts';
 import { DEMO_CRATE } from '../domain/workspace.ts';
@@ -31,9 +31,12 @@ export async function runBuildDemo(
   opts: BuildDemoOptions,
 ): Promise<BuildDemoResult> {
   const { cargo, process, fs, reporter, workspace } = deps;
-  const label = opts.profile === 'release' ? 'release' : 'dev';
+  // wasm-bindgen 的 WebGPU glue 依赖优化后的 wasm，故 GPU 分支始终发布 release 工件。
+  const effectiveProfile: BuildProfile = opts.gpu ? 'release' : opts.profile;
+  const label = effectiveProfile === 'release' ? 'release' : 'dev';
 
   reporter.section(`构建演示 wasm（${label}${opts.gpu ? ' + WebGPU' : ''}）`);
+  await fs.ensureDir(workspace.distDir);
   const features = opts.gpu ? ['webgpu'] : [];
   // touch build.rs：cargo 检测到 build.rs mtime 变化 → 重跑 → TELA_BUILD_TS 刷新
   //（构建时间戳每次更新，页面版本号可信；见 crates/tela-demo/build.rs）。
@@ -44,7 +47,7 @@ export async function runBuildDemo(
     // build.rs 不存在时忽略（理论不会发生）。
   }
   // GPU 后端强制 release：wasm-bindgen CLI 需要优化后的 wasm（debug 缺 externref intrinsics）。
-  const build = await cargo.buildWasm(DEMO_CRATE, opts.gpu ? 'release' : opts.profile, features);
+  const build = await cargo.buildWasm(DEMO_CRATE, effectiveProfile, features);
   if (!build.passed) {
     reporter.fail(`cargo build 失败`);
     if (build.detail) reporter.info(build.detail);
@@ -54,14 +57,14 @@ export async function runBuildDemo(
     `cargo build --target wasm32-unknown-unknown -p ${DEMO_CRATE}${features.length ? ` --features ${features.join(',')}` : ''} (${build.durationMs.toFixed(0)}ms)`,
   );
 
-  const source = workspace.wasmArtifactPath(opts.gpu ? 'release' : opts.profile);
+  const source = workspace.wasmArtifactPath(effectiveProfile);
   if (opts.gpu) {
-    // wasm-bindgen glue：输出 demo/tela_demo_gpu.js + _bg.wasm + .d.ts。
+    // wasm-bindgen glue：输出 dist/tela_demo_gpu.js + _bg.wasm + .d.ts。
     const wb = await process.run(
       'wasm-bindgen',
       [
         '--target', 'web',
-        '--out-dir', workspace.demoDir,
+        '--out-dir', workspace.distDir,
         '--out-name', 'tela_demo_gpu',
         source,
       ],
@@ -72,11 +75,11 @@ export async function runBuildDemo(
       reporter.info((wb.stderr || wb.stdout).slice(-2000));
       return { ok: false };
     }
-    reporter.ok(`wasm-bindgen glue → ${workspace.demoDir}/tela_demo_gpu.js + tela_demo_gpu_bg.wasm`);
-    return { ok: true, gpuGlue: `${workspace.demoDir}/tela_demo_gpu.js` };
+    reporter.ok(`wasm-bindgen glue → ${workspace.distDir}/tela_demo_gpu.js + tela_demo_gpu_bg.wasm`);
+    return { ok: true, gpuGlue: `${workspace.distDir}/tela_demo_gpu.js` };
   }
 
-  const dest = workspace.wasmDemoPath();
+  const dest = workspace.wasmDistPath();
   await fs.copyFile(source, dest);
   const bytes = await fs.statSize(dest);
   reporter.ok(`发布工件 → ${dest}`);

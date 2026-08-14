@@ -6,14 +6,14 @@ Cargo.lock.orig
 /.direnv
 /result
 
-# Node（demo 冒烟测试 / 服务器脚本）
+# Node（构建与服务器脚本）
 node_modules/
 
 # opencode 会话状态
 .opencode/goals/
 
-# 构建产物
-/demo/tela_demo.wasm
+# 构建产物（浏览器静态发布目录；不得放入源码）
+/dist/
 
 # 编辑器 / 系统
 .vscode/

@@ -21,11 +21,25 @@ export interface ProcessPort {
 /** 文件系统端口。 */
 export interface FsPort {
   exists(path: string): Promise<boolean>;
+  /** 确保目录存在，不清除已有内容。 */
+  ensureDir(path: string): Promise<void>;
+  /** 重建一个已知的构建输出目录。调用方必须传入 workspace 派生路径。 */
+  resetDir(path: string): Promise<void>;
   copyFile(from: string, to: string): Promise<void>;
   /** 文件字节数，不存在返回 null。 */
   statSize(path: string): Promise<number | null>;
   /** 更新文件 mtime（touch；构建时间戳刷新用，见 build-demo.ts）。 */
   touch(path: string): Promise<void>;
+}
+
+/** 已发布 wasm 的最小渲染闭环验证；实现属于 Node 基础设施。 */
+export interface WasmSmokePort {
+  verify(path: string): Promise<WasmSmokeResult>;
+}
+
+export interface WasmSmokeResult {
+  ok: boolean;
+  detail: string;
 }
 
 /** 静态服务器端口（serve 命令）。 */

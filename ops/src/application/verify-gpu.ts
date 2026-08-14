@@ -1,13 +1,15 @@
 // 应用层：verify gpu 用例——原生 JS WebGPU 环境自检（不经 wgpu）。
 // 起服务 → 输出自检页 URL（用户打开）→ 页面自动离屏三角形 + 回读上报 →
 // CLI 输出 adapter 信息 + 三角形像素结论（区分"环境问题"与"wgpu 层问题"）。
-import type { Reporter, ServerPort } from '../domain/ports.ts';
+import type { ProcessPort, Reporter, ServerPort } from '../domain/ports.ts';
 import type { WorkspacePaths } from '../domain/workspace.ts';
 import type { TelemetryEvent } from '../domain/telemetry.ts';
 import { probeVerdict, probeVerdictText } from '../domain/telemetry.ts';
 import type { TelemetryStore } from '../infrastructure/telemetry-store.ts';
+import { runBuildFrontend } from './build-frontend.ts';
 
 export interface VerifyGpuDeps {
+  process: ProcessPort;
   server: ServerPort;
   telemetry: TelemetryStore;
   reporter: Reporter;
@@ -22,10 +24,12 @@ export interface VerifyGpuOptions {
 
 /** 运行原生 JS 自检会话：等 rawgpu 上报（gpu-probe source=rawgpu）后输出结论。 */
 export async function runVerifyGpu(deps: VerifyGpuDeps, opts: VerifyGpuOptions): Promise<boolean> {
-  const { server, telemetry, reporter, workspace } = deps;
+  const { process, server, telemetry, reporter, workspace } = deps;
   reporter.section('GPU 环境自检（verify gpu）');
+  const frontend = await runBuildFrontend({ process, reporter, workspace });
+  if (!frontend.ok) return false;
   const result = await server.serve(
-    workspace.demoDir,
+    workspace.distDir,
     opts.preferredPort,
     (msg) => reporter.info(msg),
     telemetry,
