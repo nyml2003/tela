@@ -1,7 +1,8 @@
 //! 绘制结果：`UiFrame`、`DrawCommand`、`HitRegion`、`ClipRect` 与后端能力集（见 007-绘制与渲染后端）。
 
 use crate::{
-    BorderRadius, Color, Fill, Gradient, Insets, NodeId, Rect, TextContent, TextureRef, Viewport,
+    BorderRadius, Color, Fill, Gradient, Insets, NodeId, Rect, SemanticKey, TextContent,
+    TextureRef, Viewport,
 };
 use std::fmt::Debug;
 
@@ -14,6 +15,31 @@ pub struct UiFrame {
     pub commands: Vec<DrawCommand>,
     /// 命中区域，按树顺序产生，反向遍历选中最上层命中的区域。
     pub hit_regions: Vec<HitRegion>,
+    /// 滚动容器的已解析边界；供宿主裁剪输入偏移，不参与 renderer 绘制。
+    pub scroll_bounds: Vec<ScrollBounds>,
+}
+
+/// 单个滚动容器在本帧中的可滚动范围。
+///
+/// `viewport` 是内容裁剪视口的逻辑坐标；`content_width` / `content_height` 是未平移内容的
+/// 尺寸。宿主必须将下一次写入的 [`crate::ScrollState`] 限制在 `max_offset_*` 内，避免陈旧
+/// 偏移把短内容整体推入裁剪区。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrollBounds {
+    /// 本帧节点 id，供输入动作路由回对应滚动容器。
+    pub node_id: NodeId,
+    /// 跨帧稳定 key；滚动状态仓库以它作为状态槽索引。
+    pub key: SemanticKey,
+    /// 实际裁剪视口（已包含祖先坐标，不受当前滚动偏移影响）。
+    pub viewport: Rect,
+    /// 未平移内容宽度。
+    pub content_width: f32,
+    /// 未平移内容高度。
+    pub content_height: f32,
+    /// 水平偏移的闭区间上界。
+    pub max_offset_x: f32,
+    /// 垂直偏移的闭区间上界。
+    pub max_offset_y: f32,
 }
 
 /// 绘制命令：几何 + 预合并 clip rect + 原语载荷（见 007-绘制与渲染后端 2）。

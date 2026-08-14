@@ -27,9 +27,10 @@ const ZERO_DEP_CRATES: readonly string[] = ['tela-contract', 'tela-log', 'tela-f
 const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
   ['tela-resource-protocol', ['tela-contract']],
   ['tela-core', ['tela-contract']],
-  ['tela-render-raster', ['tela-contract', 'tela-fonts', 'ab_glyph', 'ab_glyph_rasterizer', 'png', 'font8x8']],
+  ['tela-text', ['tela-contract', 'tela-fonts', 'ab_glyph']],
+  ['tela-render-raster', ['tela-contract', 'tela-text', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],
-  ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-fonts', 'ab_glyph', 'bytemuck', 'wgpu']],
+  ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-text', 'bytemuck', 'wgpu']],
   ['tela-widgets', ['tela-contract', 'tela-core', 'tela-fonts']],
   ['tela-ui', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-widgets']],
 ];

@@ -345,22 +345,36 @@ impl WgpuRenderer {
                     baseline_y,
                 } => {
                     let texture = TextureRef(format!("__tela.text.{command_index}"));
-                    let width = (command.geometry.w.max(1.0) * self.dpi).ceil() as u32;
-                    let height = (command.geometry.h.max(1.0) * self.dpi).ceil() as u32;
-                    let local_baseline = (*baseline_y - command.geometry.y).max(0.0);
+                    let local_baseline = *baseline_y - command.geometry.y;
+                    let Some(raster) =
+                        text::rasterize(content, local_baseline, self.dpi, command.geometry.w)
+                    else {
+                        continue;
+                    };
                     let signature = format!(
-                        "{content:?};{width}x{height};baseline={local_baseline:.3};dpi={:.3}",
+                        "{content:?};{}x{};offset=({},{});baseline={local_baseline:.3};wrap={:.3};dpi={:.3}",
+                        raster.width,
+                        raster.height,
+                        raster.offset_x,
+                        raster.offset_y,
+                        command.geometry.w,
                         self.dpi
                     );
                     if self.text_images.get(&texture) != Some(&signature) {
-                        let pixels =
-                            text::rasterize(content, width, height, local_baseline, self.dpi);
-                        self.upload_rgba8(texture.clone(), width, height, &pixels)
-                            .expect("文字纹理尺寸和 RGBA8 数据必须匹配");
+                        self.upload_rgba8(
+                            texture.clone(),
+                            raster.width,
+                            raster.height,
+                            &raster.pixels,
+                        )
+                        .expect("文字纹理尺寸和 RGBA8 数据必须匹配");
                         self.text_images.insert(texture.clone(), signature);
                     }
                     let batch = image_batch_for(&mut batches, scissor, texture.clone());
-                    batch.push_rect(command.geometry, &self.viewport);
+                    batch.push_rect(
+                        text_quad_geometry(command.geometry, &raster, self.dpi),
+                        &self.viewport,
+                    );
                     used_textures.insert(texture);
                 }
                 _ => {
@@ -455,6 +469,19 @@ impl WgpuRenderer {
     }
 }
 
+/// 将文字纹理的物理像素 bounds 映射回逻辑画布 quad。
+///
+/// `DrawCommand::geometry` 仍是布局盒；`RasterizedText` 的负向偏移表示字形自然溢出布局盒的
+/// 上方或左方。scissor 在之后应用祖先 clip，不能在这里把 quad 钳回布局盒。
+fn text_quad_geometry(layout: Rect, raster: &text::RasterizedText, dpi: f32) -> Rect {
+    Rect {
+        x: layout.x + raster.offset_x as f32 / dpi,
+        y: layout.y + raster.offset_y as f32 / dpi,
+        w: raster.width as f32 / dpi,
+        h: raster.height as f32 / dpi,
+    }
+}
+
 fn diagnostics_for(frame: &UiFrame, stats: &RenderStats, first_batch: Option<&Batch>) -> String {
     let input = frame
         .commands
@@ -517,5 +544,34 @@ mod tests {
             to_ndc(0.0, 0.0, 480.0, 360.0, &viewport),
             [-1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0]
         );
+    }
+
+    #[test]
+    fn text_quad_preserves_negative_ink_offset_outside_its_layout_box() {
+        let raster = text::rasterize(
+            &tela_contract::TextContent {
+                text: "\u{e3f4}".to_owned(),
+                font: tela_contract::FontRef(tela_fonts::ICON_FONT_NAME.to_owned()),
+                font_size: 20.0,
+                line_height: 20.0,
+                color: Color::WHITE,
+            },
+            16.0,
+            1.0,
+            20.0,
+        )
+        .expect("图片图标必须有墨迹");
+        let quad = text_quad_geometry(
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 20.0,
+                h: 16.0,
+            },
+            &raster,
+            1.0,
+        );
+        assert_eq!(quad.y, 18.0);
+        assert_eq!(quad.h, 16.0);
     }
 }

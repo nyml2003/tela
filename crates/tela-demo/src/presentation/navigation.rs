@@ -92,10 +92,12 @@ pub fn navigation_overlay(
 
 fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
     let indent = if entry.parent.is_some() { 12.0 } else { 0.0 };
-    let row: UiNode = LayoutContainer::flex([
-        icon(IconName::Folder, if selected { PRIMARY } else { FOLDER }),
-        text(&entry.name, 13.0, if selected { PRIMARY } else { TEXT }),
-    ])
+    let row: UiNode = LayoutContainer::flex([icon_label(
+        IconName::Folder,
+        &entry.name,
+        if selected { PRIMARY } else { FOLDER },
+        if selected { PRIMARY } else { TEXT },
+    )])
     .layout(LayoutConcern {
         width: Some(Size::fixed(width)),
         height: Some(Size::fixed(32.0)),
@@ -106,7 +108,7 @@ fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
             bottom: 0.0,
             left: indent,
         },
-        cross_align: tela_contract::CrossAlign::Baseline,
+        cross_align: tela_contract::CrossAlign::Center,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
@@ -125,10 +127,12 @@ fn scope_row(label: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
         "filter.trash" => IconName::Trash,
         _ => IconName::Folder,
     };
-    let row: UiNode = LayoutContainer::flex([
-        icon(icon_name, if selected { PRIMARY } else { SECONDARY }),
-        text(label, 13.0, if selected { PRIMARY } else { TEXT }),
-    ])
+    let row: UiNode = LayoutContainer::flex([icon_label(
+        icon_name,
+        label,
+        if selected { PRIMARY } else { SECONDARY },
+        if selected { PRIMARY } else { TEXT },
+    )])
     .layout(LayoutConcern {
         width: Some(Size::fixed(width)),
         height: Some(Size::fixed(32.0)),
@@ -139,7 +143,7 @@ fn scope_row(label: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
             bottom: 0.0,
             left: 0.0,
         },
-        cross_align: tela_contract::CrossAlign::Baseline,
+        cross_align: tela_contract::CrossAlign::Center,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {

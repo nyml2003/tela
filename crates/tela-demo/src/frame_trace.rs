@@ -41,6 +41,25 @@ pub(crate) fn to_json(frame: &UiFrame) -> String {
         write_clip(&mut output, region.clip);
         output.push('}');
     }
+    output.push_str(r#"],"scroll_bounds":["#);
+    for (index, bounds) in frame.scroll_bounds.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(r#"{"node_id":"#);
+        write_json_string(&mut output, &format!("{:?}", bounds.node_id));
+        output.push_str(r#","key":"#);
+        write_json_string(&mut output, &bounds.key.0);
+        output.push_str(r#","viewport":"#);
+        write_rect(&mut output, bounds.viewport);
+        write!(
+            output,
+            r#","content_width":{},"content_height":{},"max_offset_x":{},"max_offset_y":{}"#,
+            bounds.content_width, bounds.content_height, bounds.max_offset_x, bounds.max_offset_y
+        )
+        .expect("写入 String 不会失败");
+        output.push('}');
+    }
     output.push_str("]}");
     output
 }
@@ -196,11 +215,43 @@ mod tests {
                 },
             }],
             hit_regions: Vec::new(),
+            scroll_bounds: Vec::new(),
         };
 
         assert_eq!(
             to_json(&frame),
-            "{\"viewport\":{\"width\":1,\"height\":1},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":1,\"h\":1},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0,\"g\":0,\"b\":1,\"a\":1},\"border\":null}}],\"hit_regions\":[]}"
+            "{\"viewport\":{\"width\":1,\"height\":1},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":1,\"h\":1},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0,\"g\":0,\"b\":1,\"a\":1},\"border\":null}}],\"hit_regions\":[],\"scroll_bounds\":[]}"
+        );
+    }
+
+    #[test]
+    fn projects_scroll_bounds_as_observable_frame_metadata() {
+        let frame = UiFrame {
+            viewport: Viewport {
+                width: 1.0,
+                height: 1.0,
+            },
+            commands: Vec::new(),
+            hit_regions: Vec::new(),
+            scroll_bounds: vec![tela_contract::ScrollBounds {
+                node_id: tela_contract::NodeId(7),
+                key: tela_contract::SemanticKey("detail".to_owned()),
+                viewport: tela_contract::Rect {
+                    x: 2.0,
+                    y: 3.0,
+                    w: 4.0,
+                    h: 5.0,
+                },
+                content_width: 8.0,
+                content_height: 9.0,
+                max_offset_x: 4.0,
+                max_offset_y: 4.0,
+            }],
+        };
+
+        assert_eq!(
+            to_json(&frame),
+            "{\"viewport\":{\"width\":1,\"height\":1},\"commands\":[],\"hit_regions\":[],\"scroll_bounds\":[{\"node_id\":\"NodeId(7)\",\"key\":\"detail\",\"viewport\":{\"x\":2,\"y\":3,\"w\":4,\"h\":5},\"content_width\":8,\"content_height\":9,\"max_offset_x\":4,\"max_offset_y\":4}]}"
         );
     }
 }

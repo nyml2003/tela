@@ -29,6 +29,7 @@ fn make_frame() -> UiFrame {
             },
         ],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     }
 }
 

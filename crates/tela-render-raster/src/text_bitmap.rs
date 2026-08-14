@@ -13,6 +13,7 @@ const GLYPH_H: i32 = 8;
 /// 位图文字绘制：每字符 8×8 字形，按字号缩放（最近邻），缺失字符渲染实心方块。
 pub(crate) fn draw_text_bitmap(
     canvas: &mut Canvas<'_>,
+    geometry: &IRect,
     region: &IRect,
     text: &TextContent,
     baseline_y: f32,
@@ -22,7 +23,7 @@ pub(crate) fn draw_text_bitmap(
     let cell = (text.font_size * scale).max(1.0) / GLYPH_H as f32;
     let cell = if cell < 1.0 { 1.0 } else { cell };
     let mut pen_x = 0.0f32;
-    let mut pen_y = baseline_y * scale - region.y as f32 - cell * GLYPH_H as f32;
+    let mut pen_y = baseline_y * scale - geometry.y as f32 - cell * GLYPH_H as f32;
     for ch in text.text.chars() {
         if ch == '\n' {
             pen_x = 0.0;
@@ -30,8 +31,8 @@ pub(crate) fn draw_text_bitmap(
             continue;
         }
         let glyph = font8x8::UnicodeFonts::get(&font8x8::BASIC_FONTS, ch);
-        let base_x = (region.x as f32 + pen_x).round() as i32;
-        let base_y = (region.y as f32 + pen_y).round() as i32;
+        let base_x = (geometry.x as f32 + pen_x).round() as i32;
+        let base_y = (geometry.y as f32 + pen_y).round() as i32;
         match glyph {
             Some(rows) => {
                 for gy in 0..GLYPH_H {

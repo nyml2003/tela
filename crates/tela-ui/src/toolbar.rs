@@ -345,7 +345,7 @@ impl Toolbar {
                 height: Some(Size::fixed(self.style.height)),
                 gap: self.style.gap,
                 padding: self.style.padding,
-                cross_align: tela_contract::CrossAlign::Baseline,
+                cross_align: tela_contract::CrossAlign::Center,
                 ..LayoutConcern::default()
             })
             .visual(VisualConcern {

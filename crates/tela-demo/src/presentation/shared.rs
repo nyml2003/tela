@@ -2,6 +2,7 @@
 
 use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, Size, TextContent, UiNode};
 use tela_core::builder::{LayoutContainer, Primitive};
+use tela_ui::IconLabel;
 use tela_widgets::{Button, ButtonPalette, ButtonVariant, Icon, IconName};
 
 use crate::domain::EntryKind;
@@ -125,6 +126,17 @@ pub fn clickable(mut node: UiNode, bind_id: String) -> UiNode {
 
 pub fn icon(name: IconName, color: Color) -> UiNode {
     Icon::new(name).size(20.0).color(color).into_node()
+}
+
+/// 文件管理器中的单行图标标签：将图标字体与正文按视觉中心组合。
+pub fn icon_label(name: IconName, label: &str, icon_color: Color, label_color: Color) -> UiNode {
+    IconLabel::new(name, label)
+        .icon_size(20.0)
+        .label_metrics(13.0, 13.0 * 1.35)
+        .icon_color(icon_color)
+        .label_color(label_color)
+        .gap(8.0)
+        .into_node()
 }
 
 pub fn kind_label(kind: EntryKind) -> &'static str {

@@ -296,14 +296,13 @@ impl RoundedBatch {
         border: Option<BorderStroke>,
         viewport: &Rect,
     ) {
-        let Some(fill_color) = fill.or(border.map(|border| border.color)) else {
+        let Some(fill_color) = fill.or(border.map(|_| Color::TRANSPARENT)) else {
             return;
         };
         let border_color = border.map(|border| border.color).unwrap_or(fill_color);
-        let border_width = match (fill, border) {
-            (Some(_), Some(border)) => border.width.max(1.0).min(rect.w * 0.5).min(rect.h * 0.5),
-            _ => 0.0,
-        };
+        let border_width = border
+            .map(|border| border.width.max(1.0).min(rect.w * 0.5).min(rect.h * 0.5))
+            .unwrap_or(0.0);
         self.push_rounded_rect(
             rect,
             radius,
@@ -494,6 +493,38 @@ mod tests {
         assert_eq!(batch.vertices[0].fill_color, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(batch.vertices[0].border_color, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(batch.vertices[0].border_width, 4.0);
+    }
+
+    #[test]
+    fn rounded_border_only_payload_keeps_a_transparent_interior() {
+        let mut batch = RoundedBatch::new((0, 0, 100, 100));
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        batch.push_payload(
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 60.0,
+                h: 40.0,
+            },
+            BorderRadius::all(12.0),
+            None,
+            Some(BorderStroke {
+                color: Color::BLUE,
+                width: 2.0,
+            }),
+            &viewport,
+        );
+
+        assert_eq!(batch.vertices.len(), 4);
+        assert_eq!(batch.indices.len(), 6);
+        assert_eq!(batch.vertices[0].fill_color, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(batch.vertices[0].border_color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(batch.vertices[0].border_width, 2.0);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use tela_contract::{
     FontRef, IdentityConcern, Insets, InteractConcern, KeyStrategy, KeymapScopeId, LayoutBox,
     LayoutConcern, MainAlign, MinMax, Rect, ScrollState, SemanticKey, ShortcutScopeSpec, Size,
     StackAlign, StackLayer, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics,
-    UiBuildError, UiLayoutError, UiNode, Viewport, VisualConcern,
+    UiBuildError, UiLayoutError, UiNode, Viewport, VirtualListSpec, VisualConcern,
 };
 
 use crate::builder::{LayoutContainer, LogicalContainer, Primitive};
@@ -1224,6 +1224,71 @@ fn scroll_offset_translates_content_and_clips() {
             }
         }
     );
+}
+
+#[test]
+fn scroll_bounds_use_actual_scroll_view_and_virtual_content_extents() {
+    let scroll_tree = UiTree::new(LayoutContainer::scroll_view([rect(60.0, 240.0)]).layout(
+        LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            height: Some(Size::fixed(100.0)),
+            ..LayoutConcern::default()
+        },
+    ))
+    .unwrap();
+    let bounds = resolve(&scroll_tree)
+        .scroll_bounds
+        .pop()
+        .expect("ScrollView 应暴露滚动边界");
+    assert_eq!(
+        bounds.viewport,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0
+        }
+    );
+    assert_eq!(bounds.content_width, 60.0);
+    assert_eq!(bounds.content_height, 240.0);
+    assert_eq!(bounds.max_offset_x, 0.0);
+    assert_eq!(bounds.max_offset_y, 140.0);
+
+    let rows: Vec<UiNode> = (0..10)
+        .map(|index| {
+            LayoutContainer::flex([rect(100.0, 32.0)])
+                .identity(IdentityConcern {
+                    key_strategy: KeyStrategy::SemanticId,
+                    semantic_key: Some(SemanticKey(format!("row-{index}"))),
+                    ..IdentityConcern::default()
+                })
+                .into()
+        })
+        .collect();
+    let virtual_tree = UiTree::new(
+        LayoutContainer::virtual_list(
+            VirtualListSpec {
+                total_items: 10,
+                first_item_index: 0,
+                item_height: 32.0,
+                item_spacing: 0.0,
+                overscan: 0,
+            },
+            rows,
+        )
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            height: Some(Size::fixed(100.0)),
+            ..LayoutConcern::default()
+        }),
+    )
+    .unwrap();
+    let bounds = resolve(&virtual_tree)
+        .scroll_bounds
+        .pop()
+        .expect("VirtualList 应暴露滚动边界");
+    assert_eq!(bounds.content_height, 320.0);
+    assert_eq!(bounds.max_offset_y, 220.0);
 }
 
 #[test]

@@ -4,6 +4,7 @@ members = [
     "crates/tela-contract",
     "crates/tela-log",
     "crates/tela-fonts",
+    "crates/tela-text",
     "crates/tela-resource-protocol",
     "crates/tela-core",
     "crates/tela-render-raster",

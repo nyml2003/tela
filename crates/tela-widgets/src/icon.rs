@@ -304,7 +304,9 @@ impl IconButton {
                     left: 6.0,
                 },
                 main_align: MainAlign::Center,
-                cross_align: tela_contract::CrossAlign::Baseline,
+                // Icon glyph viewboxes and text baselines are different metric systems.
+                // A labelled icon control therefore aligns its visual em boxes, not baselines.
+                cross_align: tela_contract::CrossAlign::Center,
                 ..LayoutConcern::default()
             })
             .visual(VisualConcern {
@@ -333,8 +335,8 @@ impl From<IconButton> for UiNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Icon, IconName};
-    use tela_contract::{ContentConcern, FontRef, NodeKind};
+    use super::{Icon, IconButton, IconName};
+    use tela_contract::{ContentConcern, CrossAlign, FontRef, NodeKind};
 
     #[test]
     fn icon_uses_icon_font_and_no_identity() {
@@ -376,5 +378,14 @@ mod tests {
         ] {
             assert_ne!(icon.codepoint(), '\0');
         }
+    }
+
+    #[test]
+    fn labelled_icon_button_uses_visual_centering() {
+        let node = IconButton::new(IconName::Folder).label("设计").into_node();
+        assert_eq!(
+            node.layout.as_ref().map(|layout| layout.cross_align),
+            Some(CrossAlign::Center)
+        );
     }
 }

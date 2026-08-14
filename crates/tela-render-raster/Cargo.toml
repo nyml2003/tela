@@ -7,16 +7,17 @@ description = "tela 软件光栅基准后端（仅测试/CI/离线/服务端；�
 
 [features]
 default = ["std"]
-std = ["dep:ab_glyph", "dep:ab_glyph_rasterizer", "dep:png"]
+std = ["dep:png", "dep:tela-text"]
 no_std = ["dep:font8x8"]
 
 [dependencies]
 tela-contract = { path = "../tela-contract" }
-tela-fonts = { path = "../tela-fonts" }
-ab_glyph = { version = "0.2", optional = true }
-ab_glyph_rasterizer = { version = "0.1", optional = true }
+tela-text = { path = "../tela-text", optional = true }
 png = { version = "0.17", optional = true }
 font8x8 = { version = "0.3", optional = true, default-features = false, features = ["unicode"] }
+
+[dev-dependencies]
+tela-fonts = { path = "../tela-fonts" }
 
 [lints]
 workspace = true

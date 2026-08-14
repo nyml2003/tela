@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use tela_contract::{
     BorderRadius, BorderStroke, ClipRect, ContentConcern, DrawCommand, DrawPayload, Fill,
-    FocusAppearance, HitRegion, LayoutBox, NodeId, NodeKind, Overflow, Point, Rect, ScrollState,
-    SemanticKey, TextMeasurer, UiFrame, UiLayoutError, UiNode, Viewport,
+    FocusAppearance, HitRegion, LayoutBox, NodeId, NodeKind, Overflow, Point, Rect, ScrollBounds,
+    ScrollState, SemanticKey, TextMeasurer, UiFrame, UiLayoutError, UiNode, Viewport,
 };
 
 use crate::layout::{DefaultLayoutEngine, LayoutEngine};
@@ -19,6 +19,7 @@ use crate::update::{LayoutCache, measure_dirty};
 struct EmitContext<'a> {
     commands: Vec<DrawCommand>,
     hit_regions: Vec<HitRegion>,
+    scroll_bounds: Vec<ScrollBounds>,
     scroll_inputs: &'a HashMap<SemanticKey, ScrollState>,
     /// 节点地址 → 构建期分配的稳定 id/key。绘制顺序可以按 `draw_order` 改变，
     /// 因此不能用 emit 次数与 DFS 序号关联。
@@ -182,6 +183,7 @@ fn emit_frame_tree(
     let mut ctx = EmitContext {
         commands: Vec::new(),
         hit_regions: Vec::new(),
+        scroll_bounds: Vec::new(),
         scroll_inputs,
         node_meta,
         pending_teleports: Vec::new(),
@@ -198,6 +200,7 @@ fn emit_frame_tree(
         viewport,
         commands: ctx.commands,
         hit_regions: ctx.hit_regions,
+        scroll_bounds: ctx.scroll_bounds,
     })
 }
 
@@ -275,6 +278,16 @@ fn emit_frame(
 
     // 自身盒坐标并入平移（LayoutBox 为相对父坐标，累计祖先盒 + 滚动平移）。
     let base_offset = (offset.0 + box_.x, offset.1 + box_.y);
+
+    if is_scroll_container {
+        ctx.scroll_bounds.push(scroll_bounds_for(
+            node,
+            box_,
+            node_id,
+            key.clone(),
+            base_offset,
+        ));
+    }
 
     // 滚动容器：内容平移 -offset，clip 与视口求交；裁剪容器：clip 与内容区求交。
     let child_offset = if is_scroll_container {
@@ -386,6 +399,47 @@ fn content_rect(box_: &LayoutBox, offset: (f32, f32), node: &UiNode) -> Rect {
     let h =
         (box_.h - 2.0 * layout.border_width - layout.padding.top - layout.padding.bottom).max(0.0);
     Rect { x, y, w, h }
+}
+
+/// 将布局结果投影为宿主可消费的滚动边界。这里不读取当前偏移，因而同一棵布局树下的
+/// 边界稳定；VirtualList 使用完整数据集高度，而不是本帧构建的可见窗口高度。
+fn scroll_bounds_for(
+    node: &UiNode,
+    box_: &LayoutBox,
+    node_id: NodeId,
+    key: SemanticKey,
+    base_offset: (f32, f32),
+) -> ScrollBounds {
+    let layout = node.layout.as_ref().cloned().unwrap_or_default();
+    let viewport = content_rect(box_, base_offset, node);
+    let origin_x = layout.border_width + layout.padding.left;
+    let origin_y = layout.border_width + layout.padding.top;
+    let width = box_
+        .children
+        .iter()
+        .map(|child| (child.x + child.w - origin_x).max(0.0))
+        .fold(0.0, f32::max);
+    let height = match node.kind {
+        NodeKind::VirtualListView(spec) if spec.total_items > 0 => {
+            spec.total_items as f32 * spec.item_height
+                + (spec.total_items - 1) as f32 * spec.item_spacing
+        }
+        NodeKind::VirtualListView(_) => 0.0,
+        _ => box_
+            .children
+            .iter()
+            .map(|child| (child.y + child.h - origin_y).max(0.0))
+            .fold(0.0, f32::max),
+    };
+    ScrollBounds {
+        node_id,
+        key,
+        viewport,
+        content_width: width,
+        content_height: height,
+        max_offset_x: (width - viewport.w).max(0.0),
+        max_offset_y: (height - viewport.h).max(0.0),
+    }
 }
 
 /// 预合并 clip 求交（空交集 → 零尺寸裁剪区）。

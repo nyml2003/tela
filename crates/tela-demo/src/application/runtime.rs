@@ -4,16 +4,15 @@ mod input;
 
 use std::collections::{BTreeSet, HashMap};
 
-use ab_glyph::{Font, FontArc, ScaleFont};
 use tela_contract::{
     Color, FocusAppearance, InputEvent, NodeId, NodeKind, PointerEvent, RawKeyboardEvent,
-    ScrollState, SemanticKey, ShortcutId, TextMeasureRequest, TextMeasurer, TextMetrics, UiAction,
-    UiFrame, UiNode, Viewport,
+    ScrollState, SemanticKey, ShortcutId, UiAction, UiFrame, UiNode, Viewport,
 };
 use tela_core::{
     IdentityAllocator, LayoutCache, UiTree, ViewStateStore, ensure_modal_focus, handle_input,
     restore_focus, save_focus,
 };
+use tela_text::ControlledTextMeasurer;
 use tela_ui::{LocalStateRuntime, intent_from_action};
 
 use super::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
@@ -38,50 +37,6 @@ const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
     inset: 2.0,
 };
 
-struct DemoTextMeasurer;
-
-impl TextMeasurer for DemoTextMeasurer {
-    fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics {
-        let font = demo_font(request.font);
-        let scaled = font.as_scaled(em_pixel_height(font, request.font_size));
-        let line_count = request.text.lines().count().max(1) as u32;
-        let width = request
-            .text
-            .lines()
-            .map(|line| {
-                line.chars()
-                    .map(|character| scaled.h_advance(scaled.glyph_id(character)))
-                    .sum::<f32>()
-            })
-            .fold(0.0, f32::max);
-        TextMetrics {
-            width: request.max_width.map_or(width, |max| width.min(max)),
-            height: line_count as f32 * request.line_height,
-            line_count,
-            first_baseline: scaled.ascent(),
-        }
-    }
-}
-
-fn demo_font(font: &tela_contract::FontRef) -> &'static FontArc {
-    use std::sync::OnceLock;
-    static UI_FONT: OnceLock<FontArc> = OnceLock::new();
-    static ICON_FONT: OnceLock<FontArc> = OnceLock::new();
-    if font.0 == tela_fonts::ICON_FONT_NAME {
-        ICON_FONT.get_or_init(|| {
-            FontArc::try_from_slice(tela_fonts::ICON_FONT_BYTES).expect("图标字体必须可解析")
-        })
-    } else {
-        UI_FONT.get_or_init(|| {
-            FontArc::try_from_slice(tela_fonts::UI_FONT_BYTES).expect("正文字体必须可解析")
-        })
-    }
-}
-
-fn em_pixel_height(font: &FontArc, font_size: f32) -> f32 {
-    font_size * font.height_unscaled() / font.units_per_em().unwrap_or(1000.0)
-}
-
 /// 跨帧会话。业务数据、临时 view state 与 renderer 缓存各自隔离。
 pub struct App {
     pub(crate) model: FileManagerModel,
@@ -98,8 +53,6 @@ pub struct App {
     clickable_keys: BTreeSet<SemanticKey>,
     hovered_toolbar_target: Option<String>,
     keymap: KeymapSnapshot,
-    nav_scroll: ScrollState,
-    detail_scroll: ScrollState,
     frame_trace: Vec<u8>,
     cpu_rendered: bool,
     cpu_bitmap: Vec<u8>,
@@ -134,8 +87,6 @@ impl App {
             clickable_keys: BTreeSet::new(),
             hovered_toolbar_target: None,
             keymap: KeymapSnapshot::file_manager_default(),
-            nav_scroll: ScrollState::default(),
-            detail_scroll: ScrollState::default(),
             frame_trace: Vec::new(),
             cpu_rendered: false,
             cpu_bitmap: Vec::new(),
@@ -198,17 +149,12 @@ impl App {
             hovered_target: self.hovered_toolbar_target.clone(),
             search_input,
             operation_input,
+            detail_scroll_y: self.detail_scroll_y(),
         };
         let mut tree =
             UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
                 .expect("文件管理器场景必须合法");
-        let mut scroll_inputs = HashMap::new();
-        if let Some(key) = &self.nav_scroll_key {
-            scroll_inputs.insert(key.clone(), self.nav_scroll);
-        }
-        if let Some(key) = &self.detail_scroll_key {
-            scroll_inputs.insert(key.clone(), self.detail_scroll);
-        }
+        let scroll_inputs = self.active_scroll_inputs();
         let focusable_nodes = tree.focusable_nodes();
         self.view_state.reconcile_focus(&focusable_nodes);
         self.view_state.reconcile_hover(tree.keys());
@@ -247,13 +193,19 @@ impl App {
         let frame = tree
             .resolve_dirty_with_focus(
                 self.viewport,
-                &DemoTextMeasurer,
+                &ControlledTextMeasurer,
                 &scroll_inputs,
                 &mut self.layout_cache,
                 self.view_state.current_focus_key(),
                 Some(FOCUS_APPEARANCE),
             )
             .expect("文件管理器场景必须可布局");
+        if self.clamp_scroll_states(&frame) {
+            // 窗口化详情树依据 offset 构建子项；边界改变后需用钳制值重建一次，而不能让
+            // 本帧继续携带已越界窗口。
+            self.invalidate_frame();
+            return self.ensure_frame();
+        }
         self.frame_trace = crate::frame_trace::to_json(&frame).into_bytes();
         self.nav_scroll_key = controls.scrolls.first().cloned();
         self.detail_scroll_key = controls.scrolls.get(1).cloned();
@@ -415,6 +367,9 @@ impl App {
         self.revision.update(|value| *value = value.wrapping_add(1));
     }
     fn apply_controller_intent(&mut self, intent: Intent) {
+        if intent_replaces_detail_content(&intent) {
+            self.reset_detail_scroll();
+        }
         apply_intent(&mut self.model, &mut self.session, intent);
         if self.session.operation.is_none() {
             self.local_state
@@ -536,32 +491,74 @@ impl App {
     }
 
     fn handle_scroll(&mut self, node_id: NodeId, delta_y: f32) -> bool {
-        let Some(tree) = self.tree.as_ref() else {
+        let Some(bounds) = self.frame.as_ref().and_then(|frame| {
+            frame
+                .scroll_bounds
+                .iter()
+                .find(|bounds| bounds.node_id == node_id)
+        }) else {
             return false;
         };
-        let Some(key) = node_key(tree, node_id).cloned() else {
-            return false;
-        };
-        let detail_h = (self.viewport.height
-            - crate::presentation::shared::TOP_BAR_H
-            - crate::presentation::shared::TOOLBAR_H
-            - crate::presentation::shared::STATUS_BAR_H
-            - crate::presentation::shared::DETAIL_HEADER_H)
-            .max(80.0);
-        let (state, max) = if self.nav_scroll_key.as_ref() == Some(&key) {
-            (&mut self.nav_scroll, 360.0)
-        } else if self.detail_scroll_key.as_ref() == Some(&key) {
-            (&mut self.detail_scroll, (96.0 * 30.0 - detail_h).max(0.0))
-        } else {
-            return false;
-        };
-        let next = (state.offset_y + delta_y).clamp(0.0, max);
+        let mut state = self.view_state.scroll(&bounds.key);
+        let next = (state.offset_y + delta_y).clamp(0.0, bounds.max_offset_y);
         if (next - state.offset_y).abs() < f32::EPSILON {
             return false;
         }
         state.offset_y = next;
+        self.view_state.set_scroll(bounds.key.clone(), state);
         true
     }
+
+    fn active_scroll_inputs(&self) -> HashMap<SemanticKey, ScrollState> {
+        [
+            self.nav_scroll_key.as_ref(),
+            self.detail_scroll_key.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|key| (key.clone(), self.view_state.scroll(key)))
+        .collect()
+    }
+
+    fn detail_scroll_y(&self) -> f32 {
+        self.detail_scroll_key
+            .as_ref()
+            .map(|key| self.view_state.scroll(key).offset_y)
+            .unwrap_or_default()
+    }
+
+    fn reset_detail_scroll(&mut self) {
+        if let Some(key) = self.detail_scroll_key.clone() {
+            self.view_state.set_scroll(key, ScrollState::default());
+        }
+    }
+
+    fn clamp_scroll_states(&mut self, frame: &UiFrame) -> bool {
+        let mut changed = false;
+        for bounds in &frame.scroll_bounds {
+            let state = self.view_state.scroll(&bounds.key);
+            let clamped = ScrollState {
+                offset_x: state.offset_x.clamp(0.0, bounds.max_offset_x),
+                offset_y: state.offset_y.clamp(0.0, bounds.max_offset_y),
+            };
+            if clamped != state {
+                self.view_state.set_scroll(bounds.key.clone(), clamped);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+fn intent_replaces_detail_content(intent: &Intent) -> bool {
+    matches!(
+        intent,
+        Intent::Command(_)
+            | Intent::OpenFolder(_)
+            | Intent::SetFilter(_)
+            | Intent::SetQuery(_)
+            | Intent::ConfirmOperation
+    )
 }
 
 struct Controls {
@@ -610,13 +607,6 @@ fn node_at<'a>(node: &'a UiNode, target: usize, i: &mut usize) -> Option<&'a UiN
     }
     None
 }
-fn node_key(tree: &UiTree, id: NodeId) -> Option<&SemanticKey> {
-    tree.node_ids()
-        .iter()
-        .position(|candidate| *candidate == id)
-        .and_then(|index| tree.keys().get(index))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,6 +666,270 @@ mod tests {
         for label in ["TELA 文件", "新建", "工作区", "README.md"] {
             assert!(labels.contains(&label.to_owned()), "缺少 {label}");
         }
+    }
+
+    #[test]
+    fn opening_a_short_directory_resets_detail_scroll_and_keeps_all_rows_inside_its_clip() {
+        let mut app = App::new();
+        app.set_viewport(1280.0, 320.0);
+        assert!(app.ensure_frame());
+        let detail_key = app
+            .detail_scroll_key
+            .clone()
+            .expect("详情区应拥有 core 分配的滚动 key");
+        let root_max = app
+            .frame()
+            .scroll_bounds
+            .iter()
+            .find(|bounds| bounds.key == detail_key)
+            .map(|bounds| bounds.max_offset_y)
+            .expect("详情虚拟列表应报告滚动边界");
+        assert!(root_max > 0.0, "短视口下根目录应能滚动");
+
+        app.view_state.set_scroll(
+            detail_key.clone(),
+            ScrollState {
+                offset_x: 0.0,
+                offset_y: root_max,
+            },
+        );
+        app.mark_view_dirty();
+        assert!(app.ensure_frame());
+
+        assert!(app.dispatch_bind_id("folder.open.2"));
+        assert_eq!(app.session.current_dir, 2);
+        assert_eq!(app.view_state.scroll(&detail_key), ScrollState::default());
+        assert!(app.ensure_frame());
+
+        let detail_bounds = app
+            .frame()
+            .scroll_bounds
+            .iter()
+            .find(|bounds| bounds.key == detail_key)
+            .expect("切换后的详情列表仍应报告滚动边界");
+        assert_eq!(
+            detail_bounds.max_offset_y, 0.0,
+            "两项短目录不可保留滚动范围"
+        );
+        assert_eq!(
+            app.model
+                .entries_in_filtered(2, "", app.session.filter, app.session.sort)
+                .len(),
+            2,
+            "设计目录只显示直接子项"
+        );
+        for name in ["icons.svg", "tokens.json"] {
+            let command = app
+                .frame()
+                .commands
+                .iter()
+                .find(|command| {
+                    matches!(&command.payload,
+                        tela_contract::DrawPayload::Text { text, .. } if text.text == name)
+                })
+                .unwrap_or_else(|| panic!("切换目录后应显示 {name}"));
+            assert!(
+                command.geometry.y >= detail_bounds.viewport.y,
+                "{name} 不得被旧滚动偏移推到详情 clip 顶部之外"
+            );
+            assert!(
+                command.geometry.y + command.geometry.h
+                    <= detail_bounds.viewport.y + detail_bounds.viewport.h,
+                "{name} 必须完整位于详情可视区域"
+            );
+        }
+    }
+
+    #[test]
+    fn hero_image_icon_keeps_ink_above_its_constrained_layout_box() {
+        let mut app = App::new();
+        app.set_viewport(2048.0, 488.0);
+        assert!(app.ensure_frame());
+
+        let image_icon = tela_widgets::IconName::Image.codepoint().to_string();
+        let (geometry, baseline_y, text) = app
+            .frame()
+            .commands
+            .iter()
+            .find_map(|command| match &command.payload {
+                tela_contract::DrawPayload::Text { text, baseline_y }
+                    if text.text == image_icon && text.font.0 == tela_fonts::ICON_FONT_NAME =>
+                {
+                    Some((command.geometry, *baseline_y, text.clone()))
+                }
+                _ => None,
+            })
+            .expect("根目录应显示 hero.png 的图片图标");
+        let mut overflow_pixels = Vec::new();
+        tela_text::rasterize_glyphs(
+            &text,
+            tela_text::GlyphRasterOptions {
+                origin_x: geometry.x,
+                baseline_y,
+                scale: 1.0,
+                wrap_width: geometry.w,
+            },
+            |event| {
+                if let tela_text::GlyphRasterEvent::Coverage { x, y, coverage } = event
+                    && coverage > 0.75
+                    && y < geometry.y as i32
+                {
+                    overflow_pixels.push((x, y));
+                }
+            },
+        );
+        assert!(
+            !overflow_pixels.is_empty(),
+            "受控图片字形必须真实溢出 16px 的布局盒顶部"
+        );
+
+        assert!(app.render_cpu_if_needed());
+        let (width, height) = app.raster_size();
+        let pixels = app.cpu_bitmap();
+        assert!(
+            overflow_pixels.iter().any(|&(x, y)| {
+                if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
+                    return false;
+                }
+                let offset = (y as usize * width as usize + x as usize) * 4;
+                let pixel = &pixels[offset..offset + 4];
+                pixel[2] > pixel[0].saturating_add(12) && pixel[0] < 240
+            }),
+            "hero.png 图标溢出布局盒的顶部墨迹不得被 Raster 裁掉"
+        );
+    }
+
+    #[test]
+    fn brand_icon_and_label_align_their_visible_ink_centers() {
+        let mut app = App::new();
+        app.ensure_frame();
+
+        let brand_icon = tela_widgets::IconName::FolderOpen.codepoint().to_string();
+        let commands: Vec<_> = app
+            .frame()
+            .commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    &command.payload,
+                    tela_contract::DrawPayload::Text { text, .. }
+                        if (text.text == brand_icon && text.font.0 == tela_fonts::ICON_FONT_NAME)
+                            || text.text == "TELA 文件"
+                )
+            })
+            .collect();
+        assert_eq!(commands.len(), 2, "品牌应只产生一个图标与一个标题");
+
+        let icon_center = visible_ink_center(commands[0]);
+        let label_center = visible_ink_center(commands[1]);
+        assert!(
+            (icon_center - label_center).abs() <= 1.0,
+            "品牌图标和标题的可见中心应对齐: {icon_center} != {label_center}"
+        );
+    }
+
+    #[test]
+    fn navigation_icon_and_label_align_their_visible_ink_centers() {
+        let mut app = App::new();
+        app.ensure_frame();
+
+        let folder = tela_widgets::IconName::Folder.codepoint().to_string();
+        let label = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.x < 264.0
+                    && matches!(&command.payload,
+                        tela_contract::DrawPayload::Text { text, .. } if text.text == "设计")
+            })
+            .expect("侧栏应显示设计标签");
+        let icon = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.x < label.geometry.x
+                    && (command.geometry.y - label.geometry.y).abs() <= 4.0
+                    && matches!(
+                        &command.payload,
+                        tela_contract::DrawPayload::Text { text, .. }
+                            if text.text == folder && text.font.0 == tela_fonts::ICON_FONT_NAME
+                    )
+            })
+            .expect("设计标签同一行应显示文件夹图标");
+
+        let icon_center = visible_ink_center(icon);
+        let label_center = visible_ink_center(label);
+        assert!(
+            (icon_center - label_center).abs() <= 1.0,
+            "导航图标和标题的可见中心应对齐: {icon_center} != {label_center}"
+        );
+    }
+
+    #[test]
+    fn toolbar_icon_and_label_align_their_visible_ink_centers() {
+        let mut app = App::new();
+        app.ensure_frame();
+
+        let add = tela_widgets::IconName::Add.codepoint().to_string();
+        let label = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                matches!(&command.payload,
+                    tela_contract::DrawPayload::Text { text, .. } if text.text == "新建")
+            })
+            .expect("工具栏应显示新建标签");
+        let icon = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.x < label.geometry.x
+                    && (command.geometry.y - label.geometry.y).abs() <= 4.0
+                    && matches!(
+                        &command.payload,
+                        tela_contract::DrawPayload::Text { text, .. }
+                            if text.text == add && text.font.0 == tela_fonts::ICON_FONT_NAME
+                    )
+            })
+            .expect("新建标签同一行应显示新增图标");
+
+        let icon_center = visible_ink_center(icon);
+        let label_center = visible_ink_center(label);
+        assert!(
+            (icon_center - label_center).abs() <= 1.0,
+            "工具栏图标和标签的可见中心应对齐: {icon_center} != {label_center}"
+        );
+    }
+
+    fn visible_ink_center(command: &tela_contract::DrawCommand) -> f32 {
+        let tela_contract::DrawPayload::Text { text, baseline_y } = &command.payload else {
+            panic!("只应对文本命令计算墨迹中心");
+        };
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        tela_text::rasterize_glyphs(
+            text,
+            tela_text::GlyphRasterOptions {
+                origin_x: command.geometry.x,
+                baseline_y: *baseline_y,
+                scale: 1.0,
+                wrap_width: command.geometry.w,
+            },
+            |event| {
+                if let tela_text::GlyphRasterEvent::Coverage { y, coverage, .. } = event
+                    && coverage > 0.0
+                {
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            },
+        );
+        assert!(min_y <= max_y, "文本必须产生可见墨迹");
+        (min_y + max_y) as f32 * 0.5
     }
 
     #[test]

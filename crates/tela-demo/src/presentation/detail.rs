@@ -5,7 +5,7 @@ use tela_contract::{
     VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::LayoutContainer;
-use tela_ui::{Table, Td, Tr};
+use tela_ui::{Table, Td, Tr, VirtualWindow};
 
 use crate::domain::{DirectoryView, Entry, EntryKind, FileManagerModel, FileManagerSession};
 
@@ -17,6 +17,7 @@ pub fn detail_pane(
     width: f32,
     height: f32,
     compact: bool,
+    scroll_y: f32,
 ) -> UiNode {
     let selected = session
         .selected
@@ -25,12 +26,19 @@ pub fn detail_pane(
         .and_then(|id| model.entry(*id));
     let body = match selected {
         Some(entry) if entry.kind == EntryKind::Text => {
-            text_preview(entry, width, height - DETAIL_HEADER_H)
+            text_preview(entry, width, height - DETAIL_HEADER_H, scroll_y)
         }
         Some(entry) if entry.kind != EntryKind::Folder => {
             asset_preview(entry, width, height - DETAIL_HEADER_H)
         }
-        _ => directory_detail(model, session, width, height - DETAIL_HEADER_H, compact),
+        _ => directory_detail(
+            model,
+            session,
+            width,
+            height - DETAIL_HEADER_H,
+            compact,
+            scroll_y,
+        ),
     };
     LayoutContainer::flex([inline_summary(model, session, selected, width), body])
         .layout(LayoutConcern {
@@ -90,7 +98,7 @@ fn inline_summary(
         height: Some(Size::fixed(DETAIL_HEADER_H)),
         padding: tela_contract::Insets::all(16.0),
         gap: 12.0,
-        cross_align: tela_contract::CrossAlign::Baseline,
+        cross_align: tela_contract::CrossAlign::Center,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
@@ -106,6 +114,7 @@ fn directory_detail(
     width: f32,
     height: f32,
     compact: bool,
+    scroll_y: f32,
 ) -> UiNode {
     match session.view {
         DirectoryView::List => file_list(
@@ -119,6 +128,7 @@ fn directory_detail(
             width,
             height,
             compact,
+            scroll_y,
         ),
         DirectoryView::Grid => thumbnail_grid(
             model.entries_in_filtered(
@@ -130,6 +140,7 @@ fn directory_detail(
             session,
             width,
             height,
+            scroll_y,
         ),
     }
 }
@@ -140,6 +151,7 @@ fn file_list(
     width: f32,
     height: f32,
     compact: bool,
+    scroll_y: f32,
 ) -> UiNode {
     let columns: Vec<(&str, f32)> = if compact {
         vec![
@@ -163,30 +175,35 @@ fn file_list(
     )
     .height(32.0)
     .background(MUTED_SURFACE);
-    let rows: Vec<UiNode> = entries
+    let body_height = (height - 32.0).max(ROW_H);
+    let window = VirtualWindow::for_viewport(
+        entries.len() as u32,
+        scroll_y,
+        body_height,
+        ROW_H,
+        0.0,
+        OVERSCAN,
+    );
+    let rows: Vec<UiNode> = entries[window.range()]
         .iter()
         .map(|entry| file_row(entry, session.selected.contains(&entry.id), &columns))
         .collect();
     Table::new(header)
-        .virtual_rows(entries.len() as u32, 0, rows)
+        .virtual_rows(entries.len() as u32, window.first_item_index, rows)
         .width(width.max(1.0))
         .header_height(32.0)
-        .body_height((height - 32.0).max(ROW_H))
+        .body_height(body_height)
         .row_metrics(ROW_H, 0.0, OVERSCAN)
         .into()
 }
 
 fn file_row(entry: &Entry, selected: bool, columns: &[(&str, f32)]) -> UiNode {
-    let content: UiNode = LayoutContainer::flex([
-        icon(kind_icon(entry.kind), kind_color(entry.kind)),
-        text(&entry.name, 13.0, TEXT),
-    ])
-    .layout(LayoutConcern {
-        gap: 8.0,
-        cross_align: tela_contract::CrossAlign::Baseline,
-        ..LayoutConcern::default()
-    })
-    .into();
+    let content = icon_label(
+        kind_icon(entry.kind),
+        &entry.name,
+        kind_color(entry.kind),
+        TEXT,
+    );
     let mut cells = vec![
         Td::new(vec![content])
             .width(Size::fixed(columns[0].1 - 2.0))
@@ -226,11 +243,21 @@ fn thumbnail_grid(
     session: &FileManagerSession,
     width: f32,
     height: f32,
+    scroll_y: f32,
 ) -> UiNode {
     let columns = (width / 150.0).floor().max(1.0) as usize;
+    let total_rows = entries.len().div_ceil(columns) as u32;
+    let window =
+        VirtualWindow::for_viewport(total_rows, scroll_y, height.max(1.0), 132.0, 0.0, OVERSCAN);
     let rows: Vec<UiNode> = entries
         .chunks(columns)
         .enumerate()
+        .skip(window.first_item_index as usize)
+        .take(
+            window
+                .end_item_index
+                .saturating_sub(window.first_item_index) as usize,
+        )
         .map(|(row, group)| {
             let cards: Vec<UiNode> = group
                 .iter()
@@ -254,8 +281,8 @@ fn thumbnail_grid(
         .collect();
     LayoutContainer::virtual_list(
         VirtualListSpec {
-            total_items: rows.len() as u32,
-            first_item_index: 0,
+            total_items: total_rows,
+            first_item_index: window.first_item_index,
             item_height: 132.0,
             item_spacing: 0.0,
             overscan: OVERSCAN,
@@ -293,12 +320,21 @@ fn thumbnail_card(entry: &Entry, selected: bool) -> UiNode {
     clickable(card, format!("entry.select.{}", entry.id))
 }
 
-fn text_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
+fn text_preview(entry: &Entry, width: f32, height: f32, scroll_y: f32) -> UiNode {
     let lines: Vec<&str> = entry.text.unwrap_or("无可预览内容").lines().collect();
-    let rows: Vec<UiNode> = lines
+    let window = VirtualWindow::for_viewport(
+        lines.len() as u32,
+        scroll_y,
+        height.max(1.0),
+        PREVIEW_ROW_H,
+        0.0,
+        OVERSCAN,
+    );
+    let rows: Vec<UiNode> = lines[window.range()]
         .iter()
         .enumerate()
         .map(|(index, line)| {
+            let index = index + window.first_item_index as usize;
             let content: UiNode = LayoutContainer::flex([
                 text(
                     &format!("{:>3}", index + 1),
@@ -333,7 +369,7 @@ fn text_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
     LayoutContainer::virtual_list(
         VirtualListSpec {
             total_items: lines.len() as u32,
-            first_item_index: 0,
+            first_item_index: window.first_item_index,
             item_height: PREVIEW_ROW_H,
             item_spacing: 0.0,
             overscan: OVERSCAN,

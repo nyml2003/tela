@@ -121,6 +121,7 @@ fn translates_commands_in_tree_order_with_clip() {
             },
         ],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let mut canvas = Recorder::default();
     render_frame(&mut canvas, &frame, &BackendCapabilities::full());
@@ -162,6 +163,7 @@ fn forwards_text_font_reference_to_canvas_host() {
             },
         }],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let mut canvas = Recorder::default();
     render_frame(&mut canvas, &frame, &BackendCapabilities::full());
@@ -191,6 +193,7 @@ fn degrades_by_capabilities() {
             },
         }],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     // minimal 能力集：圆角退化为直角矩形。
     let mut canvas = Recorder::default();
@@ -230,6 +233,7 @@ fn degrades_by_capabilities() {
             },
         }],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let mut canvas = Recorder::default();
     render_frame(&mut canvas, &frame2, &BackendCapabilities::minimal());

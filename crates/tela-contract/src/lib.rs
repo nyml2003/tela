@@ -31,7 +31,7 @@ mod text;
 
 pub use draw::{
     BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DrawCommand, DrawPayload, FrameSink,
-    HitRegion, UiFrame,
+    HitRegion, ScrollBounds, UiFrame,
 };
 pub use error::{UiBuildError, UiLayoutError};
 pub use geometry::{BorderRadius, Color, Insets, PixelOffset, Point, Rect, snap};
@@ -99,6 +99,7 @@ mod tests {
                 },
             }],
             hit_regions: vec![],
+            scroll_bounds: vec![],
         };
         assert_eq!(frame.clone(), frame);
     }

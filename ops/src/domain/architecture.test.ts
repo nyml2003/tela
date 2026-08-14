@@ -8,8 +8,12 @@ const crate = (name: string, deps: [string, string][]): CrateInfo => ({
   deps: deps.map(([n, k]) => ({ name: n, kind: k as CrateInfo['deps'][number]['kind'] })),
 });
 
-/** 合法基线：tela-contract 零依赖（其他用例基于它叠加违规）。 */
-const base = (): CrateInfo[] => [crate('tela-contract', []), crate('tela-log', [])];
+/** 合法基线：全部零依赖 crate（其他用例基于它叠加违规）。 */
+const base = (): CrateInfo[] => [
+  crate('tela-contract', []),
+  crate('tela-log', []),
+  crate('tela-fonts', []),
+];
 
 test('零依赖 crate 有依赖时报违规', () => {
   const violations = checkArchitecture([
@@ -48,7 +52,7 @@ test('render 后端禁止反向依赖 core', () => {
     ...base(),
     crate('tela-render-raster', [
       ['tela-contract', 'normal'],
-      ['ab_glyph', 'normal'],
+      ['tela-text', 'normal'],
       ['tela-core', 'dev'], // dev 也不行
     ]),
   ]);
@@ -59,15 +63,20 @@ test('render 后端禁止反向依赖 core', () => {
 test('完整合法 workspace 通过', () => {
   const crates: CrateInfo[] = [
     crate('tela-contract', []),
+    crate('tela-fonts', []),
     crate('tela-resource-protocol', [['tela-contract', 'normal']]),
     crate('tela-core', [
       ['tela-contract', 'normal'],
       ['tela-render-raster', 'dev'],
     ]),
+    crate('tela-text', [
+      ['tela-contract', 'normal'],
+      ['tela-fonts', 'normal'],
+      ['ab_glyph', 'normal'],
+    ]),
     crate('tela-render-raster', [
       ['tela-contract', 'normal'],
-      ['ab_glyph', 'normal'],
-      ['ab_glyph_rasterizer', 'normal'],
+      ['tela-text', 'normal'],
       ['png', 'normal'],
       ['font8x8', 'normal'],
     ]),
@@ -75,7 +84,7 @@ test('完整合法 workspace 通过', () => {
     crate('tela-render-wgpu', [
       ['tela-contract', 'normal'],
       ['tela-log', 'normal'],
-      ['ab_glyph', 'normal'],
+      ['tela-text', 'normal'],
       ['bytemuck', 'normal'],
       ['wgpu', 'normal'],
     ]),
@@ -115,4 +124,17 @@ test('wgpu 后端白名单之外依赖报违规', () => {
     ]),
   ]);
   assert.ok(violations.length >= 1);
+});
+
+test('tela-text 禁止反向依赖 core 或 renderer', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-text', [
+      ['tela-contract', 'normal'],
+      ['tela-fonts', 'normal'],
+      ['tela-core', 'normal'],
+    ]),
+  ]);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0]!.message, /tela-core/);
 });

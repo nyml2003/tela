@@ -1,101 +1,119 @@
-//! WGPU 文字桥接：使用与 raster 相同的内嵌字体生成透明 RGBA8 字形纹理。
+//! WGPU 文字桥接：将共享字形覆盖事件写入紧贴真实墨迹范围的透明 RGBA8 纹理。
 
-use std::sync::OnceLock;
+use tela_contract::{Color, TextContent};
+use tela_text::{GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, rasterize_glyphs};
 
-use ab_glyph::{Font, FontArc, ScaleFont, point};
-use tela_contract::{FontRef, TextContent};
-
-fn font(font_ref: &FontRef) -> &'static FontArc {
-    static UI_FONT: OnceLock<FontArc> = OnceLock::new();
-    static ICON_FONT: OnceLock<FontArc> = OnceLock::new();
-    if font_ref.0 == tela_fonts::ICON_FONT_NAME {
-        ICON_FONT.get_or_init(|| {
-            FontArc::try_from_slice(tela_fonts::ICON_FONT_BYTES).expect("内嵌图标字体必须可解析")
-        })
-    } else {
-        UI_FONT.get_or_init(|| {
-            FontArc::try_from_slice(tela_fonts::UI_FONT_BYTES).expect("内嵌字体必须可解析")
-        })
-    }
+/// 一段文字上传前的实际像素纹理及其相对布局盒的物理偏移。
+pub(crate) struct RasterizedText {
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) offset_x: i32,
+    pub(crate) offset_y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
-fn em_pixel_height(font: &FontArc, font_size: f32) -> f32 {
-    font_size * font.height_unscaled() / font.units_per_em().unwrap_or(1000.0)
-}
-
-/// 将一段 `TextContent` 栅格化为透明 RGBA8；结果直接上传到现有图片 pipeline。
+/// 将一段 `TextContent` 栅格化为紧贴墨迹的透明 RGBA8。
+///
+/// `baseline_y` 与 `wrap_width` 是文字几何盒局部的逻辑坐标；共享文字层收到的坐标则已
+/// 乘入设备缩放，保证它与 Raster 对同一 `DrawPayload::Text::baseline_y` 的解释相同。字形
+/// 可以溢出布局盒，所以返回的偏移允许为负数；调用方必须把它用于纹理 quad，而不是把墨迹
+/// 强行塞回 `DrawCommand::geometry`。
 pub(crate) fn rasterize(
     text: &TextContent,
-    width: u32,
-    height: u32,
     baseline_y: f32,
     scale: f32,
-) -> Vec<u8> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
-    let mut pixels = vec![0; width as usize * height as usize * 4];
-    let font = font(&text.font);
-    let pixel_height = em_pixel_height(font, text.font_size) * scale;
-    let scaled = font.as_scaled(pixel_height);
-    let line_height = text.line_height * scale;
-    let wrap_width = width as f32;
-    let mut pen_x = 0.0f32;
-    let mut pen_y = baseline_y * scale - scaled.ascent();
+    wrap_width: f32,
+) -> Option<RasterizedText> {
+    let options = GlyphRasterOptions {
+        origin_x: 0.0,
+        baseline_y: baseline_y * scale,
+        scale,
+        wrap_width: wrap_width * scale,
+    };
+    let bounds = glyph_ink_bounds(text, options)?;
+    let width = bounds.width;
+    let height = bounds.height;
 
-    for character in text.text.chars() {
-        if character == '\n' {
-            pen_x = 0.0;
-            pen_y += line_height;
-            continue;
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    rasterize_glyphs(text, options, |event| match event {
+        GlyphRasterEvent::Coverage { x, y, coverage } => {
+            blend_pixel(
+                &mut pixels,
+                width,
+                height,
+                x.saturating_sub(bounds.x),
+                y.saturating_sub(bounds.y),
+                text.color,
+                coverage,
+            );
         }
-        let glyph_id = scaled.glyph_id(character);
-        let advance = scaled.h_advance(glyph_id);
-        if pen_x > 0.0 && pen_x + advance > wrap_width {
-            pen_x = 0.0;
-            pen_y += line_height;
+        GlyphRasterEvent::MissingGlyph { x, y, size } => {
+            fill_missing_glyph(
+                &mut pixels,
+                width,
+                height,
+                x.saturating_sub(bounds.x),
+                y.saturating_sub(bounds.y),
+                size,
+            );
         }
-        let glyph =
-            glyph_id.with_scale_and_position(pixel_height, point(pen_x, pen_y + scaled.ascent()));
-        let Some(outlined) = scaled.outline_glyph(glyph) else {
-            pen_x += advance;
-            continue;
-        };
-        let bounds = outlined.px_bounds();
-        let origin_x = bounds.min.x.floor() as i32;
-        let origin_y = bounds.min.y.floor() as i32;
-        outlined.draw(|x, y, coverage| {
-            let px = origin_x + x as i32;
-            let py = origin_y + y as i32;
-            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                return;
-            }
-            let alpha = coverage * text.color.a;
-            let offset = (py as usize * width as usize + px as usize) * 4;
-            let old_alpha = pixels[offset + 3] as f32 / 255.0;
-            let out_alpha = alpha + old_alpha * (1.0 - alpha);
-            if out_alpha <= 0.0 {
-                return;
-            }
-            let old_factor = old_alpha * (1.0 - alpha) / out_alpha;
-            let new_factor = alpha / out_alpha;
-            pixels[offset] = ((pixels[offset] as f32 * old_factor
-                + text.color.r * 255.0 * new_factor)
-                .round()
-                .clamp(0.0, 255.0)) as u8;
-            pixels[offset + 1] = ((pixels[offset + 1] as f32 * old_factor
-                + text.color.g * 255.0 * new_factor)
-                .round()
-                .clamp(0.0, 255.0)) as u8;
-            pixels[offset + 2] = ((pixels[offset + 2] as f32 * old_factor
-                + text.color.b * 255.0 * new_factor)
-                .round()
-                .clamp(0.0, 255.0)) as u8;
-            pixels[offset + 3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
-        });
-        pen_x += advance;
+    });
+    Some(RasterizedText {
+        pixels,
+        offset_x: bounds.x,
+        offset_y: bounds.y,
+        width,
+        height,
+    })
+}
+
+/// 在纹理内按 src-over 写一个带覆盖度的文本像素。
+fn blend_pixel(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    color: Color,
+    coverage: f32,
+) {
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return;
     }
-    pixels
+    let alpha = coverage * color.a;
+    if alpha <= 0.0 {
+        return;
+    }
+    let offset = (y as usize * width as usize + x as usize) * 4;
+    let old_alpha = pixels[offset + 3] as f32 / 255.0;
+    let out_alpha = alpha + old_alpha * (1.0 - alpha);
+    if out_alpha <= 0.0 {
+        return;
+    }
+    let old_factor = old_alpha * (1.0 - alpha) / out_alpha;
+    let new_factor = alpha / out_alpha;
+    pixels[offset] = ((pixels[offset] as f32 * old_factor + color.r * 255.0 * new_factor)
+        .round()
+        .clamp(0.0, 255.0)) as u8;
+    pixels[offset + 1] = ((pixels[offset + 1] as f32 * old_factor + color.g * 255.0 * new_factor)
+        .round()
+        .clamp(0.0, 255.0)) as u8;
+    pixels[offset + 2] = ((pixels[offset + 2] as f32 * old_factor + color.b * 255.0 * new_factor)
+        .round()
+        .clamp(0.0, 255.0)) as u8;
+    pixels[offset + 3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
+/// 缺失字形使用确定的灰色方块，语义与 Raster/no_std 降级一致。
+fn fill_missing_glyph(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, size: i32) {
+    let color = Color::rgba(0.7, 0.7, 0.7, 0.9);
+    let end_x = x.saturating_add(size.max(1));
+    let end_y = y.saturating_add(size.max(1));
+    for py in y..end_y {
+        for px in x..end_x {
+            blend_pixel(pixels, width, height, px, py, color, 1.0);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +123,7 @@ mod tests {
 
     #[test]
     fn rasterizes_text_into_nontransparent_pixels() {
-        let pixels = rasterize(
+        let raster = rasterize(
             &TextContent {
                 text: "A".to_owned(),
                 font: FontRef("noto".to_owned()),
@@ -113,29 +131,32 @@ mod tests {
                 line_height: 22.0,
                 color: Color::WHITE,
             },
-            64,
-            32,
             18.0,
             1.0,
-        );
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            64.0,
+        )
+        .expect("字母必须有墨迹");
+        assert!(raster.pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 
     #[test]
     fn rasterizes_icon_font_into_nontransparent_pixels() {
-        let pixels = rasterize(
+        let raster = rasterize(
             &TextContent {
-                text: "\u{e145}".to_owned(),
+                text: "\u{e3f4}".to_owned(),
                 font: FontRef(tela_fonts::ICON_FONT_NAME.to_owned()),
-                font_size: 24.0,
-                line_height: 24.0,
+                font_size: 20.0,
+                line_height: 20.0,
                 color: Color::WHITE,
             },
-            32,
-            32,
-            22.0,
+            16.0,
             1.0,
-        );
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            20.0,
+        )
+        .expect("图片图标必须有墨迹");
+        assert_eq!(raster.offset_y, -2);
+        assert_eq!(raster.width, 16);
+        assert_eq!(raster.height, 16);
+        assert!(raster.pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 }

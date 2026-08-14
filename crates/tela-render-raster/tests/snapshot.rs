@@ -320,6 +320,7 @@ fn complex_frame() -> UiFrame {
             ),
         ],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     }
 }
 
@@ -393,13 +394,19 @@ fn text_renders_cjk_and_latin() {
 }
 
 #[test]
-fn text_is_clipped_to_its_geometry() {
+fn text_ink_can_overflow_its_layout_geometry_but_not_an_explicit_clip() {
     let text = TextContent {
-        text: "Tela".to_string(),
-        font: FontRef("noto".to_string()),
-        font_size: 12.0,
-        line_height: 16.0,
+        text: "\u{e3f4}".to_string(),
+        font: FontRef(tela_fonts::ICON_FONT_NAME.to_owned()),
+        font_size: 20.0,
+        line_height: 20.0,
         color: Color::BLACK,
+    };
+    let geometry = Rect {
+        x: 10.0,
+        y: 20.0,
+        w: 20.0,
+        h: 16.0,
     };
     let frame = UiFrame {
         viewport: Viewport {
@@ -407,39 +414,110 @@ fn text_is_clipped_to_its_geometry() {
             height: 50.0,
         },
         commands: vec![cmd(
-            Rect {
-                x: 10.0,
-                y: 20.0,
-                w: 40.0,
-                h: 16.0,
-            },
+            geometry,
             None,
             DrawPayload::Text {
-                text,
-                baseline_y: 32.0,
+                text: text.clone(),
+                baseline_y: 36.0,
             },
         )],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let bitmap = render_frame(&frame, &cfg());
-    let mut inside_dark = 0;
-    let mut outside_dark = 0;
-    for y in 0..bitmap.height {
-        for x in 0..bitmap.width {
-            let Some([r, g, b, _]) = bitmap.pixel(x, y) else {
-                continue;
-            };
-            if r < 250 && g < 250 && b < 250 {
-                if (10..50).contains(&x) && (20..36).contains(&y) {
-                    inside_dark += 1;
-                } else {
-                    outside_dark += 1;
-                }
-            }
+    let ink_above_geometry = (18..20).any(|y| {
+        (10..30).any(|x| {
+            bitmap
+                .pixel(x, y)
+                .is_some_and(|[r, g, b, _]| r < 250 && g < 250 && b < 250)
+        })
+    });
+    assert!(ink_above_geometry, "图片字形顶部不得被自身 16px 布局盒裁掉");
+
+    let explicitly_clipped = UiFrame {
+        viewport: frame.viewport,
+        commands: vec![cmd(
+            geometry,
+            Some(tela_contract::ClipRect { rect: geometry }),
+            DrawPayload::Text {
+                text,
+                baseline_y: 36.0,
+            },
+        )],
+        hit_regions: vec![],
+        scroll_bounds: vec![],
+    };
+    let clipped_bitmap = render_frame(&explicitly_clipped, &cfg());
+    for y in 18..20 {
+        for x in 10..30 {
+            assert_eq!(
+                clipped_bitmap.pixel(x, y),
+                Some([255, 255, 255, 255]),
+                "显式祖先 clip 必须继续裁掉 ({x}, {y})"
+            );
         }
     }
-    assert!(inside_dark > 10, "文本应出现在自己的几何盒内");
-    assert_eq!(outside_dark, 0, "文本不得溢出自己的几何盒");
+}
+
+#[test]
+fn text_clip_does_not_change_its_glyph_origin() {
+    // 裁剪只影响哪些像素可见，不能把文本 pen 原点从 geometry.x 移到 clip.x。
+    // 这是 Raster 与 WGPU 都应遵守的 `DrawPayload::Text` 语义。
+    let text = TextContent {
+        text: "添加".to_string(),
+        font: FontRef("embedded".to_string()),
+        font_size: 14.0,
+        line_height: 18.0,
+        color: Color::BLACK,
+    };
+    let geometry = Rect {
+        x: 10.0,
+        y: 12.0,
+        w: 48.0,
+        h: 20.0,
+    };
+    let payload = DrawPayload::Text {
+        text,
+        baseline_y: 28.0,
+    };
+    let full = UiFrame {
+        viewport: Viewport {
+            width: 80.0,
+            height: 48.0,
+        },
+        commands: vec![cmd(geometry, None, payload.clone())],
+        hit_regions: vec![],
+        scroll_bounds: vec![],
+    };
+    let clipped = UiFrame {
+        viewport: full.viewport,
+        commands: vec![cmd(
+            geometry,
+            Some(tela_contract::ClipRect {
+                rect: Rect {
+                    x: 18.0,
+                    y: 12.0,
+                    w: 40.0,
+                    h: 20.0,
+                },
+            }),
+            payload,
+        )],
+        hit_regions: vec![],
+        scroll_bounds: vec![],
+    };
+
+    let full_bitmap = render_frame(&full, &cfg());
+    let clipped_bitmap = render_frame(&clipped, &cfg());
+    for y in 12..32 {
+        for x in 18..58 {
+            assert_eq!(
+                clipped_bitmap.pixel(x, y),
+                full_bitmap.pixel(x, y),
+                "裁剪后 ({x}, {y}) 的字形像素不得因原点偏移而变化"
+            );
+        }
+    }
 }
 
 #[test]
@@ -464,6 +542,7 @@ fn rounded_rect_cuts_only_its_outer_corners() {
             },
         )],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let bitmap = render_frame(&frame, &cfg());
 
@@ -526,6 +605,7 @@ fn nine_patch_and_image_render() {
             },
         )],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let bitmap = render_frame(&frame, &config);
     // 九宫格：角区保持原样。
@@ -593,6 +673,7 @@ fn text_renders_full_glyphs_at_em_scale() {
             },
         }],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let config = RasterConfig::default_with(Color {
         r: 0.16,
@@ -652,6 +733,7 @@ fn space_character_does_not_render_block() {
             },
         }],
         hit_regions: vec![],
+        scroll_bounds: vec![],
     };
     let config = RasterConfig::default_with(Color {
         r: 0.13,

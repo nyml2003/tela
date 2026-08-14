@@ -5,7 +5,7 @@ use tela_contract::{
     UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer};
-use tela_ui::{DraftInput, DraftInputSnapshot, Toolbar, ToolbarItem, ToolbarStyle};
+use tela_ui::{DraftInput, DraftInputSnapshot, IconLabel, Toolbar, ToolbarItem, ToolbarStyle};
 use tela_widgets::IconName;
 
 use crate::domain::{FileManagerModel, FileManagerSession};
@@ -30,6 +30,7 @@ pub struct AppShellProps<'a> {
     pub search_input: DraftInputSnapshot,
     pub hovered_target: Option<String>,
     pub operation_input: Option<DraftInputSnapshot>,
+    pub detail_scroll_y: f32,
 }
 
 impl<'a> Component<AppShellProps<'a>> for AppShell {
@@ -52,7 +53,14 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
     if !narrow {
         workspace.push(directory_tree(model, session, content_h, narrow));
     }
-    workspace.push(detail_pane(model, session, detail_w, content_h, compact));
+    workspace.push(detail_pane(
+        model,
+        session,
+        detail_w,
+        content_h,
+        compact,
+        props.detail_scroll_y,
+    ));
 
     let shell: UiNode = LayoutContainer::flex([
         top_bar(props.search_input.clone(), search_focused, viewport.width),
@@ -145,16 +153,13 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
         search_w,
         28.0,
     );
-    let brand: UiNode = LayoutContainer::flex([
-        icon(IconName::FolderOpen, PRIMARY),
-        text("TELA 文件", 16.0, TEXT),
-    ])
-    .layout(LayoutConcern {
-        cross_align: tela_contract::CrossAlign::Baseline,
-        gap: 6.0,
-        ..LayoutConcern::default()
-    })
-    .into();
+    let brand: UiNode = IconLabel::new(IconName::FolderOpen, "TELA 文件")
+        .icon_size(20.0)
+        .label_metrics(16.0, 16.0 * 1.35)
+        .icon_color(PRIMARY)
+        .label_color(TEXT)
+        .gap(6.0)
+        .into_node();
     let mut children = vec![brand, spacer(), search];
     if width < 1200.0 {
         children.extend([

@@ -8,14 +8,14 @@ description = "tela wgpu 渲染后端（游戏内嵌/3D 贴图/浏览器 WebGPU�
 [dependencies]
 tela-contract = { path = "../tela-contract" }
 tela-log = { path = "../tela-log" }
-tela-fonts = { path = "../tela-fonts" }
+tela-text = { path = "../tela-text" }
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
-ab_glyph = "0.2"
 
 [dev-dependencies]
 pollster = "0.4"
 naga = { version = "26", features = ["wgsl-in"] }
+tela-fonts = { path = "../tela-fonts" }
 
 [lints]
 workspace = true

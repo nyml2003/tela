@@ -4,7 +4,7 @@
 //! 反查文本目标，并在 DOM `blur` 已晚于焦点转移时短暂保存旧目标，保证草稿提交仍回到
 //! 正确的组件实例。
 
-use tela_contract::{ScrollState, Value};
+use tela_contract::Value;
 use tela_core::UiTree;
 use tela_ui::{DraftInputEvent, DraftInputSnapshot, IntentTarget, UiIntent};
 
@@ -191,10 +191,7 @@ impl App {
         {
             let intent = match target.as_str() {
                 "operation.value" => Intent::SetOperationValue(value),
-                "file.search" => {
-                    self.detail_scroll = ScrollState::default();
-                    Intent::SetQuery(value)
-                }
+                "file.search" => Intent::SetQuery(value),
                 _ => return u32::from(changed),
             };
             self.apply_controller_intent(intent);
