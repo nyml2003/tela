@@ -996,6 +996,48 @@ fn flex_cross_align_stretch() {
     assert_eq!(frame.commands[0].geometry.h, 100.0);
 }
 
+#[test]
+fn flex_stretch_reflows_nested_content_against_final_cross_axis() {
+    // 模拟固定 32px 表格行中的 Td：Td 初始由 20px 图标和上下各 2px padding
+    // 推导为 24px，随后由父行 Stretch 到 32px。内部图标必须依据 32px 外盒重排。
+    let cell: UiNode = LayoutContainer::flex([rect(20.0, 20.0)])
+        .layout(LayoutConcern {
+            padding: Insets {
+                top: 2.0,
+                bottom: 2.0,
+                ..Insets::default()
+            },
+            cross_align: CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .into();
+    let row: UiNode = LayoutContainer::flex([cell])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            height: Some(Size::fixed(32.0)),
+            cross_align: CrossAlign::Stretch,
+            ..LayoutConcern::default()
+        })
+        .into();
+
+    let box_ = measure(
+        row,
+        Constraints {
+            min_w: 0.0,
+            max_w: 100.0,
+            min_h: 0.0,
+            max_h: 32.0,
+        },
+    )
+    .expect("固定行和 Stretch 单元格必须可布局");
+    let cell_box = &box_.children[0];
+    let icon_box = &cell_box.children[0];
+
+    assert_eq!(cell_box.h, 32.0, "单元格外盒仍应撑满整行");
+    assert_eq!(icon_box.y, 6.0, "20px 图标应在 32px 行内垂直居中");
+    assert_eq!(icon_box.y + icon_box.h / 2.0, cell_box.h / 2.0);
+}
+
 // ---------- Flex：gap / margin ----------
 
 #[test]

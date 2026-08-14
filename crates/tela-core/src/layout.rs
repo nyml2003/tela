@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    BaseSize, Constraints, ContentConcern, CrossAlign, FlexDirection, Insets, LayoutBox, MainAlign,
-    MinMax, NodeKind, Size, StackAlign, StackLayer, TextMeasureRequest, TextMeasurer,
-    UiLayoutError, UiNode,
+    BaseSize, Constraints, ContentConcern, CrossAlign, FlexDirection, Insets, LayoutBox,
+    LayoutConcern, MainAlign, MinMax, NodeKind, Size, StackAlign, StackLayer, TextMeasureRequest,
+    TextMeasurer, UiLayoutError, UiNode,
 };
 
 /// 布局引擎抽象（见 006-布局引擎 2）。
@@ -243,8 +243,8 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
 
         // 容器自身声明了非内容推导尺寸时，子节点约束必须基于最终内容区重测
         // （如声明宽 120 的容器不能按父宽 200 分配 Fill）。
+        let inner_final = content_area_constraints(&layout, main_axis, self_main, self_cross);
         if declared_non_auto(node, main_axis) || declared_non_auto(node, cross_axis) {
-            let inner_final = content_area_constraints(&layout, main_axis, self_main, self_cross);
             let re_measured = self.measure_children(node, inner_final)?;
             (measured, final_main, _, _) = self.flex_child_pipeline(
                 node,
@@ -270,6 +270,23 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         // 盒内容区尺寸（摆放坐标系）。
         let area_main = content_area(&box_, &layout, main_axis);
         let area_cross = content_area(&box_, &layout, cross_axis);
+
+        // Stretch 在摆放阶段才会确定隐式子项的交叉轴外盒尺寸。若该子项本身是容器，
+        // 仅改外盒会使其内部仍按旧的自然高度排版（例如 24px 单元格被行拉到 32px
+        // 后，图标和文字仍停在顶部）。用最终分配尺寸重测一个测量副本，让内部对齐
+        // 依据最终内容区重排；原始场景树和值身份保持不变。
+        if !layout.wrap && layout.cross_align == CrossAlign::Stretch {
+            self.remeasure_stretched_single_line_children(
+                node,
+                &mut measured,
+                &final_main,
+                inner_final,
+                main_axis,
+                cross_axis,
+                area_cross,
+                &layout,
+            )?;
+        }
 
         box_.children = if layout.wrap {
             self.place_flex_wrapped(
@@ -408,6 +425,50 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 .fold(0.0, f32::max)
         };
         Ok((measured, final_main, content_main, content_cross))
+    }
+
+    /// 单行 Stretch 的隐式子项在最终外盒尺寸确定后重测其内部子树。
+    ///
+    /// `place_flex_single_line` 只负责盒子坐标；它不能在事后改写子树的相对布局。这里
+    /// 用带最终主/交叉轴尺寸的测量副本重排内部内容，且仍把父内容区作为约束传入，避免
+    /// 将强制的最小尺寸错误传播给内部 Auto 叶子。测量副本不复用真实树的指针缓存，
+    /// 因为短生命周期 clone 的地址不能作为跨次缓存身份。
+    #[allow(clippy::too_many_arguments)]
+    fn remeasure_stretched_single_line_children(
+        &mut self,
+        node: &UiNode,
+        boxes: &mut [LayoutBox],
+        final_main: &[f32],
+        final_constraints: Constraints,
+        main_axis: Axis,
+        cross_axis: Axis,
+        area_cross: f32,
+        layout: &LayoutConcern,
+    ) -> Result<(), UiLayoutError> {
+        for (index, child) in node.children.iter().enumerate() {
+            let target_cross = placed_cross(
+                layout.cross_align,
+                child,
+                cross_axis,
+                area_cross,
+                &boxes[index],
+            );
+            if !stretch_implicit(child, cross_axis)
+                || (axis_extent_of(&boxes[index], cross_axis) - target_cross).abs() <= f32::EPSILON
+            {
+                continue;
+            }
+
+            let mut reflow_node = child.clone();
+            let reflow_layout = reflow_node
+                .layout
+                .get_or_insert_with(LayoutConcern::default);
+            set_axis_size(reflow_layout, main_axis, Size::fixed(final_main[index]));
+            set_axis_size(reflow_layout, cross_axis, Size::fixed(target_cross));
+            let mut reflow_engine = Self::new(self.text_measurer);
+            boxes[index] = reflow_engine.measure_inner(&reflow_node, final_constraints)?;
+        }
+        Ok(())
     }
 
     /// wrap=true 的容器内容主轴：多行 → 行容量（inner_main）；单行 → 行内容。
@@ -1158,6 +1219,13 @@ fn set_axis_extent(b: &mut LayoutBox, axis: Axis, value: f32) {
     match axis {
         Axis::Width => b.w = value,
         Axis::Height => b.h = value,
+    }
+}
+
+fn set_axis_size(layout: &mut LayoutConcern, axis: Axis, value: Size) {
+    match axis {
+        Axis::Width => layout.width = Some(value),
+        Axis::Height => layout.height = Some(value),
     }
 }
 

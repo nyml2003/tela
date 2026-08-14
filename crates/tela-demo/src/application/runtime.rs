@@ -611,6 +611,7 @@ fn node_at<'a>(node: &'a UiNode, target: usize, i: &mut usize) -> Option<&'a UiN
 mod tests {
     use super::*;
     use crate::domain::FileCommand;
+    use tela_core::FocusSlot;
     use tela_icon::{Icon, IconName};
 
     fn click_bound(app: &mut App, bind_id: &str) {
@@ -915,6 +916,79 @@ mod tests {
             (icon_center - label_center).abs() <= 1.0,
             "文件列表图标和标题的可见中心应对齐: {icon_center} != {label_center}"
         );
+    }
+
+    #[test]
+    fn focused_file_row_centers_its_visible_content_inside_the_focus_ring() {
+        let mut app = App::new();
+        app.ensure_frame();
+        let (key, node_id) = app
+            .tree
+            .as_ref()
+            .expect("tree")
+            .focusable_nodes()
+            .into_iter()
+            .find(|(key, _)| key == &SemanticKey("entry-3".to_owned()))
+            .expect("源码目录行应使用虚拟列表的稳定业务 key");
+        app.view_state.set_current_focus(FocusSlot {
+            key: Some(key),
+            node_id: Some(node_id),
+        });
+        app.invalidate_frame();
+        assert!(app.ensure_frame());
+
+        let folder = icon_glyph(IconName::Folder);
+        let label = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.x > 264.0
+                    && matches!(&command.payload,
+                        tela_contract::DrawPayload::Text { text, .. } if text.text == "源码")
+            })
+            .expect("文件列表应显示源码目录标签");
+        let icon = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.x < label.geometry.x
+                    && (command.geometry.y - label.geometry.y).abs() <= 4.0
+                    && matches!(
+                        &command.payload,
+                        tela_contract::DrawPayload::Text { text, .. }
+                            if text.text == folder && text.font.0 == tela_fonts::ICON_FONT_NAME
+                    )
+            })
+            .expect("文件列表源码目录同一行应显示文件夹图标");
+        let focus_ring = app
+            .frame()
+            .commands
+            .iter()
+            .find(|command| {
+                command.geometry.y <= icon.geometry.y
+                    && command.geometry.y + command.geometry.h >= icon.geometry.y + icon.geometry.h
+                    && matches!(
+                        &command.payload,
+                        tela_contract::DrawPayload::RoundedRect {
+                            fill: None,
+                            border: Some(border),
+                            ..
+                        } if border.color == FOCUS_APPEARANCE.color
+                            && border.width == FOCUS_APPEARANCE.width
+                    )
+            })
+            .expect("聚焦文件行必须投影自身的 FocusRing");
+
+        let ring_center = focus_ring.geometry.y + focus_ring.geometry.h / 2.0;
+        for (name, command) in [("图标", icon), ("文字", label)] {
+            let ink_center = visible_ink_center(command);
+            assert!(
+                (ink_center - ring_center).abs() <= 1.0,
+                "焦点行{name}的可见中心应位于 FocusRing 中心: {ink_center} != {ring_center}"
+            );
+        }
     }
 
     #[test]
