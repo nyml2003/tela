@@ -11,9 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use objc2::{
-    ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability, rc::Retained,
-};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSColor, NSCursor, NSEvent, NSFont, NSResponder, NSTextField,
     NSTrackingRectTag, NSView,
@@ -31,7 +29,7 @@ use crate::{
     input, startup,
 };
 
-struct TelaViewIvars {
+pub(crate) struct TelaViewIvars {
     state: RefCell<ViewState>,
     tracking_rect: Cell<Option<NSTrackingRectTag>>,
 }
@@ -50,43 +48,36 @@ struct ViewState {
     terminal_error: Option<String>,
 }
 
-declare_class!(
+define_class!(
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TelaMacOSContentView"]
+    #[ivars = TelaViewIvars]
     pub(crate) struct TelaView;
 
-    unsafe impl ClassType for TelaView {
-        #[inherits(NSResponder, NSObject)]
-        type Super = NSView;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "TelaMacOSContentView";
-    }
-
-    impl DeclaredClass for TelaView {
-        type Ivars = TelaViewIvars;
-    }
-
-    unsafe impl TelaView {
-        #[method(isFlipped)]
+    impl TelaView {
+        #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             // The shared `UiFrame` and browser host use upper-left logical coordinates.
             true
         }
 
-        #[method(viewDidMoveToWindow)]
+        #[unsafe(method(viewDidMoveToWindow))]
         fn view_did_move_to_window(&self) {
             self.refresh_tracking_rect();
             self.resize_from_appkit();
         }
 
-        #[method(setFrameSize:)]
+        #[unsafe(method(setFrameSize:))]
         fn set_frame_size(&self, size: NSSize) {
             // SAFETY: this has the exact NSView selector and ABI. Resizing the superclass first
             // ensures `bounds` and backing conversion read the new AppKit geometry below.
-            unsafe { msg_send![super(self), setFrameSize: size] };
+            let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
             self.refresh_tracking_rect();
             self.resize_from_appkit();
         }
 
-        #[method(drawRect:)]
+        #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
             let mut state = self.ivars().state.borrow_mut();
             state.lifecycle.begin_paint();
@@ -95,54 +86,54 @@ declare_class!(
             }
         }
 
-        #[method(acceptsFirstResponder)]
+        #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
         }
 
-        #[method(becomeFirstResponder)]
+        #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
             self.window_focus_changed(true);
             true
         }
 
-        #[method(resignFirstResponder)]
+        #[unsafe(method(resignFirstResponder))]
         fn resign_first_responder(&self) -> bool {
             self.window_focus_changed(false);
             true
         }
 
-        #[method(mouseDown:)]
+        #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             self.pointer_down(event);
         }
 
-        #[method(mouseUp:)]
+        #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             self.pointer_up(event);
         }
 
-        #[method(mouseMoved:)]
+        #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.pointer_move(event);
         }
 
-        #[method(mouseDragged:)]
+        #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
             self.pointer_move(event);
         }
 
-        #[method(mouseExited:)]
+        #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
             self.pointer_left_client();
         }
 
-        #[method(scrollWheel:)]
+        #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             self.pointer_scroll(event);
         }
 
-        #[method(keyDown:)]
+        #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let mut state = self.ivars().state.borrow_mut();
             if let Err(error) = state.key_down(self, event) {
@@ -151,7 +142,7 @@ declare_class!(
         }
 
         // AppKit otherwise consumes some Control-key chords before this view can normalize them.
-        #[method(_wantsKeyDownForEvent:)]
+        #[unsafe(method(_wantsKeyDownForEvent:))]
         fn wants_key_down_for_event(&self, _event: &NSEvent) -> bool {
             true
         }
@@ -184,7 +175,7 @@ impl TelaView {
         });
         // SAFETY: this invokes NSView's ordinary `init` method on a freshly allocated object with
         // Rust ivars already installed, following objc2's documented custom-view construction.
-        let this: Retained<Self> = unsafe { msg_send_id![super(this), init] };
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.setWantsLayer(true);
         this.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable

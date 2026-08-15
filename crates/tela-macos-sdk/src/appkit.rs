@@ -2,7 +2,9 @@
 
 use std::cell::OnceCell;
 
-use objc2::{DefinedClass, define_class, rc::Retained, runtime::ProtocolObject, sel};
+use objc2::{
+    DefinedClass, MainThreadOnly, define_class, rc::Retained, runtime::ProtocolObject, sel,
+};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
     NSWindow, NSWindowDelegate, NSWindowStyleMask,
@@ -71,7 +73,7 @@ define_class!(
 
     // SAFETY: `pollStartup:` is registered as the NSTimer target selector below and has the
     // matching `NSTimer` argument.
-    unsafe impl AppDelegate {
+    impl AppDelegate {
         #[unsafe(method(pollStartup:))]
         fn poll_startup(&self, _timer: &NSTimer) {
             if let Some(view) = self.ivars().view.get() {

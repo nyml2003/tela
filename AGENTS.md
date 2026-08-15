@@ -67,3 +67,34 @@
 - 检测样本：`~/.local/share/nix-mirror-check/samples.txt`，每行一个 `<hash>` 或 `<hash>-<name>`
   （从真实下载日志 `nix build <pkg> -v 2>&1 | grep "copying path from"` 提取）。
 - 改任何 nix 配置后验证：`nix config show | grep -A5 substituters`。
+
+## macOS（Apple Silicon）开发机（2026-08 实测）
+
+### 本机环境（与 WSL 机不同的地方）
+- Apple M3 Pro，macOS 26.6，arm64；Determinate Nix 2.35.1。
+- **Apple SDK 来自 nix**（非 Xcode CLT）：`xcode-select -p` 指向
+  `/nix/store/…-apple-sdk-14.4`，dev shell 内 `SDKROOT`/`DEVELOPER_DIR` 已指到该 SDK，
+  AppKit/Metal 链接走 nix clang 21 + cctools-binutils-darwin + xcbuild，无需装 Xcode。
+- 真实 CLT 仍装在 `/Library/Developer/CommandLineTools`（swift/screencapture 等系统工具
+  要用它：`DEVELOPER_DIR=/Library/Developer/CommandLineTools swift …`，且需 `env -u SDKROOT -u NIX_*`）。
+- **wasm32 链接需要 `lld`**：nix rustc 不带 `rust-lld`，darwin dev shell 已加 `pkgs.lld`
+  （提供 `wasm-ld`；Linux 壳本就带 lld）。缺它时 `ops build bundle` 报 `linker 'lld' not found`。
+
+### macOS MVP 打通（024 文档验收通过）
+- 流程：`ops build macos`（本机）→ `ops build bundle` + `ops serve 8001`（任意机器）
+  → `./dist/macos/Tela.app/Contents/MacOS/tela-macos-sdk --bundle-index http://127.0.0.1:8001/tela-dev/latest.json --verbose`。
+- `open Tela.app --args …` 也能起；直接跑二进制才有 stderr（verbose 指标）。
+- 首次图形验证无辅助功能权限时：`screencapture` 与 `osascript` 拿不到窗口，可用
+  `swift` + `CGWindowListCopyWindowInfo` 查窗口；App 侧 `--verbose` 打印 bundle/cache/guest 指标。
+
+### objc2 0.6.4 宏语法（首次编译修错记录，已在源码中修正）
+- `declare_class!` 已改名 `define_class!`；**不要再写 `unsafe impl ClassType` 与
+  `impl DeclaredClass`**——超类走 `#[unsafe(super(NSView, NSResponder, NSObject))]`，
+  ivars 走 `#[ivars = TelaViewIvars]`，线程走 `#[thread_kind = MainThreadOnly]`（需导入 `MainThreadOnly`）。
+- 自定义方法用 `impl TelaView { #[unsafe(method(sel:))] … }`（无 `unsafe impl`）；
+  `msg_send![super(self), setFrameSize: size]` 要 `let _: () =` 标注返回类型。
+- 部分 AppKit API 在 feature 门后：`initWithContentRect_styleMask_backing_defer`、
+  `NSBackingStoreType` 需 `NSGraphics`；`scrollingDeltaX/Y`、`NSFont::systemFontOfSize`
+  需 `objc2-core-foundation`（tela-macos-sdk/Cargo.toml 已开）。
+- `tela-render-wgpu` 离屏回读测试：适配器请求**不要** `force_fallback_adapter: true`
+  （Metal 无 fallback → NotFound；去掉后 Linux lavapipe 仍会被枚举）。

@@ -88,7 +88,11 @@
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             }
           else pkgs.mkShell {
-            packages = commonPackages ++ [ checkCommand ];
+            packages = commonPackages ++ [
+              checkCommand
+              # wasm32 目标链接器（wasm-ld）：与 Linux 壳保持同源，保证跨平台 bundle 一致。
+              pkgs.lld
+            ];
 
             # AppKit/Metal 与 aarch64-apple-darwin stdlib/SDK 由本机 macOS 和 Xcode Command
             # Line Tools 提供。开发壳只在本机链接，不把 Apple SDK 伪装成 Nix 交叉工具链。
