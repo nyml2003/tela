@@ -49,7 +49,7 @@ impl FormItem {
             label_parts.push(text("*", 13.0, ERROR));
         }
         label_parts.push(text(&self.label, 13.0, TEXT));
-        let label_row = LayoutContainer::flex(label_parts)
+        let label_row = LayoutContainer::row(label_parts)
             .layout(LayoutConcern {
                 width: Some(tela_contract::Size::fixed(96.0)),
                 gap: 2.0,
@@ -58,7 +58,7 @@ impl FormItem {
             .into();
 
         let mut column = vec![
-            LayoutContainer::flex(vec![label_row, self.control])
+            LayoutContainer::row([label_row, self.control])
                 .layout(LayoutConcern {
                     gap: 8.0,
                     cross_align: tela_contract::CrossAlign::Center,
@@ -69,9 +69,8 @@ impl FormItem {
         if let Some(error) = self.error {
             column.push(text(&error, 12.0, ERROR));
         }
-        LayoutContainer::flex(column)
+        LayoutContainer::column(column)
             .layout(LayoutConcern {
-                direction: tela_contract::FlexDirection::Column,
                 gap: 2.0,
                 ..LayoutConcern::default()
             })
@@ -120,9 +119,8 @@ impl Form {
 
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
-        LayoutContainer::flex(self.items)
+        LayoutContainer::column(self.items)
             .layout(LayoutConcern {
-                direction: tela_contract::FlexDirection::Column,
                 gap: self.gap,
                 ..LayoutConcern::default()
             })
@@ -174,9 +172,6 @@ mod tests {
             .item(FormItem::new(Input::new().into_node()).label("B").into());
         let node = form.into_node();
         assert_eq!(node.children.len(), 2);
-        assert_eq!(
-            node.layout.as_ref().unwrap().direction,
-            tela_contract::FlexDirection::Column
-        );
+        assert_eq!(node.kind, tela_contract::NodeKind::Column);
     }
 }

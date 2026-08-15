@@ -40,11 +40,10 @@ pub fn detail_pane(
             scroll_y,
         ),
     };
-    LayoutContainer::flex([inline_summary(model, session, selected, width), body])
+    LayoutContainer::column([inline_summary(model, session, selected, width), body])
         .layout(LayoutConcern {
             width: Some(Size::fixed(width.max(1.0))),
             height: Some(Size::fixed(height)),
-            direction: tela_contract::FlexDirection::Column,
             ..LayoutConcern::default()
         })
         .into()
@@ -68,17 +67,16 @@ fn inline_summary(
     } else {
         entry.tags.join(" · ")
     };
-    let name_stack: UiNode = LayoutContainer::flex([
+    let name_stack: UiNode = LayoutContainer::column([
         text(&entry.name, 16.0, TEXT),
         text(&detail, 12.0, SECONDARY),
     ])
     .layout(LayoutConcern {
-        direction: tela_contract::FlexDirection::Column,
         gap: 4.0,
         ..LayoutConcern::default()
     })
     .into();
-    LayoutContainer::flex([
+    LayoutContainer::row([
         icon(kind_icon(entry.kind), kind_color(entry.kind)),
         name_stack,
         spacer(),
@@ -263,7 +261,7 @@ fn thumbnail_grid(
                 .iter()
                 .map(|entry| thumbnail_card(entry, session.selected.contains(&entry.id)))
                 .collect();
-            let row: UiNode = LayoutContainer::flex(cards)
+            let row: UiNode = LayoutContainer::row(cards)
                 .layout(LayoutConcern {
                     width: Some(Size::fixed(width)),
                     height: Some(Size::fixed(132.0)),
@@ -299,7 +297,7 @@ fn thumbnail_grid(
 }
 
 fn thumbnail_card(entry: &Entry, selected: bool) -> UiNode {
-    let card: UiNode = LayoutContainer::flex([
+    let card: UiNode = LayoutContainer::column([
         icon(kind_icon(entry.kind), kind_color(entry.kind)),
         text(&entry.name, 12.0, TEXT),
         text(&bytes(entry.bytes), 11.0, SECONDARY),
@@ -307,7 +305,6 @@ fn thumbnail_card(entry: &Entry, selected: bool) -> UiNode {
     .layout(LayoutConcern {
         width: Some(Size::fixed(140.0)),
         height: Some(Size::fixed(122.0)),
-        direction: tela_contract::FlexDirection::Column,
         padding: tela_contract::Insets::all(10.0),
         gap: 8.0,
         ..LayoutConcern::default()
@@ -335,7 +332,7 @@ fn text_preview(entry: &Entry, width: f32, height: f32, scroll_y: f32) -> UiNode
         .enumerate()
         .map(|(index, line)| {
             let index = index + window.first_item_index as usize;
-            let content: UiNode = LayoutContainer::flex([
+            let content: UiNode = LayoutContainer::baseline_row([
                 text(
                     &format!("{:>3}", index + 1),
                     11.0,
@@ -353,11 +350,10 @@ fn text_preview(entry: &Entry, width: f32, height: f32, scroll_y: f32) -> UiNode
                     bottom: 0.0,
                     left: 12.0,
                 },
-                cross_align: tela_contract::CrossAlign::Baseline,
                 ..LayoutConcern::default()
             })
             .into();
-            LayoutContainer::flex([content])
+            LayoutContainer::frame(content)
                 .identity(IdentityConcern {
                     key_strategy: KeyStrategy::SemanticId,
                     semantic_key: Some(SemanticKey(format!("code-{}-{index}", entry.id))),
@@ -390,23 +386,27 @@ fn text_preview(entry: &Entry, width: f32, height: f32, scroll_y: f32) -> UiNode
 }
 
 fn asset_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
-    LayoutContainer::flex([
+    let content: UiNode = LayoutContainer::column([
         icon(kind_icon(entry.kind), kind_color(entry.kind)),
         text("此文件在演示中提供类型化预览", 14.0, SECONDARY),
         text(&entry.name, 13.0, TEXT),
     ])
     .layout(LayoutConcern {
-        width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(height.max(1.0))),
-        direction: tela_contract::FlexDirection::Column,
-        main_align: tela_contract::MainAlign::Center,
         cross_align: tela_contract::CrossAlign::Center,
         gap: 12.0,
         ..LayoutConcern::default()
     })
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(SURFACE)),
-        ..VisualConcern::default()
-    })
-    .into()
+    .into();
+    LayoutContainer::column([spacer(), content, spacer()])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height.max(1.0))),
+            cross_align: tela_contract::CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(SURFACE)),
+            ..VisualConcern::default()
+        })
+        .into()
 }

@@ -11,11 +11,26 @@ use tela_core::{LayoutContainer, ViewStateStore};
 
 use crate::shared::{BORDER, TEXT, text};
 
+/// 单元格内容在主轴上的显式对齐方式。
+///
+/// 这不是 core 的泛化布局属性：`Center` / `End` 会在节点树中展开为一个或两个
+/// `Spacer`，因此剩余空间的来源在结构上可见。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CellAlign {
+    /// 内容从单元格左侧开始。
+    #[default]
+    Start,
+    /// 内容位于单元格水平中心。
+    Center,
+    /// 内容贴近单元格右侧。
+    End,
+}
+
 /// 表格单元格：内容（文本或任意节点）+ 宽度 + 对齐 + 内边距。
 pub struct Td {
     children: Vec<UiNode>,
     width: Option<Size>,
-    main_align: tela_contract::MainAlign,
+    horizontal_align: CellAlign,
     cross_align: tela_contract::CrossAlign,
     padding: Insets,
 }
@@ -26,7 +41,7 @@ impl Td {
         Self {
             children,
             width: None,
-            main_align: tela_contract::MainAlign::Start,
+            horizontal_align: CellAlign::Start,
             cross_align: tela_contract::CrossAlign::Center,
             padding: Insets {
                 top: 2.0,
@@ -42,19 +57,15 @@ impl Td {
         Self::new(vec![text(&value.into(), 13.0, TEXT)])
     }
 
-    /// 设置列宽（Fixed/Percent/Fill，多行同列宽度由使用者保持一致）。
+    /// 设置列宽（Fixed/Percent，多行同列宽度由使用者保持一致）。
     pub fn width(mut self, width: Size) -> Self {
         self.width = Some(width);
         self
     }
 
     /// 设置水平/垂直对齐。
-    pub fn align(
-        mut self,
-        main: tela_contract::MainAlign,
-        cross: tela_contract::CrossAlign,
-    ) -> Self {
-        self.main_align = main;
+    pub fn align(mut self, horizontal: CellAlign, cross: tela_contract::CrossAlign) -> Self {
+        self.horizontal_align = horizontal;
         self.cross_align = cross;
         self
     }
@@ -68,7 +79,6 @@ impl Td {
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let mut layout = LayoutConcern {
-            main_align: self.main_align,
             cross_align: self.cross_align,
             padding: self.padding,
             ..LayoutConcern::default()
@@ -76,7 +86,19 @@ impl Td {
         if let Some(width) = self.width {
             layout.width = Some(width);
         }
-        LayoutContainer::flex(self.children).layout(layout).into()
+        let children = match self.horizontal_align {
+            CellAlign::Start => self.children,
+            CellAlign::Center => vec![
+                LayoutContainer::spacer().into(),
+                LayoutContainer::row(self.children).into(),
+                LayoutContainer::spacer().into(),
+            ],
+            CellAlign::End => vec![
+                LayoutContainer::spacer().into(),
+                LayoutContainer::row(self.children).into(),
+            ],
+        };
+        LayoutContainer::row(children).layout(layout).into()
     }
 }
 
@@ -172,13 +194,13 @@ impl Tr {
         };
         let mut layout = LayoutConcern {
             gap: self.gap,
-            cross_align: tela_contract::CrossAlign::Stretch,
+            cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         };
         if let Some(height) = self.height {
             layout.height = Some(Size::fixed(height));
         }
-        let mut builder = LayoutContainer::flex(self.cells)
+        let mut builder = LayoutContainer::row(self.cells)
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(bg)),
                 border_color: None,
@@ -283,13 +305,29 @@ impl Table {
 
     /// 生成固定表头 + 可滚动虚拟表体。表体自身是唯一的滚动命中目标。
     pub fn into_node(self) -> UiNode {
-        let header: UiNode = LayoutContainer::flex([self.header])
+        let mut header_row = self.header;
+        let header_layout = header_row.layout.get_or_insert_with(LayoutConcern::default);
+        header_layout.width = Some(Size::fixed(self.width));
+        header_layout.height = Some(Size::fixed(self.header_height));
+        header_layout.cross_align = tela_contract::CrossAlign::Center;
+        let header: UiNode = LayoutContainer::frame(header_row)
             .layout(LayoutConcern {
                 width: Some(Size::fixed(self.width)),
                 height: Some(Size::fixed(self.header_height)),
                 ..LayoutConcern::default()
             })
             .into();
+        let rows = self
+            .rows
+            .into_iter()
+            .map(|mut row| {
+                let layout = row.layout.get_or_insert_with(LayoutConcern::default);
+                layout.width = Some(Size::fixed(self.width));
+                layout.height = Some(Size::fixed(self.row_height));
+                layout.cross_align = tela_contract::CrossAlign::Center;
+                row
+            })
+            .collect::<Vec<_>>();
         let body = LayoutContainer::virtual_list(
             VirtualListSpec {
                 total_items: self.total_rows,
@@ -298,7 +336,7 @@ impl Table {
                 item_spacing: self.row_spacing,
                 overscan: self.overscan,
             },
-            self.rows,
+            rows,
         )
         .visual(VisualConcern {
             fill: Some(Fill::Solid(Color::WHITE)),
@@ -315,11 +353,10 @@ impl Table {
             ..InteractConcern::default()
         })
         .into();
-        LayoutContainer::flex([header, body])
+        LayoutContainer::column([header, body])
             .layout(LayoutConcern {
                 width: Some(Size::fixed(self.width)),
                 height: Some(Size::fixed(self.header_height + self.body_height)),
-                direction: tela_contract::FlexDirection::Column,
                 ..LayoutConcern::default()
             })
             .into()
@@ -345,7 +382,7 @@ mod tests {
             Some(ContentConcern::Text(ref t)) if t.text == "张三"
         ));
         assert!(node.identity.is_none());
-        assert_eq!(node.kind, NodeKind::Flex);
+        assert_eq!(node.kind, NodeKind::Row);
     }
 
     #[test]

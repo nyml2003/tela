@@ -74,24 +74,26 @@ impl Checkbox {
         } else {
             text("", 1.0, Color::TRANSPARENT)
         };
-        let box_node: UiNode = LayoutContainer::flex(vec![check_mark])
-            .visual(VisualConcern {
-                fill: Some(Fill::Solid(box_bg)),
-                border_color: Some(box_border),
-                ..VisualConcern::default()
-            })
-            .layout(LayoutConcern {
-                width: Some(Size::fixed(BOX)),
-                height: Some(Size::fixed(BOX)),
-                main_align: tela_contract::MainAlign::Center,
-                cross_align: tela_contract::CrossAlign::Center,
-                ..LayoutConcern::default()
-            })
-            .into();
-        let mut node: UiNode = LayoutContainer::flex(vec![box_node, text(&self.label, 13.0, TEXT)])
+        let box_node: UiNode = LayoutContainer::row([
+            LayoutContainer::spacer().into(),
+            check_mark,
+            LayoutContainer::spacer().into(),
+        ])
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(box_bg)),
+            border_color: Some(box_border),
+            ..VisualConcern::default()
+        })
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(BOX)),
+            height: Some(Size::fixed(BOX)),
+            cross_align: tela_contract::CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .into();
+        let mut node: UiNode = LayoutContainer::row([box_node, text(&self.label, 13.0, TEXT)])
             .layout(LayoutConcern {
                 gap: 6.0,
-                main_align: tela_contract::MainAlign::Start,
                 cross_align: tela_contract::CrossAlign::Center,
                 ..LayoutConcern::default()
             })
@@ -168,7 +170,7 @@ impl Radio {
     pub fn into_node(self) -> UiNode {
         let dot_color = if self.checked { PRIMARY } else { Color::WHITE };
         let border = if self.checked { PRIMARY } else { BORDER };
-        let dot: UiNode = LayoutContainer::flex(vec![text("", 1.0, Color::TRANSPARENT)])
+        let dot: UiNode = LayoutContainer::frame(text("", 1.0, Color::TRANSPARENT))
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(dot_color)),
                 border_color: Some(border),
@@ -181,7 +183,7 @@ impl Radio {
                 ..LayoutConcern::default()
             })
             .into();
-        let mut node: UiNode = LayoutContainer::flex(vec![dot, text(&self.label, 13.0, TEXT)])
+        let mut node: UiNode = LayoutContainer::row([dot, text(&self.label, 13.0, TEXT)])
             .layout(LayoutConcern {
                 gap: 6.0,
                 cross_align: tela_contract::CrossAlign::Center,
@@ -226,10 +228,10 @@ mod tests {
     #[test]
     fn checkbox_checked_uses_primary() {
         let node = Checkbox::new().label("同意").checked(true).into_node();
-        assert_eq!(node.kind, NodeKind::Flex);
+        assert_eq!(node.kind, NodeKind::Row);
         assert!(node.interact.as_ref().is_some_and(|i| i.clickable));
         assert!(box_fill(&node).r < 0.2, "checked 应为主题蓝");
-        assert!(node.children[0].children[0].children.is_empty());
+        assert!(node.children[0].children[1].children.is_empty());
     }
 
     #[test]

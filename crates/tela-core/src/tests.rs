@@ -1,13 +1,13 @@
 //! M1/M2 验收测试：同树同帧、非法树结构化错误、resolve 纯操作、正交性独立性、
-//! auto-path 默认身份策略、布局引擎（Flex+wrap/Stack/尺寸三层解析/滚动与 clip/测量缓存）
+//! auto-path 默认身份策略、布局引擎（Row/Column/Wrap/Stack/尺寸三层解析/滚动与 clip/测量缓存）
 //! （见 010-落地路线 M1、M2）。
 
 use std::collections::HashMap;
 use tela_contract::{
     BaseSize, ClipRect, Color, Constraints, ContentConcern, CrossAlign, Fill, FocusAppearance,
     FontRef, IdentityConcern, Insets, InteractConcern, KeyStrategy, KeymapScopeId, LayoutBox,
-    LayoutConcern, MainAlign, MinMax, PixelOffset, Rect, ScrollState, SemanticKey,
-    ShortcutScopeSpec, Size, StackAlign, StackLayer, TextContent, TextMeasureRequest, TextMeasurer,
+    LayoutConcern, MinMax, OverlaySpec, PixelOffset, Rect, ScrollState, SemanticKey,
+    ShortcutScopeSpec, Size, StackAlign, TextContent, TextMeasureRequest, TextMeasurer,
     TextMetrics, UiBuildError, UiLayoutError, UiNode, Viewport, VirtualListSpec, VisualConcern,
 };
 
@@ -90,32 +90,18 @@ fn text_node(text: &str) -> UiNode {
     .into()
 }
 
-fn flex(width: f32, wrap: bool, children: Vec<UiNode>) -> UiNode {
-    LayoutContainer::flex(children)
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            wrap,
-            ..LayoutConcern::default()
-        })
-        .into()
+fn row(width: f32, children: Vec<UiNode>) -> UiNode {
+    let layout = LayoutConcern {
+        width: Some(Size::fixed(width)),
+        ..LayoutConcern::default()
+    };
+    LayoutContainer::row(children).layout(layout).into()
 }
 
-fn flex_align(width: f32, align: MainAlign, children: Vec<UiNode>) -> UiNode {
-    LayoutContainer::flex(children)
+fn wrap(width: f32, children: Vec<UiNode>) -> UiNode {
+    LayoutContainer::wrap(children)
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
-            main_align: align,
-            ..LayoutConcern::default()
-        })
-        .into()
-}
-
-fn flex_cross(width: f32, align: CrossAlign, children: Vec<UiNode>) -> UiNode {
-    LayoutContainer::flex(children)
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            height: Some(Size::fixed(100.0)),
-            cross_align: align,
             ..LayoutConcern::default()
         })
         .into()
@@ -136,8 +122,8 @@ fn rect_with_margin(width: f32, height: f32, margin: Insets) -> UiNode {
         .into()
 }
 
-fn flex_gap_margin() -> UiNode {
-    LayoutContainer::flex([
+fn row_gap_margin() -> UiNode {
+    LayoutContainer::row([
         rect_with_margin(
             30.0,
             10.0,
@@ -156,12 +142,10 @@ fn flex_gap_margin() -> UiNode {
     .into()
 }
 
-/// 样例树：Group → Flex → [Rect(Fill), Text]
+/// 样例树：Group → Row → [Rect, Text]
 fn sample_tree() -> UiTree {
-    let root = LogicalContainer::group().children([LayoutContainer::flex([
-        rect_node(Some(Size::fill()), Color::BLACK),
-        text_node("Hello"),
-    ])]);
+    let root = LogicalContainer::group()
+        .children([LayoutContainer::row([rect(20.0, 10.0), text_node("Hello")])]);
     UiTree::new(root).unwrap()
 }
 
@@ -194,7 +178,7 @@ fn resolve_does_not_read_external_state() {
 }
 
 #[test]
-fn baseline_flex_aligns_text_and_emits_absolute_baselines() {
+fn baseline_row_aligns_text_and_emits_absolute_baselines() {
     let text = |value: &str, font_size: f32, line_height: f32| -> UiNode {
         Primitive::text(TextContent {
             text: value.to_owned(),
@@ -206,13 +190,11 @@ fn baseline_flex_aligns_text_and_emits_absolute_baselines() {
         .into()
     };
     let tree = UiTree::new(
-        LayoutContainer::flex([text("small", 10.0, 14.0), text("large", 20.0, 26.0)]).layout(
-            LayoutConcern {
+        LayoutContainer::baseline_row([text("small", 10.0, 14.0), text("large", 20.0, 26.0)])
+            .layout(LayoutConcern {
                 width: Some(Size::fixed(200.0)),
-                cross_align: CrossAlign::Baseline,
                 ..LayoutConcern::default()
-            },
-        ),
+            }),
     )
     .unwrap();
     let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
@@ -231,7 +213,7 @@ fn baseline_flex_aligns_text_and_emits_absolute_baselines() {
     let right_baseline = box_.children[1].y + box_.children[1].first_baseline.unwrap();
     assert!(
         (left_baseline - right_baseline).abs() < f32::EPSILON,
-        "同一 Flex 行的首行基线必须一致: {left_baseline} != {right_baseline}"
+        "同一 BaselineRow 的首行基线必须一致: {left_baseline} != {right_baseline}"
     );
 
     let frame = resolve(&tree);
@@ -346,7 +328,7 @@ fn default_focus_key_survives_a_regular_tree_rebuild() {
         });
         node
     };
-    let first = UiTree::new(LayoutContainer::flex([focusable(), focusable()])).unwrap();
+    let first = UiTree::new(LayoutContainer::row([focusable(), focusable()])).unwrap();
     let (key, node_id) = first.focusable_nodes()[0].clone();
     let mut state = ViewStateStore::new();
     state.set_current_focus(FocusSlot {
@@ -354,7 +336,7 @@ fn default_focus_key_survives_a_regular_tree_rebuild() {
         key: Some(key.clone()),
     });
 
-    let rebuilt = UiTree::new(LayoutContainer::flex([focusable(), focusable()])).unwrap();
+    let rebuilt = UiTree::new(LayoutContainer::row([focusable(), focusable()])).unwrap();
     state.reconcile_focus(&rebuilt.focusable_nodes());
     assert_eq!(state.current_focus_key(), Some(&key));
     assert_eq!(
@@ -614,7 +596,7 @@ fn layout_change_does_not_affect_draw_content() {
 #[test]
 fn auto_path_keys_follow_tree_position() {
     let tree = sample_tree();
-    // DFS 前序：根 "/"，Flex "/0/"，Rect "/0/0/"，Text "/0/1/"。
+    // DFS 前序：根 "/"，Row "/0/"，Rect "/0/0/"，Text "/0/1/"。
     let expected = vec!["/", "/0/", "/0/0/", "/0/1/"]
         .into_iter()
         .map(|p| SemanticKey(p.to_string()))
@@ -674,8 +656,8 @@ fn text_auto_size_uses_text_measurer() {
 }
 
 #[test]
-fn fixed_width_flex_auto_height_keeps_padded_content_at_its_natural_height() {
-    let node: UiNode = LayoutContainer::flex([rect(40.0, 20.0)])
+fn fixed_width_row_auto_height_keeps_padded_content_at_its_natural_height() {
+    let node: UiNode = LayoutContainer::row([rect(40.0, 20.0)])
         .layout(LayoutConcern {
             width: Some(Size::fixed(100.0)),
             padding: Insets {
@@ -696,7 +678,7 @@ fn fixed_width_flex_auto_height_keeps_padded_content_at_its_natural_height() {
             max_h: 100.0,
         },
     )
-    .expect("带 padding 的 Flex 应可测量");
+    .expect("带 padding 的 Row 应可测量");
 
     assert_eq!(box_.w, 100.0);
     assert_eq!(box_.h, 24.0, "Auto 外盒必须包含上下 padding");
@@ -728,7 +710,7 @@ trait TestNodeExt: Into<UiNode> {
 
 impl<T: Into<UiNode>> TestNodeExt for T {}
 
-// ---------- M3：DrawOrder 局部排序（见 006-布局引擎 4.5） ----------
+// ---------- M3：DrawOrder 局部排序（见 006-布局引擎 4） ----------
 
 fn rect_with_draw_order(
     width: f32,
@@ -779,7 +761,7 @@ fn draw_order_group_and_weight_with_tree_order_fallback() {
         tela_contract::DrawOrder::Normal(2),
         Color::BLACK,
     );
-    let tree = UiTree::new(flex(200.0, false, vec![a, b, c, d, e])).unwrap();
+    let tree = UiTree::new(row(200.0, vec![a, b, c, d, e])).unwrap();
     let frame = resolve(&tree);
     let fills: Vec<Option<Color>> = frame
         .commands
@@ -815,7 +797,7 @@ fn draw_order_hit_regions_match_draw_order() {
     )
     .into_interactive();
     // 故意让树序与 draw order 相反，覆盖 emit 时重排子节点的路径。
-    let tree = UiTree::new(flex(200.0, false, vec![top, bottom])).unwrap();
+    let tree = UiTree::new(row(200.0, vec![top, bottom])).unwrap();
     let frame = resolve(&tree);
     // 命令顺序：Normal 在前，InnerTop 在后；命中区域同序（反向遍历选中最上层）。
     assert!(matches!(
@@ -857,7 +839,7 @@ fn circle_and_ellipse_payloads() {
             fill: Some(Fill::Solid(Color::BLUE)),
             ..VisualConcern::default()
         });
-    let tree = UiTree::new(flex(200.0, false, vec![circle.into(), ellipse.into()])).unwrap();
+    let tree = UiTree::new(row(200.0, vec![circle.into(), ellipse.into()])).unwrap();
     let frame = resolve(&tree);
     assert!(matches!(
         frame.commands[0].payload,
@@ -897,18 +879,34 @@ fn shadow_wraps_base_payload() {
 
 // ================= M3：布局引擎（见 010-落地路线 M2） =================
 
-// ---------- Flex：wrap=false 单行 Fill 均分 ----------
+// ---------- Row：Expanded / Spacer 显式分配 ----------
 
 #[test]
-fn flex_wrap_false_fill_distributes_remaining() {
-    let tree = UiTree::new(flex(
-        120.0,
-        false,
-        vec![rect_node(Some(Size::fill()), Color::BLACK); 3],
-    ))
+fn row_expanded_distributes_remaining() {
+    let fill = || -> UiNode {
+        LayoutContainer::expanded(
+            Primitive::rect()
+                .layout(LayoutConcern {
+                    width: Some(Size::percent(1.0)),
+                    height: Some(Size::fixed(10.0)),
+                    ..LayoutConcern::default()
+                })
+                .visual(VisualConcern {
+                    fill: Some(Fill::Solid(Color::BLACK)),
+                    ..VisualConcern::default()
+                }),
+        )
+        .into()
+    };
+    let tree = UiTree::new(
+        LayoutContainer::row([fill(), fill(), fill()]).layout(LayoutConcern {
+            width: Some(Size::fixed(120.0)),
+            ..LayoutConcern::default()
+        }),
+    )
     .unwrap();
     let frame = resolve(&tree);
-    // 3 个 Fill 子均分 120 内容区。
+    // 3 个 Expanded 子均分 120 内容区。
     assert_eq!(frame.commands[0].geometry.w, 40.0);
     assert_eq!(frame.commands[1].geometry.w, 40.0);
     assert_eq!(frame.commands[2].geometry.w, 40.0);
@@ -917,12 +915,25 @@ fn flex_wrap_false_fill_distributes_remaining() {
 }
 
 #[test]
-fn flex_wrap_false_fill_takes_remaining_after_fixed() {
-    let tree = UiTree::new(flex(
-        120.0,
-        false,
-        vec![rect(40.0, 10.0), rect_node(Some(Size::fill()), Color::RED)],
-    ))
+fn row_expanded_takes_remaining_after_fixed() {
+    let fill = LayoutContainer::expanded(
+        Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::percent(1.0)),
+                height: Some(Size::fixed(10.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::RED)),
+                ..VisualConcern::default()
+            }),
+    );
+    let tree = UiTree::new(
+        LayoutContainer::row([rect(40.0, 10.0), fill.into()]).layout(LayoutConcern {
+            width: Some(Size::fixed(120.0)),
+            ..LayoutConcern::default()
+        }),
+    )
     .unwrap();
     let frame = resolve(&tree);
     // Fixed 40 后 Fill 吃剩余 80。
@@ -931,51 +942,107 @@ fn flex_wrap_false_fill_takes_remaining_after_fixed() {
     assert_eq!(frame.commands[1].geometry.w, 80.0);
 }
 
-// ---------- Flex：wrap=true 自动换行、Fill 仅单行内部 ----------
+#[test]
+fn row_expanded_reserves_its_margin_before_sharing_remaining_space() {
+    let fill = LayoutContainer::expanded(
+        Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::percent(1.0)),
+                height: Some(Size::fixed(10.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::RED)),
+                ..VisualConcern::default()
+            }),
+    )
+    .layout(LayoutConcern {
+        margin: Insets {
+            left: 4.0,
+            right: 6.0,
+            ..Insets::default()
+        },
+        ..LayoutConcern::default()
+    });
+    let tree = UiTree::new(
+        LayoutContainer::row([rect(20.0, 10.0), fill.into()]).layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            ..LayoutConcern::default()
+        }),
+    )
+    .unwrap();
+    let frame = resolve(&tree);
+
+    // 100 - fixed 20 - Expanded margin 10 = allocation 70；右外边距恰好落在行末。
+    assert_eq!(frame.commands[1].geometry.x, 24.0);
+    assert_eq!(frame.commands[1].geometry.w, 70.0);
+    assert_eq!(
+        frame.commands[1].geometry.x + frame.commands[1].geometry.w + 6.0,
+        100.0
+    );
+}
+
+// ---------- Wrap：自然尺寸换行，拒绝分配项 ----------
 
 #[test]
-fn flex_wrap_true_auto_wrap() {
+fn wrap_auto_wraps_natural_children() {
     // 行容量 100：60+60 > 100 → 换行。
-    let tree = UiTree::new(flex(100.0, true, vec![rect(60.0, 10.0), rect(60.0, 20.0)])).unwrap();
+    let tree = UiTree::new(wrap(100.0, vec![rect(60.0, 10.0), rect(60.0, 20.0)])).unwrap();
     let frame = resolve(&tree);
     assert_eq!(frame.commands[0].geometry.y, 0.0);
     assert_eq!(frame.commands[1].geometry.y, 10.0); // 第二行 y = 第一行高 10
 }
 
 #[test]
-fn flex_wrap_true_fill_within_row_only() {
-    // 行1: [60, 40] 占满；行2: [60, Fill] → Fill 吃本行剩余 40。
-    // 若 Fill 跨行共享空白（全局），剩余 = 100 - 60 = 40，Fill = 40 —— 与行内一致，用第三行无 Fill 区分。
-    let tree = UiTree::new(flex(
-        100.0,
-        true,
-        vec![
-            rect(60.0, 10.0),
-            rect(40.0, 10.0),
-            rect(60.0, 10.0),
-            rect_node(Some(Size::fill()), Color::BLUE),
-        ],
-    ))
-    .unwrap();
-    let frame = resolve(&tree);
-    // 行2 的 Fill 只吃本行剩余 40（全局分配会是 0：剩余 100-160 < 0）。
-    assert_eq!(frame.commands[0].geometry.y, 0.0);
-    assert_eq!(frame.commands[1].geometry.y, 0.0);
-    assert_eq!(frame.commands[2].geometry.y, 10.0);
-    assert_eq!(frame.commands[3].geometry.y, 10.0);
-    assert_eq!(frame.commands[3].geometry.x, 60.0);
-    assert_eq!(frame.commands[3].geometry.w, 40.0);
+fn wrap_rejects_allocation_primitives() {
+    let root = LayoutContainer::wrap([LayoutContainer::spacer()]);
+    assert!(matches!(
+        UiTree::new(root),
+        Err(UiBuildError::AllocationInWrap)
+    ));
 }
 
-// ---------- Flex：对齐 ----------
+#[test]
+fn allocation_primitives_are_only_valid_in_linear_containers() {
+    let orphan: UiNode = LayoutContainer::expanded(rect(10.0, 10.0)).into();
+    let root = LayoutContainer::stack([rect(20.0, 20.0), orphan]);
+    assert!(matches!(
+        UiTree::new(root),
+        Err(UiBuildError::InvalidLayoutShape)
+    ));
+
+    let root = LayoutContainer::frame(LayoutContainer::spacer());
+    assert!(matches!(
+        UiTree::new(root),
+        Err(UiBuildError::InvalidLayoutShape)
+    ));
+
+    let root = LayoutContainer::frame(rect(10.0, 10.0)).layout(LayoutConcern {
+        cross_align: CrossAlign::Center,
+        ..LayoutConcern::default()
+    });
+    assert!(matches!(
+        UiTree::new(root),
+        Err(UiBuildError::InvalidLayoutShape)
+    ));
+}
+
+// ---------- 显式 Spacer / Frame：主轴分布和固定行高 ----------
 
 #[test]
-fn flex_main_align_center_and_end() {
-    let center = UiTree::new(flex_align(
-        100.0,
-        MainAlign::Center,
-        vec![rect(30.0, 10.0), rect(20.0, 10.0)],
-    ))
+fn spacer_centers_content_in_a_fixed_row() {
+    let center = UiTree::new(
+        LayoutContainer::row([
+            LayoutContainer::spacer().into(),
+            rect(30.0, 10.0),
+            rect(20.0, 10.0),
+            LayoutContainer::spacer().into(),
+        ])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            ..LayoutConcern::default()
+        }),
+    )
     .unwrap();
     let frame = resolve(&center);
     // 内容 50，剩余 50 → Center 偏移 25。
@@ -984,38 +1051,23 @@ fn flex_main_align_center_and_end() {
 }
 
 #[test]
-fn flex_cross_align_stretch() {
-    let tree = UiTree::new(flex_cross(
-        100.0,
-        CrossAlign::Stretch,
-        vec![rect_node(Some(Size::fixed(30.0)), Color::BLACK)],
-    ))
-    .unwrap();
-    let frame = resolve(&tree);
-    // Stretch：子高 = 内容区高（viewport 100）。
-    assert_eq!(frame.commands[0].geometry.h, 100.0);
-}
-
-#[test]
-fn flex_stretch_reflows_nested_content_against_final_cross_axis() {
-    // 模拟固定 32px 表格行中的 Td：Td 初始由 20px 图标和上下各 2px padding
-    // 推导为 24px，随后由父行 Stretch 到 32px。内部图标必须依据 32px 外盒重排。
-    let cell: UiNode = LayoutContainer::flex([rect(20.0, 20.0)])
+fn frame_makes_table_cell_height_explicit() {
+    let cell: UiNode = LayoutContainer::frame(LayoutContainer::row([rect(20.0, 20.0)]))
         .layout(LayoutConcern {
+            height: Some(Size::fixed(24.0)),
             padding: Insets {
                 top: 2.0,
                 bottom: 2.0,
                 ..Insets::default()
             },
-            cross_align: CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .into();
-    let row: UiNode = LayoutContainer::flex([cell])
+    let row: UiNode = LayoutContainer::row([cell])
         .layout(LayoutConcern {
             width: Some(Size::fixed(100.0)),
             height: Some(Size::fixed(32.0)),
-            cross_align: CrossAlign::Stretch,
+            cross_align: CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .into();
@@ -1029,27 +1081,29 @@ fn flex_stretch_reflows_nested_content_against_final_cross_axis() {
             max_h: 32.0,
         },
     )
-    .expect("固定行和 Stretch 单元格必须可布局");
+    .expect("固定行和 Frame 单元格必须可布局");
     let cell_box = &box_.children[0];
-    let icon_box = &cell_box.children[0];
+    let content_box = &cell_box.children[0];
+    let icon_box = &content_box.children[0];
 
-    assert_eq!(cell_box.h, 32.0, "单元格外盒仍应撑满整行");
-    assert_eq!(icon_box.y, 6.0, "20px 图标应在 32px 行内垂直居中");
-    assert_eq!(icon_box.y + icon_box.h / 2.0, cell_box.h / 2.0);
+    assert_eq!(cell_box.h, 24.0, "单元格高度由 Frame 显式声明");
+    assert_eq!(cell_box.y, 4.0, "24px 单元格应在 32px 行内垂直居中");
+    assert_eq!(content_box.y, 2.0, "Frame 内容区遵从显式 padding");
+    assert_eq!(icon_box.y, 0.0, "Row 内图标相对内容区起点排列");
 }
 
-// ---------- Flex：gap / margin ----------
+// ---------- Row：gap / margin ----------
 
 #[test]
-fn flex_gap_and_margin() {
-    let tree = UiTree::new(flex_gap_margin()).unwrap();
+fn row_gap_and_margin() {
+    let tree = UiTree::new(row_gap_margin()).unwrap();
     let frame = resolve(&tree);
     // gap 10 隔开两个 Fixed 30；首个带 margin-left 5。
     assert_eq!(frame.commands[0].geometry.x, 5.0);
     assert_eq!(frame.commands[1].geometry.x, 45.0);
 }
 
-// ---------- MinMax 三层解析（见 006-3.1） ----------
+// ---------- MinMax 三层解析（见 006-5） ----------
 
 #[test]
 fn minmax_three_layer_auto_capped_by_parent() {
@@ -1065,26 +1119,9 @@ fn minmax_three_layer_auto_capped_by_parent() {
         width: Some(Size::constrained(Some(80.0), Some(240.0))),
         ..LayoutConcern::default()
     });
-    let tree = UiTree::new(flex(200.0, false, vec![text.into()])).unwrap();
+    let tree = UiTree::new(row(200.0, vec![text.into()])).unwrap();
     let frame = resolve(&tree);
     assert_eq!(frame.commands[0].geometry.w, 200.0);
-}
-
-#[test]
-fn minmax_three_layer_fill_floor_then_clamped() {
-    // Fill 分配 80 → 本地保底 100 → 最终 100（父约束 [0, 200] 不封顶）。
-    let child = rect_node(
-        Some(Size::Constrained(MinMax {
-            base: BaseSize::Fill,
-            min: Some(100.0),
-            max: None,
-        })),
-        Color::BLACK,
-    );
-    let tree = UiTree::new(flex(200.0, false, vec![rect(120.0, 10.0), child])).unwrap();
-    let frame = resolve(&tree);
-    // 剩余 80 → 本地保底 100。
-    assert_eq!(frame.commands[1].geometry.w, 100.0);
 }
 
 #[test]
@@ -1098,7 +1135,7 @@ fn minmax_interval_empty_reports_layout_error() {
         })),
         Color::BLACK,
     );
-    let tree = UiTree::new(flex(100.0, false, vec![child])).unwrap();
+    let tree = UiTree::new(row(100.0, vec![child])).unwrap();
     assert!(matches!(
         tree.resolve(VIEWPORT, &MockMeasurer, &HashMap::new()),
         Err(UiLayoutError::MinConstraintViolation)
@@ -1137,7 +1174,7 @@ fn minmax_min_greater_than_max_rejected_at_build() {
     ));
 }
 
-// ---------- Stack：Content union / FillOverlay 对齐（见 006-4.2） ----------
+// ---------- Stack：Content union / Overlay 对齐（见 006-4） ----------
 
 #[test]
 fn stack_content_union_size() {
@@ -1166,22 +1203,24 @@ fn stack_content_union_size() {
 }
 
 #[test]
-fn stack_fill_overlay_align_top_right() {
-    let mut overlay_node: UiNode = Primitive::rect()
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(20.0)),
-            height: Some(Size::fixed(10.0)),
-            stack_layer: StackLayer::FillOverlay,
-            stack_align: Some(StackAlign::TopRight),
-            stack_offset: Default::default(),
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(Color::RED)),
-            ..VisualConcern::default()
-        })
-        .into();
-    overlay_node.layout.as_mut().unwrap().stack_align = Some(StackAlign::TopRight);
+fn stack_overlay_aligns_top_right_after_content_size_is_known() {
+    let overlay_node: UiNode = LayoutContainer::overlay(
+        Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(20.0)),
+                height: Some(Size::fixed(10.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::RED)),
+                ..VisualConcern::default()
+            }),
+        OverlaySpec {
+            align: StackAlign::TopRight,
+            ..OverlaySpec::default()
+        },
+    )
+    .into();
     let tree = UiTree::new(
         LayoutContainer::stack([rect(100.0, 50.0), overlay_node]).layout(LayoutConcern {
             width: Some(Size::fixed(200.0)),
@@ -1197,34 +1236,37 @@ fn stack_fill_overlay_align_top_right() {
 }
 
 #[test]
-fn stack_fill_overlay_not_in_size() {
-    // 巨型 overlay 不撑大 Stack（尺寸只由 Content 推导；overlay 自身受 Stack 盒约束封顶）。
-    let overlay_node: UiNode = Primitive::rect()
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(500.0)),
-            height: Some(Size::fixed(500.0)),
-            stack_layer: StackLayer::FillOverlay,
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(Color::RED)),
-            ..VisualConcern::default()
-        })
-        .into();
+fn stack_overlay_does_not_participate_in_content_size() {
+    // 巨型 Overlay 不撑大 Stack（尺寸只由普通内容推导；Overlay 受最终 Stack 内容区约束）。
+    let overlay_node: UiNode = LayoutContainer::overlay(
+        Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(500.0)),
+                height: Some(Size::fixed(500.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::RED)),
+                ..VisualConcern::default()
+            }),
+        OverlaySpec::default(),
+    )
+    .into();
     let tree = UiTree::new(LayoutContainer::stack([rect(100.0, 50.0), overlay_node])).unwrap();
     let frame = resolve(&tree);
     // Stack Auto = Content union (100, 50)——overlay 不参与尺寸推导。
     let stack = measure(
         LayoutContainer::stack([
             rect(100.0, 50.0),
-            Primitive::rect()
-                .layout(LayoutConcern {
+            LayoutContainer::overlay(
+                Primitive::rect().layout(LayoutConcern {
                     width: Some(Size::fixed(500.0)),
                     height: Some(Size::fixed(500.0)),
-                    stack_layer: StackLayer::FillOverlay,
                     ..LayoutConcern::default()
-                })
-                .into(),
+                }),
+                OverlaySpec::default(),
+            )
+            .into(),
         ]),
         Constraints {
             min_w: 0.0,
@@ -1241,15 +1283,12 @@ fn stack_fill_overlay_not_in_size() {
 }
 
 #[test]
-fn stack_fill_overlay_outside_stack_rejected() {
-    let overlay = UiNode::new(tela_contract::NodeKind::Rect).with_layout(LayoutConcern {
-        stack_layer: StackLayer::FillOverlay,
-        ..LayoutConcern::default()
-    });
-    let root = flex(100.0, false, vec![overlay]);
+fn overlay_outside_stack_rejected() {
+    let overlay: UiNode = LayoutContainer::overlay(rect(10.0, 10.0), OverlaySpec::default()).into();
+    let root = row(100.0, vec![overlay]);
     assert!(matches!(
         UiTree::new(root),
-        Err(UiBuildError::FillOverlayOutsideStack)
+        Err(UiBuildError::OverlayOutsideStack)
     ));
 }
 
@@ -1263,13 +1302,9 @@ fn stack_empty_content_rejected() {
 }
 
 #[test]
-fn stack_all_fill_without_explicit_size_rejected() {
-    let all_fill = UiNode::new(tela_contract::NodeKind::Rect).with_layout(LayoutConcern {
-        width: Some(Size::fill()),
-        height: Some(Size::fill()),
-        ..LayoutConcern::default()
-    });
-    let root = UiNode::new(tela_contract::NodeKind::Stack).with_children([all_fill]);
+fn stack_with_only_overlays_rejected() {
+    let overlay: UiNode = LayoutContainer::overlay(rect(10.0, 10.0), OverlaySpec::default()).into();
+    let root = UiNode::new(tela_contract::NodeKind::Stack).with_children([overlay]);
     assert!(matches!(
         UiTree::new(root),
         Err(UiBuildError::InvalidStackContent)
@@ -1294,7 +1329,7 @@ fn same_node_same_constraints_same_box() {
 
 #[test]
 fn overflow_visible_child_exceeds_container() {
-    let tree = UiTree::new(flex(100.0, false, vec![rect(60.0, 10.0), rect(60.0, 10.0)])).unwrap();
+    let tree = UiTree::new(row(100.0, vec![rect(60.0, 10.0), rect(60.0, 10.0)])).unwrap();
     let frame = resolve(&tree);
     // 120 > 100，overflow visible：子盒溢出容器，无 clip。
     assert_eq!(
@@ -1370,7 +1405,7 @@ fn scroll_bounds_use_actual_scroll_view_and_virtual_content_extents() {
 
     let rows: Vec<UiNode> = (0..10)
         .map(|index| {
-            LayoutContainer::flex([rect(100.0, 32.0)])
+            LayoutContainer::row([rect(100.0, 32.0)])
                 .identity(IdentityConcern {
                     key_strategy: KeyStrategy::SemanticId,
                     semantic_key: Some(SemanticKey(format!("row-{index}"))),
@@ -1412,7 +1447,7 @@ fn nested_scroll_and_clip_rect_intersection() {
         width: Some(Size::fixed(40.0)),
         ..LayoutConcern::default()
     });
-    let mut inner_clip = UiNode::new(tela_contract::NodeKind::Flex);
+    let mut inner_clip = UiNode::new(tela_contract::NodeKind::Row);
     inner_clip.layout = Some(LayoutConcern {
         width: Some(Size::fixed(50.0)),
         height: Some(Size::fixed(50.0)),
@@ -1447,7 +1482,7 @@ fn nested_scroll_and_clip_rect_intersection() {
 #[test]
 fn clip_container_clips_descendants() {
     let child = rect_node(Some(Size::fixed(40.0)), Color::BLACK);
-    let mut clip_node = UiNode::new(tela_contract::NodeKind::Flex);
+    let mut clip_node = UiNode::new(tela_contract::NodeKind::Row);
     clip_node.layout = Some(LayoutConcern {
         width: Some(Size::fixed(50.0)),
         height: Some(Size::fixed(50.0)),
@@ -1504,10 +1539,9 @@ fn measure_cache_clear_does_not_change_result() {
 }
 
 #[test]
-fn flex_column_stacks_children_vertically() {
+fn column_stacks_children_vertically() {
     let tree = UiTree::new(
-        LayoutContainer::flex([rect(10.0, 10.0), rect(20.0, 20.0)]).layout(LayoutConcern {
-            direction: tela_contract::FlexDirection::Column,
+        LayoutContainer::column([rect(10.0, 10.0), rect(20.0, 20.0)]).layout(LayoutConcern {
             gap: 5.0,
             ..LayoutConcern::default()
         }),
@@ -1526,49 +1560,119 @@ fn flex_column_stacks_children_vertically() {
 }
 
 #[test]
-fn flex_column_remeasures_children_with_width_as_cross_axis() {
-    let root =
-        LayoutContainer::flex([rect(480.0, 56.0), rect(480.0, 40.0)]).layout(LayoutConcern {
+fn column_uses_final_cross_constraints_once() {
+    let root: UiNode = LayoutContainer::column([rect(480.0, 56.0), rect(480.0, 40.0)])
+        .layout(LayoutConcern {
             width: Some(Size::fixed(480.0)),
             height: Some(Size::fixed(360.0)),
-            direction: tela_contract::FlexDirection::Column,
             ..LayoutConcern::default()
-        });
-    let box_ = measure(
-        root,
-        Constraints {
-            min_w: 0.0,
-            max_w: 480.0,
-            min_h: 0.0,
-            max_h: 360.0,
-        },
-    )
-    .expect("Column 容器必须可测量");
+        })
+        .into();
+    let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
+    let box_ = engine
+        .measure(
+            &root,
+            Constraints {
+                min_w: 0.0,
+                max_w: 480.0,
+                min_h: 0.0,
+                max_h: 360.0,
+            },
+        )
+        .expect("Column 容器必须可测量");
 
     assert_eq!((box_.w, box_.h), (480.0, 360.0));
     assert_eq!((box_.children[0].w, box_.children[0].h), (480.0, 56.0));
     assert_eq!((box_.children[1].w, box_.children[1].h), (480.0, 40.0));
+    assert_eq!(
+        engine.max_measure_count(),
+        1,
+        "每个源节点只能接收一次最终约束"
+    );
+}
+
+#[test]
+fn each_source_node_is_measured_once_with_expanded_and_overlay() {
+    let row: UiNode = LayoutContainer::row([
+        rect(20.0, 12.0),
+        LayoutContainer::expanded(LayoutContainer::frame(rect(12.0, 12.0))).into(),
+        LayoutContainer::spacer().into(),
+    ])
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(120.0)),
+        height: Some(Size::fixed(24.0)),
+        ..LayoutConcern::default()
+    })
+    .into();
+    let stack: UiNode = LayoutContainer::stack([
+        rect(80.0, 24.0),
+        LayoutContainer::overlay(
+            LayoutContainer::frame(rect(12.0, 12.0)),
+            OverlaySpec {
+                align: StackAlign::BottomRight,
+                ..OverlaySpec::default()
+            },
+        )
+        .into(),
+    ])
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(120.0)),
+        height: Some(Size::fixed(30.0)),
+        ..LayoutConcern::default()
+    })
+    .into();
+    let root: UiNode = LayoutContainer::column([row, stack])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(120.0)),
+            height: Some(Size::fixed(60.0)),
+            ..LayoutConcern::default()
+        })
+        .into();
+    let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
+    let box_ = engine
+        .measure(
+            &root,
+            Constraints {
+                min_w: 0.0,
+                max_w: 120.0,
+                min_h: 0.0,
+                max_h: 60.0,
+            },
+        )
+        .expect("所有原语应在最终约束下完成一次测量");
+
+    assert_eq!((box_.w, box_.h), (120.0, 60.0));
+    assert_eq!(engine.max_measure_count(), 1);
 }
 
 // ---------- Code review 回归：Stack content/overlay 交错索引 ----------
 
 #[test]
 fn stack_content_overlay_interleaved_indices() {
-    // overlay 排在 content 之前（树序混合，见 006-4.5 统一排序）→ content 索引不错位。
-    let overlay_first = Primitive::rect()
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(40.0)),
-            height: Some(Size::fixed(20.0)),
-            stack_layer: StackLayer::FillOverlay,
-            stack_align: Some(StackAlign::TopRight),
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(Color::RED)),
-            ..VisualConcern::default()
-        });
+    // Overlay 在树序上排在 content 之前，但包装器以局部绘制序明确置顶。
+    let overlay_first: UiNode = LayoutContainer::overlay(
+        Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(40.0)),
+                height: Some(Size::fixed(20.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::RED)),
+                ..VisualConcern::default()
+            }),
+        OverlaySpec {
+            align: StackAlign::TopRight,
+            ..OverlaySpec::default()
+        },
+    )
+    .visual(VisualConcern {
+        draw_order: tela_contract::DrawOrder::inner_top(),
+        ..VisualConcern::default()
+    })
+    .into();
     let tree = UiTree::new(
-        LayoutContainer::stack([overlay_first.into(), rect(100.0, 50.0), rect(30.0, 80.0)]).layout(
+        LayoutContainer::stack([overlay_first, rect(100.0, 50.0), rect(30.0, 80.0)]).layout(
             LayoutConcern {
                 width: Some(Size::fixed(200.0)),
                 height: Some(Size::fixed(120.0)),

@@ -24,7 +24,7 @@ struct EmitContext<'a> {
     /// 节点地址 → 构建期分配的稳定 id/key。绘制顺序可以按 `draw_order` 改变，
     /// 因此不能用 emit 次数与 DFS 序号关联。
     node_meta: HashMap<usize, (NodeId, SemanticKey)>,
-    /// Teleport 提升队列：主遍历后按队列渲染（全局顶层，见 006-4.4）。
+    /// Teleport 提升队列：主遍历后按队列渲染（全局顶层，见 008-3）。
     pending_teleports: Vec<TeleportEntry>,
     focus_key: Option<&'a SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
@@ -146,6 +146,7 @@ pub(crate) fn resolve_tree_dirty_with_focus(
         .as_ref()
         .map(|i| i.update_mode)
         .unwrap_or(tela_contract::UpdateMode::Full);
+    engine.reset_measure_audit();
     let root_box = measure_dirty(
         &tree.root,
         root_constraints,
@@ -191,7 +192,7 @@ fn emit_frame_tree(
         focus_appearance,
     };
     emit_frame(&tree.root, root_box, &mut ctx, (0.0, 0.0), None, false);
-    // Teleport 提升：主遍历后按队列渲染（顶层，见 006-4.4）。
+    // Teleport 提升：主遍历后按队列渲染（顶层，见 008-3）。
     let teleports = std::mem::take(&mut ctx.pending_teleports);
     for entry in teleports {
         emit_frame_teleport(&tree.root, entry, &mut ctx);
@@ -307,7 +308,7 @@ fn emit_frame(
     };
 
     // 子节点绘制序：同一父容器内按 draw_order 局部排序（分组 → 组内权重升序 → 树序兜底），
-    // 绘制与命中序列一致（见 006-布局引擎 4.5）；逻辑容器不做局部排序（其子节点属于外层绘制序列）。
+    // 绘制与命中序列一致（见 006-布局引擎 4）；逻辑容器不做局部排序（其子节点属于外层绘制序列）。
     let mut order: Vec<usize> = (0..node.children.len()).collect();
     if node.kind.is_layout_container() {
         order.sort_by_key(|&i| draw_order_key(&node.children[i]));

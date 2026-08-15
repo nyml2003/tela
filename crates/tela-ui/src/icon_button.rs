@@ -149,10 +149,10 @@ mod tests {
             })
             .into_node();
 
-        assert_eq!(node.kind, NodeKind::Flex);
+        assert_eq!(node.kind, NodeKind::Row);
         assert!(node.interact.is_some());
-        assert_eq!(node.children.len(), 1);
-        let inline = &node.children[0];
+        assert_eq!(node.children.len(), 3);
+        let inline = &node.children[1];
         assert_eq!(
             inline.layout.as_ref().map(|layout| layout.cross_align),
             Some(CrossAlign::Center)

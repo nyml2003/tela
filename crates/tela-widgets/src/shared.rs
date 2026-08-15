@@ -45,7 +45,7 @@ pub(crate) fn field_box(
     focused: bool,
 ) -> LayoutContainer {
     let border = if focused { BORDER_HOVER } else { BORDER };
-    LayoutContainer::flex(children)
+    LayoutContainer::row(children)
         .visual(VisualConcern {
             fill: Some(Fill::Solid(if disabled { DISABLED_BG } else { FIELD_BG })),
             border_color: Some(border),

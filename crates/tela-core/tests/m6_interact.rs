@@ -61,7 +61,7 @@ fn focusable_rect(width: f32, height: f32, tab_index: i16) -> tela_contract::UiN
 
 /// 可聚焦"组件"（容器承载 key + interact，组件语义见 003-2）。
 fn focusable_item(key: &str, width: f32, height: f32) -> tela_contract::UiNode {
-    LayoutContainer::flex([rect(width, height)])
+    LayoutContainer::row([rect(width, height)])
         .identity(tela_contract::IdentityConcern {
             semantic_key: Some(SemanticKey(key.to_string())),
             ..tela_contract::IdentityConcern::default()
@@ -118,8 +118,8 @@ impl<T: Into<tela_contract::UiNode>> IntoNode for T {}
 
 #[test]
 fn pointer_down_hits_clickable_and_focusable() {
-    // Flex row 排布避免叠放（Group 为叠放容器）。
-    let tree = UiTree::new(LayoutContainer::flex([
+    // Row 排布避免叠放（Group 为叠放容器）。
+    let tree = UiTree::new(LayoutContainer::row([
         clickable_rect(50.0, 20.0),
         focusable_rect(60.0, 20.0, 0),
     ]))
@@ -155,7 +155,7 @@ fn pointer_down_hits_clickable_and_focusable() {
 #[test]
 fn hit_test_respects_clip() {
     // 裁剪区域外的点不命中（滚动/裁剪容器）。
-    let mut clip_node = tela_contract::UiNode::new(tela_contract::NodeKind::Flex);
+    let mut clip_node = tela_contract::UiNode::new(tela_contract::NodeKind::Row);
     clip_node.layout = Some(LayoutConcern {
         width: Some(Size::fixed(50.0)),
         height: Some(Size::fixed(50.0)),
@@ -183,7 +183,7 @@ fn hit_test_respects_clip() {
 
 #[test]
 fn scroll_bubbles_from_child_button_to_virtual_list() {
-    let child = LayoutContainer::flex([clickable_rect(80.0, 24.0)])
+    let child = LayoutContainer::row([clickable_rect(80.0, 24.0)])
         .identity(IdentityConcern {
             key_strategy: KeyStrategy::SemanticId,
             semantic_key: Some(SemanticKey("row-0".to_owned())),
@@ -642,7 +642,7 @@ fn teleport_focus_chain_mounts_to_modal_host_scope() {
 
 #[test]
 fn draw_order_does_not_change_tab_order() {
-    // DrawOrder 只改绘制层级，不改 Tab 遍历（见 006-4.5、008-2.10）。
+    // DrawOrder 只改绘制层级，不改 Tab 遍历（见 006-4、008-2.10）。
     let top = focusable_item("top", 50.0, 20.0);
     let bottom = focusable_item("bottom", 50.0, 20.0);
     // 第二个节点 draw_order = InnerTop（视觉上层），但 Tab 序仍为树序。
@@ -748,7 +748,7 @@ fn parent_graph_may_target_child_scope_itself() {
 
 #[test]
 fn hover_emits_enter_and_leave() {
-    let tree = UiTree::new(LayoutContainer::flex([
+    let tree = UiTree::new(LayoutContainer::row([
         hoverable_rect(50.0, 20.0),
         hoverable_rect(50.0, 20.0),
     ]))
@@ -816,7 +816,7 @@ fn hoverable_rect(width: f32, height: f32) -> tela_contract::UiNode {
 
 #[test]
 fn teleport_renders_on_top_layer() {
-    // Teleport 子树绘制在普通内容之后（提升至顶层，见 006-4.4）。
+    // Teleport 子树绘制在普通内容之后（提升至顶层，见 008-3）。
     let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {
         source: tela_contract::TeleportSource::Node(tela_contract::NodeId(0)),
     })

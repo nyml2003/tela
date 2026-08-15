@@ -39,7 +39,7 @@ impl InlineSlot {
             InlineSlotContent::Node(node) => node,
             InlineSlotContent::Icon(icon) => {
                 let metrics = icon.metrics();
-                // Flex CrossAlign::Center adds exactly this box-origin delta before each
+                // Row CrossAlign::Center adds exactly this box-origin delta before each
                 // child draws. Convert the text-local ink center into icon-local space.
                 let target_ink_center_y =
                     text_ink_center_y + (metrics.box_size - text_line_height) * 0.5;
@@ -71,7 +71,7 @@ impl From<IconVisual> for InlineSlot {
 
 /// 单行正文分子组件，可选组合前缀和后缀。
 ///
-/// 无前后缀时直接降级为一个 core Text primitive；有 slot 时才构造 `Flex` 行，并以视觉中心
+/// 无前后缀时直接降级为一个 core Text primitive；有 slot 时才构造 `Row`，并以视觉中心
 /// 对齐。多行、富文本或需要独立折行策略的场景应继续直接使用 core 文本原语和普通布局。
 pub struct Text {
     value: String,
@@ -173,7 +173,7 @@ impl Text {
 }
 
 fn inline_row(children: Vec<UiNode>, gap: f32) -> UiNode {
-    LayoutContainer::flex(children)
+    LayoutContainer::row(children)
         .layout(LayoutConcern {
             gap,
             cross_align: tela_contract::CrossAlign::Center,
@@ -222,7 +222,7 @@ mod tests {
             .gap(8.0)
             .into_node();
 
-        assert_eq!(node.kind, NodeKind::Flex);
+        assert_eq!(node.kind, NodeKind::Row);
         assert_eq!(
             node.layout.as_ref().map(|layout| layout.cross_align),
             Some(CrossAlign::Center)
@@ -241,7 +241,7 @@ mod tests {
             .prefix(Icon::new(IconName::Folder).size(20.0).into_visual())
             .into_node();
 
-        assert_eq!(node.kind, NodeKind::Flex);
+        assert_eq!(node.kind, NodeKind::Row);
         assert!(
             matches!(node.children[0].content, Some(ContentConcern::Text(ref text))
             if text.font == FontRef(tela_fonts::ICON_FONT_NAME.to_owned()))

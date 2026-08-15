@@ -107,7 +107,7 @@ pub enum UiAction {
         /// 模态节点。
         node_id: NodeId,
     },
-    /// 命中 portal 外部区域（关闭逻辑由宿主业务实现，见 006-布局引擎 4.4）。
+    /// 命中 portal 外部区域（关闭逻辑由宿主业务实现，见 008-交互焦点与宿主接口 3）。
     TeleportClickOutside {
         /// Teleport 节点。
         teleport_node_id: NodeId,

@@ -1,6 +1,6 @@
 //! 布局维度：尺寸模型、约束、布局结果、视口、滚动状态与容器排版枚举（见 006-布局引擎）。
 
-/// 尺寸定义：原生基准 / 带约束包装，二选一（见 006-布局引擎 3）。
+/// 尺寸定义：原生基准 / 带约束包装，二选一（见 006-布局引擎 5）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Size {
     /// 原生基准尺寸。
@@ -22,10 +22,6 @@ impl Size {
     pub fn auto() -> Self {
         Self::Raw(BaseSize::Auto)
     }
-    /// 填充剩余空间（主轴/交叉轴上的伸展）。
-    pub fn fill() -> Self {
-        Self::Raw(BaseSize::Fill)
-    }
     /// 带上下限钳制。
     pub fn constrained(min: Option<f32>, max: Option<f32>) -> Self {
         Self::Constrained(MinMax {
@@ -45,8 +41,6 @@ pub enum BaseSize {
     Percent(f32),
     /// 由内容推导（文本、图片、子节点）。
     Auto,
-    /// 填充剩余空间（主轴/交叉轴上的伸展）。
-    Fill,
 }
 
 /// 带上下限钳制的修饰包装器（非独立尺寸模式）。
@@ -108,7 +102,7 @@ pub struct LayoutBox {
     /// 首个可用文本基线相对本盒上边缘的位置。
     ///
     /// 文本叶子写入真实度量；容器可向上传播首个子孙基线。`None` 的项目在
-    /// `CrossAlign::Baseline` 中按交叉轴末端参与对齐。
+    /// `BaselineRow` 中按交叉轴末端参与对齐。
     pub first_baseline: Option<f32>,
     /// 子盒子树。
     pub children: Vec<LayoutBox>,
@@ -154,31 +148,7 @@ impl Default for ScrollState {
     }
 }
 
-/// Flex 主轴方向。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlexDirection {
-    /// 水平主轴。
-    Row,
-    /// 垂直主轴。
-    Column,
-}
-
-/// Flex 主轴对齐。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MainAlign {
-    /// 起点。
-    Start,
-    /// 居中。
-    Center,
-    /// 终点。
-    End,
-    /// 两端对齐，剩余空间均分在项目之间。
-    SpaceBetween,
-    /// 四周对齐，剩余空间均分在项目周围。
-    SpaceAround,
-}
-
-/// Flex 交叉轴对齐。
+/// Row/Column 的交叉轴对齐。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrossAlign {
     /// 起点。
@@ -187,10 +157,6 @@ pub enum CrossAlign {
     Center,
     /// 终点。
     End,
-    /// 按首行文本基线对齐；仅横向 Flex 行生效。
-    Baseline,
-    /// 拉伸填满交叉轴。
-    Stretch,
 }
 
 /// 内容溢出控制（见 006-布局引擎 5）。
@@ -204,16 +170,7 @@ pub enum Overflow {
     Scroll,
 }
 
-/// Stack 子节点层级：Content（基底层，参与尺寸推导）/ FillOverlay（浮层，不参与尺寸）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StackLayer {
-    /// 基底层：参与 Stack 尺寸推导。
-    Content,
-    /// 浮层：不参与尺寸推导，仅按对齐规则与边角偏移在已确定的 Stack 盒内摆放。
-    FillOverlay,
-}
-
-/// Stack `FillOverlay` 浮层的对齐规则（见 006-布局引擎 4.2）。
+/// Stack `Overlay` 浮层的对齐规则（见 006-布局引擎 4）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StackAlign {
     /// 左上。

@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    Color, Fill, IdentityConcern, LayoutConcern, TextContent, TextMeasureRequest, TextMeasurer,
-    TextMetrics, UiNode, UpdateMode, Viewport, VisualConcern,
+    Color, Fill, IdentityConcern, LayoutConcern, OverlaySpec, TextContent, TextMeasureRequest,
+    TextMeasurer, TextMetrics, UiNode, UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, Primitive};
 use tela_core::{LayoutCache, UiTree};
@@ -58,13 +58,12 @@ use tela_contract::Size;
 
 /// 带更新策略的容器（组件语义：容器组合，不读写策略本身）。
 fn dirty_scope(children: Vec<UiNode>) -> UiNode {
-    LayoutContainer::flex(children)
+    LayoutContainer::column(children)
         .identity(IdentityConcern {
             update_mode: UpdateMode::Dirty,
             ..IdentityConcern::default()
         })
         .layout(LayoutConcern {
-            direction: tela_contract::FlexDirection::Column,
             gap: 4.0,
             ..LayoutConcern::default()
         })
@@ -73,13 +72,12 @@ fn dirty_scope(children: Vec<UiNode>) -> UiNode {
 
 /// 显式声明 Full 的容器（子容器覆盖父级 Dirty 默认，见 004-1）。
 fn full_scope(children: Vec<UiNode>) -> UiNode {
-    LayoutContainer::flex(children)
+    LayoutContainer::column(children)
         .identity(IdentityConcern {
             update_mode: UpdateMode::Full,
             ..IdentityConcern::default()
         })
         .layout(LayoutConcern {
-            direction: tela_contract::FlexDirection::Column,
             gap: 4.0,
             ..LayoutConcern::default()
         })
@@ -179,13 +177,12 @@ fn dirty_cache_invalidates_on_layout_field_change() {
     let frame1 = resolve_dirty(&tree, &mut cache);
     // 只改容器 padding。
     tree = UiTree::new(
-        LayoutContainer::flex([text("A"), text("B")])
+        LayoutContainer::column([text("A"), text("B")])
             .identity(IdentityConcern {
                 update_mode: UpdateMode::Dirty,
                 ..IdentityConcern::default()
             })
             .layout(LayoutConcern {
-                direction: tela_contract::FlexDirection::Column,
                 gap: 4.0,
                 padding: tela_contract::Insets::all(12.0),
                 ..LayoutConcern::default()
@@ -194,4 +191,66 @@ fn dirty_cache_invalidates_on_layout_field_change() {
     .unwrap();
     let frame2 = resolve_dirty(&tree, &mut cache);
     assert_ne!(frame1, frame2, "padding 变更必须使缓存作废");
+}
+
+#[test]
+fn dirty_cache_keeps_expanded_and_overlay_descendant_paths_distinct() {
+    fn dirty_row(expanded_width: f32) -> UiTree {
+        UiTree::new(
+            LayoutContainer::row([
+                rect(20.0, 10.0),
+                LayoutContainer::expanded(rect(expanded_width, 10.0)).into(),
+            ])
+            .identity(IdentityConcern {
+                update_mode: UpdateMode::Dirty,
+                ..IdentityConcern::default()
+            })
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(100.0)),
+                ..LayoutConcern::default()
+            }),
+        )
+        .unwrap()
+    }
+
+    fn dirty_stack(overlay_width: f32) -> UiTree {
+        UiTree::new(
+            LayoutContainer::stack([
+                rect(100.0, 20.0),
+                LayoutContainer::overlay(rect(overlay_width, 10.0), OverlaySpec::default()).into(),
+            ])
+            .identity(IdentityConcern {
+                update_mode: UpdateMode::Dirty,
+                ..IdentityConcern::default()
+            })
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(100.0)),
+                height: Some(Size::fixed(20.0)),
+                ..LayoutConcern::default()
+            }),
+        )
+        .unwrap()
+    }
+
+    // Expanded 与 Overlay 是由父原语分阶段调度的包装器；其内部 child 必须保留
+    // "父 / 包装器 / child" 路径，不能和父的第 0 个普通 child 共用缓存槽。
+    let mut row_cache = LayoutCache::new();
+    let _ = resolve_dirty(&dirty_row(10.0), &mut row_cache);
+    let row_warm = row_cache.measure_count();
+    let _ = resolve_dirty(&dirty_row(12.0), &mut row_cache);
+    assert_eq!(
+        row_cache.measure_count() - row_warm,
+        2,
+        "Row 本身和变更的 Expanded 内容重算，固定普通 sibling 必须命中缓存"
+    );
+
+    let mut stack_cache = LayoutCache::new();
+    let _ = resolve_dirty(&dirty_stack(10.0), &mut stack_cache);
+    let stack_warm = stack_cache.measure_count();
+    let _ = resolve_dirty(&dirty_stack(12.0), &mut stack_cache);
+    assert_eq!(
+        stack_cache.measure_count() - stack_warm,
+        2,
+        "Stack 本身和变更的 Overlay 内容重算，普通 Content 必须命中缓存"
+    );
 }

@@ -103,7 +103,7 @@ impl Default for BorderRadius {
     }
 }
 
-/// 不改变布局尺寸的微小视觉位移（纯外观，见 006-布局引擎 4.1）。
+/// 不改变布局尺寸的微小视觉位移（纯外观，见 007-绘制与渲染后端 4.4）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PixelOffset {
     /// 水平位移。

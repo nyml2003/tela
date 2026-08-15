@@ -1,6 +1,6 @@
 //! `Select` / `Cascader` 组件（AntD 简化）：下拉选择与级联选择。
 
-use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, UiNode};
+use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, OverlaySpec, UiNode};
 use tela_core::LayoutContainer;
 
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
@@ -99,6 +99,7 @@ impl Select {
         let trigger: UiNode = field_box(
             vec![
                 text(&current, 13.0, shown_color),
+                LayoutContainer::spacer().into(),
                 text("▾", 12.0, Color::rgba(0.5, 0.52, 0.58, 1.0)),
             ],
             180.0,
@@ -109,7 +110,6 @@ impl Select {
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(180.0)),
             height: Some(tela_contract::Size::fixed(28.0)),
-            main_align: tela_contract::MainAlign::SpaceBetween,
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
@@ -127,19 +127,18 @@ impl Select {
                     } else {
                         Color::WHITE
                     };
-                    let mut node: UiNode =
-                        LayoutContainer::flex(vec![text(&option.label, 13.0, TEXT)])
-                            .visual(tela_contract::VisualConcern {
-                                fill: Some(tela_contract::Fill::Solid(bg)),
-                                ..tela_contract::VisualConcern::default()
-                            })
-                            .layout(LayoutConcern {
-                                width: Some(tela_contract::Size::fixed(180.0)),
-                                height: Some(tela_contract::Size::fixed(28.0)),
-                                cross_align: tela_contract::CrossAlign::Center,
-                                ..LayoutConcern::default()
-                            })
-                            .into();
+                    let mut node: UiNode = LayoutContainer::row([text(&option.label, 13.0, TEXT)])
+                        .visual(tela_contract::VisualConcern {
+                            fill: Some(tela_contract::Fill::Solid(bg)),
+                            ..tela_contract::VisualConcern::default()
+                        })
+                        .layout(LayoutConcern {
+                            width: Some(tela_contract::Size::fixed(180.0)),
+                            height: Some(tela_contract::Size::fixed(28.0)),
+                            cross_align: tela_contract::CrossAlign::Center,
+                            ..LayoutConcern::default()
+                        })
+                        .into();
                     if !self.disabled {
                         node.interact = Some(InteractConcern {
                             clickable: true,
@@ -151,7 +150,7 @@ impl Select {
                     node
                 })
                 .collect();
-            let popup = LayoutContainer::stack(option_nodes)
+            let popup: UiNode = LayoutContainer::column(option_nodes)
                 .visual(tela_contract::VisualConcern {
                     fill: Some(tela_contract::Fill::Solid(Color::WHITE)),
                     border_color: Some(tela_contract::Color::rgba(0.82, 0.84, 0.88, 1.0)),
@@ -160,13 +159,20 @@ impl Select {
                 })
                 .layout(LayoutConcern {
                     width: Some(tela_contract::Size::fixed(180.0)),
-                    stack_layer: tela_contract::StackLayer::FillOverlay,
-                    stack_align: Some(tela_contract::StackAlign::TopLeft),
-                    stack_offset: tela_contract::PixelOffset { x: 0.0, y: 30.0 },
                     ..LayoutConcern::default()
                 })
                 .into();
-            children.push(popup);
+            children.push(
+                LayoutContainer::overlay(
+                    popup,
+                    OverlaySpec {
+                        align: tela_contract::StackAlign::TopLeft,
+                        offset: tela_contract::PixelOffset { x: 0.0, y: 30.0 },
+                        ..OverlaySpec::default()
+                    },
+                )
+                .into(),
+            );
         }
         let mut node: UiNode = LayoutContainer::stack(children)
             .layout(LayoutConcern {
@@ -290,6 +296,7 @@ impl Cascader {
                         TEXT
                     },
                 ),
+                LayoutContainer::spacer().into(),
                 text("▾", 12.0, Color::rgba(0.5, 0.52, 0.58, 1.0)),
             ],
             180.0,
@@ -300,7 +307,6 @@ impl Cascader {
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(180.0)),
             height: Some(tela_contract::Size::fixed(28.0)),
-            main_align: tela_contract::MainAlign::SpaceBetween,
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
@@ -326,7 +332,7 @@ impl Cascader {
                     let options: Vec<UiNode> = column
                         .iter()
                         .map(|option| {
-                            LayoutContainer::flex(vec![text(&option.label, 13.0, TEXT)])
+                            LayoutContainer::row([text(&option.label, 13.0, TEXT)])
                                 .layout(LayoutConcern {
                                     width: Some(tela_contract::Size::fixed(120.0)),
                                     height: Some(tela_contract::Size::fixed(26.0)),
@@ -336,16 +342,15 @@ impl Cascader {
                                 .into()
                         })
                         .collect();
-                    LayoutContainer::flex(options)
+                    LayoutContainer::column(options)
                         .layout(LayoutConcern {
-                            direction: tela_contract::FlexDirection::Column,
                             width: Some(tela_contract::Size::fixed(120.0)),
                             ..LayoutConcern::default()
                         })
                         .into()
                 })
                 .collect();
-            let panel = LayoutContainer::flex(column_nodes)
+            let panel: UiNode = LayoutContainer::row(column_nodes)
                 .visual(tela_contract::VisualConcern {
                     fill: Some(tela_contract::Fill::Solid(Color::WHITE)),
                     border_color: Some(tela_contract::Color::rgba(0.82, 0.84, 0.88, 1.0)),
@@ -353,13 +358,20 @@ impl Cascader {
                     ..tela_contract::VisualConcern::default()
                 })
                 .layout(LayoutConcern {
-                    stack_layer: tela_contract::StackLayer::FillOverlay,
-                    stack_align: Some(tela_contract::StackAlign::TopLeft),
-                    stack_offset: tela_contract::PixelOffset { x: 0.0, y: 30.0 },
                     ..LayoutConcern::default()
                 })
                 .into();
-            children.push(panel);
+            children.push(
+                LayoutContainer::overlay(
+                    panel,
+                    OverlaySpec {
+                        align: tela_contract::StackAlign::TopLeft,
+                        offset: tela_contract::PixelOffset { x: 0.0, y: 30.0 },
+                        ..OverlaySpec::default()
+                    },
+                )
+                .into(),
+            );
         }
         let mut node: UiNode = LayoutContainer::stack(children)
             .layout(LayoutConcern {

@@ -26,7 +26,7 @@ pub use local_state::{
     DraftInputEvent, DraftInputOutcome, DraftInputSnapshot, InstancePath, LocalStateRuntime,
 };
 pub use select::{CascadeOption, Cascader, OptionItem, Select};
-pub use table::{Table, Td, Tr};
+pub use table::{CellAlign, Table, Td, Tr};
 pub use text::{InlineSlot, Text};
 pub use toolbar::{Toolbar, ToolbarItem, ToolbarOverflow, ToolbarStyle};
 pub use virtual_window::VirtualWindow;

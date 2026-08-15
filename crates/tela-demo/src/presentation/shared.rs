@@ -42,7 +42,7 @@ pub fn text(value: &str, size: f32, color: Color) -> UiNode {
 }
 
 pub fn fixed(node: UiNode, width: f32, height: f32) -> UiNode {
-    LayoutContainer::flex([node])
+    LayoutContainer::frame(node)
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
             height: Some(Size::fixed(height)),
@@ -52,13 +52,7 @@ pub fn fixed(node: UiNode, width: f32, height: f32) -> UiNode {
 }
 
 pub fn spacer() -> UiNode {
-    Primitive::rect()
-        .layout(LayoutConcern {
-            width: Some(Size::fill()),
-            height: Some(Size::fixed(1.0)),
-            ..LayoutConcern::default()
-        })
-        .into()
+    LayoutContainer::spacer().into()
 }
 
 pub fn command_button(

@@ -42,12 +42,12 @@ pub use interaction::{
     PointerEvent, RawKeyboardEvent, ShortcutId, UiAction, Value,
 };
 pub use layout::{
-    BaseSize, Constraints, CrossAlign, FlexDirection, LayoutBox, MainAlign, MinMax, Overflow,
-    ScrollState, Size, StackAlign, StackLayer, Viewport,
+    BaseSize, Constraints, CrossAlign, LayoutBox, MinMax, Overflow, ScrollState, Size, StackAlign,
+    Viewport,
 };
 pub use node::{
     ContentConcern, DrawOrder, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec,
-    ImageContent, InteractConcern, LayoutConcern, NinePatchContent, NodeId, NodeKind,
+    ImageContent, InteractConcern, LayoutConcern, NinePatchContent, NodeId, NodeKind, OverlaySpec,
     ShortcutScopeSpec, TeleportSource, TeleportSpec, TextContent, UiNode, VirtualListSpec,
     VisualConcern,
 };
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn ui_node_is_value_semantics() {
-        let a = UiNode::new(NodeKind::Flex).with_children([UiNode::new(NodeKind::Rect)]);
+        let a = UiNode::new(NodeKind::Row).with_children([UiNode::new(NodeKind::Rect)]);
         let b = a.clone();
         assert_eq!(a, b);
     }

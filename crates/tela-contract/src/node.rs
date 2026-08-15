@@ -17,14 +17,28 @@ pub enum NodeKind {
     FocusScope(FocusScopeSpec),
     /// 逻辑容器：声明应用键位表的作用域 id（映射由应用持有）。
     ShortcutScope(ShortcutScopeSpec),
-    /// 逻辑容器：模态宿主，栈顶子树天然全局最上（见 006-布局引擎 4.1）。
+    /// 逻辑容器：模态宿主，栈顶子树天然全局最上（见 008-交互焦点与宿主接口 3）。
     ModalHost,
-    /// 逻辑容器：portal，子树提升至 ModalHost 顶层队列渲染（见 006-布局引擎 4.4）。
+    /// 逻辑容器：portal，子树提升至 ModalHost 顶层队列渲染（见 008-交互焦点与宿主接口 2.10）。
     Teleport(TeleportSpec),
-    /// 布局容器：弹性 Flex（含 wrap 换行开关）。
-    Flex,
-    /// 布局容器：同盒堆叠，Content / FillOverlay 语法分层（见 006-布局引擎 4.2）。
+    /// 布局容器：单行水平排列。
+    Row,
+    /// 布局容器：单列垂直排列。
+    Column,
+    /// 布局容器：水平自然尺寸换行；不参与剩余空间分配。
+    Wrap,
+    /// 布局容器：单子节点盒，负责显式尺寸与盒模型边界。
+    Frame,
+    /// 布局包装器：在 Row/Column 已知主轴时分配剩余空间。
+    Expanded,
+    /// 布局原语：在 Row/Column 已知主轴时消费一份剩余空间。
+    Spacer,
+    /// 布局容器：水平行，按文本首行基线摆放子项。
+    BaselineRow,
+    /// 布局容器：同盒堆叠；普通子项参与尺寸推导，Overlay 子项不参与。
     Stack,
+    /// Stack 专用包装器：延后到 Stack 最终内容区确定后测量并摆放。
+    Overlay(OverlaySpec),
     /// 布局容器：滚动视口，偏移由外部 `scroll_inputs` 注入。
     ScrollView,
     /// 布局容器：虚拟列表，仅渲染可视区域，item 必须显式 `semantic-id`。
@@ -63,7 +77,17 @@ impl NodeKind {
     pub fn is_layout_container(&self) -> bool {
         matches!(
             self,
-            NodeKind::Flex | NodeKind::Stack | NodeKind::ScrollView | NodeKind::VirtualListView(_)
+            NodeKind::Row
+                | NodeKind::Column
+                | NodeKind::Wrap
+                | NodeKind::Frame
+                | NodeKind::Expanded
+                | NodeKind::Spacer
+                | NodeKind::BaselineRow
+                | NodeKind::Stack
+                | NodeKind::Overlay(_)
+                | NodeKind::ScrollView
+                | NodeKind::VirtualListView(_)
         )
     }
 
@@ -79,6 +103,33 @@ impl NodeKind {
                 | NodeKind::NinePatch
                 | NodeKind::Polygon
         )
+    }
+}
+
+/// Stack Overlay 的对齐与填充声明。
+///
+/// Overlay 只在父 Stack 的最终内容区确定后才开始测量，因此填充始终基于确定的可用区，
+/// 不会触发回溯测量。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlaySpec {
+    /// Overlay 在 Stack 内容区内的锚点。
+    pub align: crate::StackAlign,
+    /// 相对锚点的逻辑像素偏移。
+    pub offset: PixelOffset,
+    /// 是否占满最终内容区宽度。
+    pub fill_width: bool,
+    /// 是否占满最终内容区高度。
+    pub fill_height: bool,
+}
+
+impl Default for OverlaySpec {
+    fn default() -> Self {
+        Self {
+            align: crate::StackAlign::TopLeft,
+            offset: PixelOffset::default(),
+            fill_width: false,
+            fill_height: false,
+        }
     }
 }
 
@@ -179,7 +230,7 @@ impl Default for ShortcutScopeSpec {
     }
 }
 
-/// Teleport source 锚点（见 006-布局引擎 4.4）。
+/// Teleport source 锚点（见 008-交互焦点与宿主接口 2.10）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TeleportSource {
     /// 绑定自身内部源锚点节点。
@@ -218,7 +269,7 @@ pub struct VirtualListSpec {
 pub struct UiNode {
     /// 节点类别：解释哪些维度、对后代产生什么影响。
     pub kind: NodeKind,
-    /// 布局维度：尺寸/边距/对齐/flex/溢出/滚动。
+    /// 布局维度：尺寸、盒模型、交叉轴对齐、裁剪与溢出。
     pub layout: Option<LayoutConcern>,
     /// 视觉维度：填充/圆角/边框色/阴影/裁剪/九宫格/局部绘制序。
     pub visual: Option<VisualConcern>,
@@ -283,7 +334,10 @@ impl UiNode {
     }
 }
 
-/// `LayoutConcern` 槽位：尺寸、盒模型、容器排版、裁剪与溢出、Stack 分层（见 003-3、006-3/4/5）。
+/// `LayoutConcern` 槽位：尺寸、盒模型、有限的线性容器对齐、裁剪与溢出。
+///
+/// 排版模式由 `NodeKind` 决定。这里不再含方向、换行、主轴分布或 Stack 分层开关，
+/// 避免一个字段组合表达多个互斥布局算法。
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutConcern {
     /// 宽度定义，`None` = 未声明。
@@ -296,26 +350,14 @@ pub struct LayoutConcern {
     pub padding: crate::Insets,
     /// 边框宽度：仅支持 `border-box`，计入 `width` / `height`（颜色部分归 `visual`）。
     pub border_width: f32,
-    /// Flex 主轴方向。
-    pub direction: crate::FlexDirection,
-    /// Flex 换行开关：`wrap=false` 单行全局 Fill；`wrap=true` 自动换行、Fill 仅单行内部。
-    pub wrap: bool,
     /// 容器子节点间距。
     pub gap: f32,
-    /// 主轴对齐。
-    pub main_align: crate::MainAlign,
-    /// 交叉轴对齐。
+    /// Row/Column 的交叉轴对齐。其他节点必须保持默认值。
     pub cross_align: crate::CrossAlign,
     /// 裁剪容器开关（滚动/裁剪容器，命令级预合并 clip rect 表达）。
     pub clip: bool,
     /// 内容溢出控制。
     pub overflow: crate::Overflow,
-    /// Stack 子节点层级：`Content` / `FillOverlay`（仅 Stack 内合法）。
-    pub stack_layer: crate::StackLayer,
-    /// Stack `FillOverlay` 对齐规则。
-    pub stack_align: Option<crate::StackAlign>,
-    /// Stack `FillOverlay` 边角偏移。
-    pub stack_offset: PixelOffset,
 }
 
 impl Default for LayoutConcern {
@@ -326,16 +368,10 @@ impl Default for LayoutConcern {
             margin: Insets::default(),
             padding: Insets::default(),
             border_width: 0.0,
-            direction: crate::FlexDirection::Row,
-            wrap: false,
             gap: 0.0,
-            main_align: crate::MainAlign::Start,
             cross_align: crate::CrossAlign::Start,
             clip: false,
             overflow: crate::Overflow::Visible,
-            stack_layer: crate::StackLayer::Content,
-            stack_align: None,
-            stack_offset: PixelOffset::default(),
         }
     }
 }
@@ -351,7 +387,7 @@ pub struct VisualConcern {
     pub border_radius: BorderRadius,
     /// 阴影（外阴影/内阴影）。
     pub shadow: Option<ShadowSpec>,
-    /// 局部绘制序：仅控制当前直接父布局容器内的绘制与命中顺序（见 006-布局引擎 4.5）。
+    /// 局部绘制序：仅控制当前直接父布局容器内的绘制与命中顺序（见 006-布局引擎 4）。
     pub draw_order: DrawOrder,
     /// 不改变布局尺寸的微小视觉位移。
     pub visual_offset: PixelOffset,
@@ -370,7 +406,7 @@ impl Default for VisualConcern {
     }
 }
 
-/// 局部 DrawOrder：同父容器内分组 + 组内权重升序 + 树序兜底（见 006-布局引擎 4.5）。
+/// 局部 DrawOrder：同父容器内分组 + 组内权重升序 + 树序兜底（见 006-布局引擎 4）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawOrder {
     /// 底层绘制组，默认权重 0。

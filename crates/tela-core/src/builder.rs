@@ -7,8 +7,8 @@
 
 use tela_contract::{
     ContentConcern, FocusScopeSpec, IdentityConcern, ImageContent, InteractConcern, LayoutConcern,
-    NinePatchContent, NodeKind, Point, ShortcutScopeSpec, TeleportSpec, TextContent, UiNode,
-    VirtualListSpec, VisualConcern,
+    NinePatchContent, NodeKind, OverlaySpec, Point, ShortcutScopeSpec, TeleportSpec, TextContent,
+    UiNode, VirtualListSpec, VisualConcern,
 };
 
 /// 逻辑容器构建器：零几何、透明，影响后代。
@@ -95,22 +95,69 @@ pub struct LayoutContainer {
 }
 
 impl LayoutContainer {
-    /// 弹性 Flex 容器（wrap 开关在 `LayoutConcern`）。
-    pub fn flex<C>(children: C) -> Self
+    /// 单行水平容器。
+    pub fn row<C>(children: C) -> Self
     where
         C: IntoIterator,
         C::Item: Into<UiNode>,
     {
-        Self::with_children(NodeKind::Flex, children)
+        Self::with_children(NodeKind::Row, children)
     }
 
-    /// Stack 同盒堆叠容器（Content/FillOverlay 分层在 `LayoutConcern.stack_layer`）。
+    /// 单列垂直容器。
+    pub fn column<C>(children: C) -> Self
+    where
+        C: IntoIterator,
+        C::Item: Into<UiNode>,
+    {
+        Self::with_children(NodeKind::Column, children)
+    }
+
+    /// 水平自然尺寸换行容器。
+    pub fn wrap<C>(children: C) -> Self
+    where
+        C: IntoIterator,
+        C::Item: Into<UiNode>,
+    {
+        Self::with_children(NodeKind::Wrap, children)
+    }
+
+    /// 单子节点尺寸边界容器。
+    pub fn frame(child: impl Into<UiNode>) -> Self {
+        Self::with_children(NodeKind::Frame, [child.into()])
+    }
+
+    /// 主轴剩余空间包装器。
+    pub fn expanded(child: impl Into<UiNode>) -> Self {
+        Self::with_children(NodeKind::Expanded, [child.into()])
+    }
+
+    /// 主轴弹性空白。
+    pub fn spacer() -> Self {
+        Self::with_children(NodeKind::Spacer, std::iter::empty::<UiNode>())
+    }
+
+    /// 首行基线对齐的水平容器。
+    pub fn baseline_row<C>(children: C) -> Self
+    where
+        C: IntoIterator,
+        C::Item: Into<UiNode>,
+    {
+        Self::with_children(NodeKind::BaselineRow, children)
+    }
+
+    /// Stack 同盒堆叠容器；普通子项参与尺寸推导，`Overlay` 子项在最终内容区上摆放。
     pub fn stack<C>(children: C) -> Self
     where
         C: IntoIterator,
         C::Item: Into<UiNode>,
     {
         Self::with_children(NodeKind::Stack, children)
+    }
+
+    /// Stack 浮层包装器。
+    pub fn overlay(child: impl Into<UiNode>, spec: OverlaySpec) -> Self {
+        Self::with_children(NodeKind::Overlay(spec), [child.into()])
     }
 
     /// 滚动视口容器（偏移由外部 `scroll_inputs` 注入）。

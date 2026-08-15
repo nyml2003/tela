@@ -3,7 +3,7 @@
 use tela_contract::{
     Color, Fill, IdentityConcern, Insets, KeyStrategy, LayoutConcern, Size, UiNode, VisualConcern,
 };
-use tela_core::{LayoutContainer, Primitive};
+use tela_core::LayoutContainer;
 use tela_icon::IconName;
 use tela_widgets::{Button, ButtonPalette, ButtonState, ButtonVariant};
 
@@ -309,15 +309,7 @@ impl Toolbar {
             children.insert(0, prefix);
         }
         if let Some(overflow) = self.overflow {
-            children.push(
-                Primitive::rect()
-                    .layout(LayoutConcern {
-                        width: Some(Size::fill()),
-                        height: Some(Size::fixed(1.0)),
-                        ..LayoutConcern::default()
-                    })
-                    .into(),
-            );
+            children.push(LayoutContainer::spacer().into());
             let mut trigger = overflow.trigger();
             trigger.hovered = Some(trigger.target.as_str()) == self.hovered_target.as_deref();
             children.push(trigger.into_node(
@@ -325,13 +317,13 @@ impl Toolbar {
                 self.style.destructive_button_palette,
             ));
         }
-        LayoutContainer::flex(children)
+        LayoutContainer::row(children)
             .identity(IdentityConcern {
                 key_strategy: KeyStrategy::AutoStableIdentity,
                 ..IdentityConcern::default()
             })
             .layout(LayoutConcern {
-                width: Some(Size::fill()),
+                width: Some(Size::percent(1.0)),
                 height: Some(Size::fixed(self.style.height)),
                 gap: self.style.gap,
                 padding: self.style.padding,

@@ -1,10 +1,10 @@
 //! 文件操作 modal：受控输入、确认与取消。
 
 use tela_contract::{
-    BorderRadius, Color, Fill, InteractConcern, KeymapScopeId, LayoutConcern, SemanticKey,
-    ShortcutScopeSpec, Size, StackAlign, StackLayer, UiNode, VisualConcern,
+    BorderRadius, Color, Fill, InteractConcern, KeymapScopeId, LayoutConcern, OverlaySpec,
+    SemanticKey, ShortcutScopeSpec, Size, StackAlign, UiNode, VisualConcern,
 };
-use tela_core::builder::{LayoutContainer, LogicalContainer};
+use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_ui::{DraftInput, DraftInputSnapshot};
 
 use crate::domain::{FileManagerSession, OperationKind};
@@ -21,7 +21,7 @@ pub fn operation_modal(
     height: f32,
 ) -> UiNode {
     let Some(operation) = &session.operation else {
-        return LayoutContainer::flex(Vec::<UiNode>::new()).into();
+        return LayoutContainer::row(Vec::<UiNode>::new()).into();
     };
     let title = match operation.kind {
         OperationKind::NewFolder => "新建文件夹",
@@ -54,15 +54,15 @@ pub fn operation_modal(
         ));
     }
     controls.push(
-        LayoutContainer::flex([
-            LayoutContainer::flex(Vec::<UiNode>::new()).into(),
+        LayoutContainer::row([
+            LayoutContainer::spacer().into(),
             command_button("取消", 64.0, "operation.cancel", false, false),
             command_button("确认", 64.0, "operation.confirm", false, false),
         ])
         .layout(LayoutConcern {
-            width: Some(Size::fill()),
+            width: Some(Size::percent(1.0)),
             gap: 8.0,
-            main_align: tela_contract::MainAlign::End,
+            cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .into(),
@@ -72,11 +72,10 @@ pub fn operation_modal(
     })
     .children(controls)
     .into();
-    let mut panel: UiNode = LayoutContainer::flex([controls])
+    let mut panel: UiNode = LayoutContainer::column([controls])
         .layout(LayoutConcern {
             width: Some(Size::fixed(360.0)),
             height: Some(Size::fixed(if needs_input { 220.0 } else { 180.0 })),
-            direction: tela_contract::FlexDirection::Column,
             padding: tela_contract::Insets::all(22.0),
             gap: 16.0,
             ..LayoutConcern::default()
@@ -91,14 +90,10 @@ pub fn operation_modal(
         semantic_key: Some(SemanticKey(OPERATION_MODAL_KEY.to_owned())),
         ..tela_contract::IdentityConcern::default()
     });
-    let mut backdrop: UiNode = LayoutContainer::flex([panel])
+    let backdrop_surface: UiNode = LayoutContainer::frame(Primitive::rect())
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
             height: Some(Size::fixed(height)),
-            stack_layer: StackLayer::FillOverlay,
-            stack_align: Some(StackAlign::Center),
-            main_align: tela_contract::MainAlign::Center,
-            cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
@@ -106,6 +101,32 @@ pub fn operation_modal(
             ..VisualConcern::default()
         })
         .into();
+    let backdrop: UiNode = LayoutContainer::stack([
+        backdrop_surface,
+        LayoutContainer::overlay(
+            panel,
+            OverlaySpec {
+                align: StackAlign::Center,
+                ..OverlaySpec::default()
+            },
+        )
+        .into(),
+    ])
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(width)),
+        height: Some(Size::fixed(height)),
+        ..LayoutConcern::default()
+    })
+    .into();
+    let mut backdrop: UiNode = LayoutContainer::overlay(
+        backdrop,
+        OverlaySpec {
+            fill_width: true,
+            fill_height: true,
+            ..OverlaySpec::default()
+        },
+    )
+    .into();
     backdrop.interact = Some(InteractConcern {
         modal: true,
         ..InteractConcern::default()

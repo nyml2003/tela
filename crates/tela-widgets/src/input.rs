@@ -164,18 +164,20 @@ impl InputNumber {
         } else {
             format!("{}", self.value)
         };
-        let arrows = LayoutContainer::flex(vec![
+        let arrows = LayoutContainer::column([
             text("▲", 9.0, Color::rgba(0.4, 0.42, 0.48, 1.0)),
             text("▼", 9.0, Color::rgba(0.4, 0.42, 0.48, 1.0)),
         ])
         .layout(LayoutConcern {
-            direction: tela_contract::FlexDirection::Column,
-            main_align: tela_contract::MainAlign::Center,
             ..LayoutConcern::default()
         })
         .into();
         let mut node: UiNode = field_box(
-            vec![text(&value_text, 13.0, TEXT), arrows],
+            vec![
+                text(&value_text, 13.0, TEXT),
+                LayoutContainer::spacer().into(),
+                arrows,
+            ],
             120.0,
             28.0,
             self.disabled,
@@ -184,7 +186,6 @@ impl InputNumber {
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(120.0)),
             height: Some(tela_contract::Size::fixed(28.0)),
-            main_align: tela_contract::MainAlign::SpaceBetween,
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })

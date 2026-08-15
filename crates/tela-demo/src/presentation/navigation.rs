@@ -1,6 +1,6 @@
 //! 目录导航组件。
 
-use tela_contract::{Fill, LayoutConcern, Size, StackAlign, StackLayer, UiNode, VisualConcern};
+use tela_contract::{Fill, LayoutConcern, OverlaySpec, Size, StackAlign, UiNode, VisualConcern};
 use tela_core::builder::LayoutContainer;
 use tela_icon::IconName;
 
@@ -58,7 +58,6 @@ pub fn directory_tree(
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
             height: Some(Size::fixed(height)),
-            direction: tela_contract::FlexDirection::Column,
             gap: 2.0,
             padding: tela_contract::Insets::all(10.0),
             overflow: tela_contract::Overflow::Scroll,
@@ -71,28 +70,27 @@ pub fn directory_tree(
         .into()
 }
 
-/// 窄屏目录抽屉：叠加在工作区上，不参与详情区 flex 宽度计算。
+/// 窄屏目录抽屉：叠加在工作区上，不参与详情区 Row 宽度计算。
 pub fn navigation_overlay(
     model: &FileManagerModel,
     session: &FileManagerSession,
-    width: f32,
+    _width: f32,
     height: f32,
 ) -> UiNode {
     let tree = directory_tree(model, session, height, true);
-    LayoutContainer::flex([tree])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width.min(360.0))),
-            height: Some(Size::fixed(height)),
-            stack_layer: StackLayer::FillOverlay,
-            stack_align: Some(StackAlign::TopLeft),
-            ..LayoutConcern::default()
-        })
-        .into()
+    LayoutContainer::overlay(
+        tree,
+        OverlaySpec {
+            align: StackAlign::TopLeft,
+            ..OverlaySpec::default()
+        },
+    )
+    .into()
 }
 
 fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
     let indent = if entry.parent.is_some() { 12.0 } else { 0.0 };
-    let row: UiNode = LayoutContainer::flex([icon_label(
+    let row: UiNode = LayoutContainer::row([icon_label(
         IconName::Folder,
         &entry.name,
         if selected { PRIMARY } else { FOLDER },
@@ -127,7 +125,7 @@ fn scope_row(label: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
         "filter.trash" => IconName::Trash,
         _ => IconName::Folder,
     };
-    let row: UiNode = LayoutContainer::flex([icon_label(
+    let row: UiNode = LayoutContainer::row([icon_label(
         icon_name,
         label,
         if selected { PRIMARY } else { SECONDARY },

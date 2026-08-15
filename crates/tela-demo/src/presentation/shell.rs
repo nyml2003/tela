@@ -62,7 +62,7 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
         props.detail_scroll_y,
     ));
 
-    let shell: UiNode = LayoutContainer::flex([
+    let shell: UiNode = LayoutContainer::column([
         top_bar(props.search_input.clone(), search_focused, viewport.width),
         command_toolbar(
             model,
@@ -76,7 +76,6 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
     .layout(LayoutConcern {
         width: Some(Size::fixed(viewport.width)),
         height: Some(Size::fixed(viewport.height)),
-        direction: tela_contract::FlexDirection::Column,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
@@ -123,7 +122,7 @@ fn workspace_stack(
     height: f32,
     narrow: bool,
 ) -> UiNode {
-    let base: UiNode = LayoutContainer::flex(workspace)
+    let base: UiNode = LayoutContainer::row(workspace)
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
             height: Some(Size::fixed(height)),
@@ -170,9 +169,9 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
             command_button("目录", 64.0, "navigation.toggle", false, false),
         ]);
     }
-    LayoutContainer::flex(children)
+    LayoutContainer::row(children)
         .layout(LayoutConcern {
-            width: Some(Size::fill()),
+            width: Some(Size::fixed(width)),
             height: Some(Size::fixed(TOP_BAR_H)),
             padding: tela_contract::Insets {
                 top: 0.0,
@@ -321,13 +320,12 @@ fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {
         .entry(session.current_dir)
         .map(|entry| entry.name.as_str())
         .unwrap_or("工作区");
-    LayoutContainer::flex([
+    LayoutContainer::row([
         text("工作区", 13.0, SECONDARY),
         text("/", 13.0, SECONDARY),
         text(current, 13.0, TEXT),
     ])
     .layout(LayoutConcern {
-        width: Some(Size::fill()),
         height: Some(Size::fixed(TOOLBAR_H)),
         gap: 8.0,
         padding: tela_contract::Insets {
@@ -378,7 +376,7 @@ fn status_bar(
     let right = hovered
         .map(|target| toolbar_label(&target).to_owned())
         .unwrap_or_else(|| format!("{scope} · 按{sort}排序 · {}", session.notice));
-    LayoutContainer::flex([
+    LayoutContainer::row([
         text(&left, 12.0, SECONDARY),
         spacer(),
         text(&right, 12.0, SECONDARY),

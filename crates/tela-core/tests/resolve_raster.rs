@@ -1,12 +1,12 @@
 //! M3 端到端集成：core 复杂树 → resolve → raster 渲染 → 像素断言（见 010-落地路线 M3 验收）。
 //!
-//! 覆盖：文本（中英文）、滚动裁剪、Stack 堆叠（Content + FillOverlay 角标）、draw_order 局部排序、
+//! 覆盖：文本（中英文）、滚动裁剪、Stack 堆叠（Content + Overlay 角标）、draw_order 局部排序、
 //! 圆角卡片、渐变。raster 是基准渲染器（007-6），像素确定性可复现。
 
 use std::collections::HashMap;
 use tela_contract::{
-    Color, Fill, FontRef, LayoutConcern, PixelOffset, ScrollState, SemanticKey, Size, StackAlign,
-    StackLayer, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, Viewport,
+    Color, Fill, FontRef, LayoutConcern, OverlaySpec, PixelOffset, ScrollState, SemanticKey, Size,
+    StackAlign, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, Viewport,
     VisualConcern,
 };
 use tela_core::UiTree;
@@ -58,21 +58,19 @@ fn rect(width: f32, height: f32, fill: Color) -> tela_contract::UiNode {
 
 /// 复杂界面树：标题栏 + 卡片（圆角 + 角标 + 渐变） + 滚动列表（裁剪）。
 fn complex_tree() -> UiTree {
-    // 卡片 Stack：Content = 渐变底，FillOverlay = 右上角标（不参与尺寸）。
-    let badge = Primitive::rect()
+    // 卡片 Stack：渐变底参与尺寸，右上 Overlay 不参与尺寸。
+    let badge: tela_contract::UiNode = Primitive::rect()
         .layout(LayoutConcern {
             width: Some(Size::fixed(28.0)),
             height: Some(Size::fixed(16.0)),
-            stack_layer: StackLayer::FillOverlay,
-            stack_align: Some(StackAlign::TopRight),
-            stack_offset: PixelOffset { x: -4.0, y: 4.0 },
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
             fill: Some(Fill::Solid(Color::RED)),
             border_radius: tela_contract::BorderRadius::all(8.0),
             ..VisualConcern::default()
-        });
+        })
+        .into();
     let card = LayoutContainer::stack::<[tela_contract::UiNode; 2]>([
         Primitive::rect()
             .layout(LayoutConcern {
@@ -111,13 +109,21 @@ fn complex_tree() -> UiTree {
                 ..VisualConcern::default()
             })
             .into(),
-        badge.into(),
+        LayoutContainer::overlay(
+            badge,
+            OverlaySpec {
+                align: StackAlign::TopRight,
+                offset: PixelOffset { x: -4.0, y: 4.0 },
+                ..OverlaySpec::default()
+            },
+        )
+        .into(),
     ]);
 
     // 滚动列表：ScrollView 内 3 个条目（高 30，总 90 > 视口 70 → 滚动 25 后裁剪）。
     let items: Vec<tela_contract::UiNode> = (0..3)
         .map(|_| {
-            LayoutContainer::flex([rect(120.0, 4.0, Color::BLACK)])
+            LayoutContainer::row([rect(120.0, 4.0, Color::BLACK)])
                 .layout(LayoutConcern {
                     height: Some(Size::fixed(30.0)),
                     ..LayoutConcern::default()
@@ -132,12 +138,11 @@ fn complex_tree() -> UiTree {
     });
 
     let children: [tela_contract::UiNode; 3] = [
-        LayoutContainer::flex([
+        LayoutContainer::column([
             text_node("tela 演示界面", 18.0, Color::WHITE),
             text_node("滚动与堆叠", 12.0, Color::BLACK),
         ])
         .layout(LayoutConcern {
-            direction: tela_contract::FlexDirection::Column,
             gap: 6.0,
             ..LayoutConcern::default()
         })
@@ -145,8 +150,7 @@ fn complex_tree() -> UiTree {
         card.into(),
         scroll.into(),
     ];
-    let root = LayoutContainer::flex(children).layout(LayoutConcern {
-        direction: tela_contract::FlexDirection::Column,
+    let root = LayoutContainer::column(children).layout(LayoutConcern {
         gap: 10.0,
         ..LayoutConcern::default()
     });
@@ -156,7 +160,7 @@ fn complex_tree() -> UiTree {
 #[test]
 fn resolve_and_render_complex_tree_end_to_end() {
     let tree = complex_tree();
-    // 树序：根 Flex(/0/) → [文本块(/0/0/), 卡片(/0/1/), 滚动列表(/0/2/)]。
+    // 树序：根 Column(/0/) → [文本块(/0/0/), 卡片(/0/1/), 滚动列表(/0/2/)]。
     // 滚动列表 y=125..195，滚动 25 后条目 1/2 可见。
     let scrolls = HashMap::from([(
         SemanticKey("/0/2/".to_string()),
@@ -220,7 +224,7 @@ fn resolve_and_render_complex_tree_end_to_end() {
     assert!(left[2] > left[0], "左端应为蓝色系 {left:?}");
     assert!(right[0] > left[0] * 2, "右端应偏红/紫 {right:?}");
 
-    // 4. 角标（右上 FillOverlay）：卡片右上区域出现红色角标。
+    // 4. 角标（右上 Overlay）：卡片右上区域出现红色角标。
     let mut red_pixels = 0;
     for y in 60..75 {
         for x in 150..176 {

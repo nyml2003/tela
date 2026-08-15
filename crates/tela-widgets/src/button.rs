@@ -1,8 +1,8 @@
 //! `Button` 组件：语义变体与受控交互状态到 `UiNode` 的映射。
 
 use tela_contract::{
-    BorderRadius, Color, Fill, FontRef, InteractConcern, LayoutConcern, MainAlign, Size,
-    TextContent, UiNode, VisualConcern,
+    BorderRadius, Color, Fill, FontRef, InteractConcern, LayoutConcern, Size, TextContent, UiNode,
+    VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
@@ -226,20 +226,23 @@ impl Button {
             ButtonContent::Node(node) => *node,
         };
 
-        let mut node: UiNode = LayoutContainer::flex(vec![content])
-            .visual(VisualConcern {
-                fill: Some(Fill::Solid(fill)),
-                border_radius: BorderRadius::all(self.border_radius),
-                ..VisualConcern::default()
-            })
-            .layout(LayoutConcern {
-                width: Some(Size::fixed(self.width)),
-                height: Some(Size::fixed(self.height)),
-                main_align: MainAlign::Center,
-                cross_align: tela_contract::CrossAlign::Center,
-                ..LayoutConcern::default()
-            })
-            .into();
+        let mut node: UiNode = LayoutContainer::row([
+            LayoutContainer::spacer().into(),
+            content,
+            LayoutContainer::spacer().into(),
+        ])
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(fill)),
+            border_radius: BorderRadius::all(self.border_radius),
+            ..VisualConcern::default()
+        })
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(self.width)),
+            height: Some(Size::fixed(self.height)),
+            cross_align: tela_contract::CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .into();
 
         if !self.state.disabled {
             node.interact = Some(InteractConcern {
@@ -282,14 +285,13 @@ mod tests {
         let layout = node.layout.as_ref().expect("Button has layout");
         let interact = node.interact.as_ref().expect("Button is interactive");
 
-        assert_eq!(node.kind, NodeKind::Flex);
+        assert_eq!(node.kind, NodeKind::Row);
         assert!(node.identity.is_none());
         assert!(interact.clickable && interact.hoverable && interact.focusable);
-        assert_eq!(layout.main_align, tela_contract::MainAlign::Center);
         assert_eq!(layout.cross_align, tela_contract::CrossAlign::Center);
-        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children.len(), 3);
         assert!(matches!(
-            node.children[0].content,
+            node.children[1].content,
             Some(ContentConcern::Text(ref text)) if text.text == "保存"
         ));
     }
@@ -346,7 +348,9 @@ mod tests {
         let node = Button::new("unused").content(content).into_node();
 
         assert!(node.interact.is_some());
-        assert_eq!(node.children.len(), 1);
-        assert_eq!(node.children[0].kind, NodeKind::Rect);
+        assert_eq!(node.children.len(), 3, "两侧 Spacer 显式表达内容居中");
+        assert_eq!(node.children[1].kind, NodeKind::Rect);
+        assert!(node.children[0].interact.is_none());
+        assert!(node.children[2].interact.is_none());
     }
 }

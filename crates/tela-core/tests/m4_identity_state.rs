@@ -205,7 +205,7 @@ fn virtual_list(children: Vec<UiNode>) -> UiNode {
 
 fn keyed_item(key: &str, width: f32, height: f32) -> UiNode {
     // item 是容器（组件语义），identity 挂在容器上（原语不能挂身份，见 003-5）。
-    LayoutContainer::flex([rect(width, height)])
+    LayoutContainer::row([rect(width, height)])
         .identity(IdentityConcern {
             key_strategy: KeyStrategy::SemanticId,
             semantic_key: Some(SemanticKey(key.to_string())),

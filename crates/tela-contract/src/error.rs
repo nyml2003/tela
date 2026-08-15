@@ -21,13 +21,15 @@ pub enum UiBuildError {
     NonUtf8Text,
     /// kind 不解释的槽位被使用（死字段，见 003-场景树与节点模型 2.1）。
     DeadSlot,
-    /// `FillOverlay` 用在非 Stack 容器内（见 006-布局引擎 4.2）。
-    FillOverlayOutsideStack,
-    /// Stack 的 Content 为空或全 Fill 且无显式尺寸。
+    /// `Overlay` 用在非 Stack 容器内。
+    OverlayOutsideStack,
+    /// Stack 没有参与尺寸推导的 Content。
     InvalidStackContent,
-    /// `wrap=true` 时 Fill 作用域非法。
-    InvalidFlexWrapFill,
-    /// 非法尺寸搭配：`MinMax` 包裹 `Fixed`、`min > max`、嵌套 `MinMax`（见 006-布局引擎 3.2）。
+    /// 原语的子节点数或父子关系不符合其布局契约。
+    InvalidLayoutShape,
+    /// Wrap 中出现 Expanded 或 Spacer。
+    AllocationInWrap,
+    /// 非法尺寸搭配：`MinMax` 包裹 `Fixed`、`min > max`、嵌套 `MinMax`（见 006-布局引擎 5）。
     InvalidMinMax,
     /// 虚拟列表容器子项缺少显式 `semantic-id`（见 006-布局引擎 6）。
     MissingVirtualItemKey,
@@ -45,7 +47,7 @@ pub enum UiBuildError {
     IdExhausted,
 }
 
-/// 布局期错误：布局无法满足最小约束（见 006-布局引擎 7）。
+/// 布局期错误：布局无法满足最小约束（见 006-布局引擎 8）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiLayoutError {
     /// 盒子尺寸无法满足最小约束（节点自身区间与父约束区间无交集）。

@@ -2,7 +2,7 @@
 //!
 //! - 焦点转移是纯函数：不读取布局、不读取时钟，可离线复现；
 //! - 同一 `(节点, 输入)` 目标唯一：显式规约（focus_graph 边 / entry-exit 端口）替换自动规则；
-//! - 标准容器（Flex/Stack/ScrollView）自动生成内部转移规则（相邻子项）；
+//! - 标准容器（Row/Column/Wrap/Stack/ScrollView）自动生成内部转移规则（相邻子项）；
 //! - 边界穿越默认回退父作用域按树序解析（父零配置、静态可推导）；
 //! - PC Tab 沿 scope 内 tab 序（`tab_index` 调整，`-1` 移出）；主机方向键沿焦点图；
 //! - Teleport 子树焦点链重挂载至 ModalHost 作用域（见 008-2.10）。

@@ -1,8 +1,7 @@
 //! 图片背景组件：把一张图片放在单个内容节点后方。
 
 use tela_contract::{
-    DrawOrder, ImageContent, LayoutConcern, Size, StackAlign, StackLayer, TextureRef, UiNode,
-    VisualConcern,
+    DrawOrder, ImageContent, OverlaySpec, StackAlign, TextureRef, UiNode, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
@@ -29,20 +28,24 @@ impl ImageBackground {
         let image: UiNode = Primitive::image(ImageContent {
             texture: self.texture,
         })
-        .layout(LayoutConcern {
-            width: Some(Size::fill()),
-            height: Some(Size::fill()),
-            stack_layer: StackLayer::FillOverlay,
-            stack_align: Some(StackAlign::TopLeft),
-            ..LayoutConcern::default()
-        })
+        .into();
+
+        let background: UiNode = LayoutContainer::overlay(
+            image,
+            OverlaySpec {
+                align: StackAlign::TopLeft,
+                fill_width: true,
+                fill_height: true,
+                ..OverlaySpec::default()
+            },
+        )
         .visual(VisualConcern {
             draw_order: DrawOrder::InnerBottom(0),
             ..VisualConcern::default()
         })
         .into();
 
-        LayoutContainer::stack([self.content, image]).into()
+        LayoutContainer::stack([self.content, background]).into()
     }
 }
 
@@ -92,24 +95,22 @@ mod tests {
     }
 
     #[test]
-    fn builds_stack_with_bottom_fill_overlay_image() {
+    fn builds_stack_with_bottom_overlay_image() {
         let node = ImageBackground::new("hero", content()).into_node();
         assert_eq!(node.kind, NodeKind::Stack);
         assert_eq!(node.children.len(), 2);
         assert_eq!(node.children[0], content());
 
-        let image = &node.children[1];
+        let overlay = &node.children[1];
+        assert!(matches!(overlay.kind, NodeKind::Overlay(_)));
+        let image = &overlay.children[0];
         assert_eq!(image.kind, NodeKind::Image);
         assert!(matches!(
             image.content,
             Some(ContentConcern::Image(ref image)) if image.texture.0 == "hero"
         ));
-        let layout = image.layout.as_ref().expect("图片必须有布局");
-        assert_eq!(layout.width, Some(Size::fill()));
-        assert_eq!(layout.height, Some(Size::fill()));
-        assert_eq!(layout.stack_layer, tela_contract::StackLayer::FillOverlay);
         assert_eq!(
-            image.visual.as_ref().map(|visual| visual.draw_order),
+            overlay.visual.as_ref().map(|visual| visual.draw_order),
             Some(DrawOrder::InnerBottom(0))
         );
     }

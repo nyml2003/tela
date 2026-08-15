@@ -167,7 +167,7 @@ impl<'a> Session<'a> {
         match event {
             PointerEvent::Down { position } => {
                 let hit = self.hit_test(position);
-                // 命中 portal 外部区域 → 抛 TeleportClickOutside（关闭逻辑宿主实现，见 006-4.4）。
+                // 命中 portal 外部区域 → 抛 TeleportClickOutside（关闭逻辑宿主实现，见 008-3）。
                 if let Some((node_id, node)) = &hit {
                     let interact = node.interact.as_ref();
                     if interact.is_some_and(|i| i.clickable) {
@@ -274,7 +274,7 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// 命中点是否落在任意 Teleport 子树外：是则返回首个 Teleport 节点 id（portal 点击外部，见 006-4.4）。
+    /// 命中点是否落在任意 Teleport 子树外：是则返回首个 Teleport 节点 id（portal 点击外部，见 008-3）。
     fn teleport_hit_outside(&self, hit: &Option<(NodeId, &'a UiNode)>) -> Option<NodeId> {
         let teleports: Vec<usize> = self
             .nodes

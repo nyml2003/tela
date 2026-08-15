@@ -79,7 +79,7 @@ impl Switch {
                 left: 3.0,
             }
         };
-        let knob: UiNode = LayoutContainer::flex(vec![text("", 1.0, Color::TRANSPARENT)])
+        let knob: UiNode = LayoutContainer::row([text("", 1.0, Color::TRANSPARENT)])
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(Color::WHITE)),
                 border_radius: tela_contract::BorderRadius::all(KNOB / 2.0),
@@ -92,7 +92,7 @@ impl Switch {
                 ..LayoutConcern::default()
             })
             .into();
-        let mut node: UiNode = LayoutContainer::flex(vec![knob])
+        let mut node: UiNode = LayoutContainer::row([knob])
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(track_color)),
                 border_radius: tela_contract::BorderRadius::all(TRACK_H / 2.0),

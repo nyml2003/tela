@@ -6,12 +6,13 @@
 //! - 策略组合合法（身份策略只在容器节点声明）；
 //! - 节点类型与内容形状匹配（`ContentMismatch`）；
 //! - 槽位正交性兜底（`DeadSlot`，逻辑容器带几何字段——构建器已编译期拦截）；
-//! - 尺寸校验：`MinMax` 禁止包裹 `Fixed`、`min > max`（见 006-布局引擎 3.2）；
-//! - `FillOverlay` 仅在 Stack 容器内合法；Stack Content 为空或全 Fill 且无显式尺寸报错。
+//! - 尺寸校验：`MinMax` 禁止包裹 `Fixed`、`min > max`（见 006-布局引擎 5）；
+//! - `Overlay` 仅在 Stack 容器内合法；Stack 必须存在 Content；
+//! - Frame / Expanded / Overlay / Spacer 的形状和 Wrap 的分配规则在构建期检查。
 
 use std::collections::BTreeSet;
 use tela_contract::{
-    BaseSize, ContentConcern, KeyStrategy, MinMax, NodeId, NodeKind, SemanticKey, Size, StackLayer,
+    BaseSize, ContentConcern, KeyStrategy, MinMax, NodeId, NodeKind, SemanticKey, Size,
     UiBuildError, UiNode,
 };
 
@@ -139,24 +140,26 @@ fn validate_node(
         return Err(UiBuildError::InvalidRatio);
     }
 
-    // 尺寸校验：MinMax 禁止包裹 Fixed、min > max（见 006-3.2）。
+    // 尺寸校验：MinMax 禁止包裹 Fixed、min > max（见 006-5）。
     if let Some(layout) = &node.layout {
         check_minmax(&layout.width)?;
         check_minmax(&layout.height)?;
+        if layout.cross_align != tela_contract::CrossAlign::Start
+            && !matches!(node.kind, NodeKind::Row | NodeKind::Column)
+        {
+            return Err(UiBuildError::InvalidLayoutShape);
+        }
     }
 
-    // FillOverlay 越界使用：仅 Stack 容器内合法（见 006-4.2）。
-    if parent_kind != Some(&NodeKind::Stack)
+    validate_layout_shape(node, parent_kind)?;
+
+    // Stack 必须至少有一个 Content，Overlay 不参与自身尺寸推导。
+    if matches!(node.kind, NodeKind::Stack)
         && node
-            .layout
-            .as_ref()
-            .is_some_and(|l| l.stack_layer == StackLayer::FillOverlay)
+            .children
+            .iter()
+            .all(|child| matches!(child.kind, NodeKind::Overlay(_)))
     {
-        return Err(UiBuildError::FillOverlayOutsideStack);
-    }
-
-    // Stack Content 为空或全 Fill 且无显式尺寸（见 006-4.2）。
-    if matches!(node.kind, NodeKind::Stack) && stack_content_invalid(node) {
         return Err(UiBuildError::InvalidStackContent);
     }
 
@@ -261,37 +264,34 @@ fn collect_keys_without_self(node: &UiNode, out: &mut BTreeSet<SemanticKey>) {
     }
 }
 
-/// Stack Content 为空或全 Fill 且无显式尺寸 → `InvalidStackContent`。
-fn stack_content_invalid(node: &UiNode) -> bool {
-    let content_children: Vec<&UiNode> = node
-        .children
-        .iter()
-        .filter(|c| c.layout.as_ref().map(|l| l.stack_layer) != Some(StackLayer::FillOverlay))
-        .collect();
-    if content_children.is_empty() {
-        return true;
+/// 单职责布局原语的形状和父子关系。
+fn validate_layout_shape(
+    node: &UiNode,
+    parent_kind: Option<&NodeKind>,
+) -> Result<(), UiBuildError> {
+    match &node.kind {
+        NodeKind::Frame | NodeKind::Expanded | NodeKind::Overlay(_) if node.children.len() != 1 => {
+            Err(UiBuildError::InvalidLayoutShape)
+        }
+        NodeKind::Spacer if !node.children.is_empty() => Err(UiBuildError::InvalidLayoutShape),
+        NodeKind::Expanded | NodeKind::Spacer
+            if !matches!(parent_kind, Some(NodeKind::Row) | Some(NodeKind::Column)) =>
+        {
+            Err(UiBuildError::InvalidLayoutShape)
+        }
+        NodeKind::Overlay(_) if parent_kind != Some(&NodeKind::Stack) => {
+            Err(UiBuildError::OverlayOutsideStack)
+        }
+        NodeKind::Wrap
+            if node
+                .children
+                .iter()
+                .any(|child| matches!(child.kind, NodeKind::Expanded | NodeKind::Spacer)) =>
+        {
+            Err(UiBuildError::AllocationInWrap)
+        }
+        _ => Ok(()),
     }
-    // 无显式尺寸（width/height 均未声明或 Auto）且全部 content 子为 Fill。
-    let no_explicit = node
-        .layout
-        .as_ref()
-        .is_none_or(|l| l.width.is_none() && l.height.is_none());
-    no_explicit
-        && content_children.iter().all(|c| {
-            let l = c.layout.as_ref();
-            l.is_some_and(|l| is_fill(&l.width) && is_fill(&l.height))
-        })
-}
-
-fn is_fill(size: &Option<Size>) -> bool {
-    matches!(
-        size,
-        Some(Size::Raw(BaseSize::Fill))
-            | Some(Size::Constrained(MinMax {
-                base: BaseSize::Fill,
-                ..
-            }))
-    )
 }
 
 /// 原语内容形状匹配（见 003-场景树与节点模型 5）。
@@ -330,7 +330,7 @@ fn check_ratio(size: &Option<Size>) -> Result<(), UiBuildError> {
     Ok(())
 }
 
-/// MinMax 非法写法：包裹 `Fixed`、`min > max`（见 006-3.2；嵌套在类型层面已不可能）。
+/// MinMax 非法写法：包裹 `Fixed`、`min > max`（见 006-5；嵌套在类型层面已不可能）。
 fn check_minmax(size: &Option<Size>) -> Result<(), UiBuildError> {
     if let Some(Size::Constrained(minmax)) = size {
         if matches!(minmax.base, BaseSize::Fixed(_)) {
