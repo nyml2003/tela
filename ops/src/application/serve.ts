@@ -13,16 +13,23 @@ export interface ServeDeps {
 export async function runServe(deps: ServeDeps, preferredPort: number): Promise<ServeResult | undefined> {
   const { fs, server, reporter, workspace } = deps;
   reporter.section('开发服务器（serve）');
-  if (!(await fs.exists(`${workspace.distDir}/index.html`))) {
-    reporter.fail(`缺少 ${workspace.distDir}/index.html`);
-    reporter.info('请先运行: ops build all --gpu');
+  const hasBrowserPage = await fs.exists(`${workspace.distDir}/index.html`);
+  const hasSdkBundle = await fs.exists(workspace.bundleIndexPath());
+  if (!hasBrowserPage && !hasSdkBundle) {
+    reporter.fail(`缺少 ${workspace.distDir}/index.html 和 ${workspace.bundleIndexPath()}`);
+    reporter.info('请先运行: ops build all --gpu（浏览器）或 ops build bundle（原生 SDK）');
     return undefined;
   }
   const result = await server.serve(workspace.distDir, preferredPort, (msg) => reporter.info(msg));
   reporter.ok(`监听 0.0.0.0:${result.port}`);
-  reporter.info('可用页面（URL 单独一行，点击直达）：');
-  reporter.info(`http://127.0.0.1:${result.port}/              （蓝色矩形；?backend=raster|wgpu|auto）`);
-  reporter.info(`http://127.0.0.1:${result.port}/rawgpu.html   （原生 WebGPU 自检页）`);
+  if (hasBrowserPage) {
+    reporter.info('可用页面（URL 单独一行，点击直达）：');
+    reporter.info(`http://127.0.0.1:${result.port}/              （蓝色矩形；?backend=raster|wgpu|auto）`);
+    reporter.info(`http://127.0.0.1:${result.port}/rawgpu.html   （原生 WebGPU 自检页）`);
+  }
+  if (hasSdkBundle) {
+    reporter.info(`Win32 SDK bundle: http://127.0.0.1:${result.port}/tela-dev/latest.json`);
+  }
   reporter.info('Ctrl+C 停止');
   return result;
 }

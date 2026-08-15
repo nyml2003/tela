@@ -26,6 +26,8 @@ export interface FsPort {
   /** 重建一个已知的构建输出目录。调用方必须传入 workspace 派生路径。 */
   resetDir(path: string): Promise<void>;
   copyFile(from: string, to: string): Promise<void>;
+  /** 在同一文件系统内原子替换一个构建产物。 */
+  rename(from: string, to: string): Promise<void>;
   /** 文件字节数，不存在返回 null。 */
   statSize(path: string): Promise<number | null>;
   /** 更新文件 mtime（touch；构建时间戳刷新用，见 build-demo.ts）。 */

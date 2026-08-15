@@ -39,12 +39,13 @@
 | 命令 | 做什么 | 对应旧方式 |
 |---|---|---|
 | `ops check` | 四道验证门：fmt / clippy / test / **依赖方向检查**（TS 版，cargo metadata 真实依赖树，替代 bash 正则） | flake `check` + check-architecture.sh |
-| `ops build [demo\|frontend\|all] [--release] [--gpu]` | 构建发布物到 `dist/`；`all` 先重建目录，`--gpu` 走 WebGPU 后端（webgpu feature + wasm-bindgen glue，强制 release，产出 `tela_demo_gpu.js`/`_bg.wasm`） | 手工三步 |
+| `ops build [demo\|frontend\|bundle\|win32\|all] [--release] [--gpu]` | 构建发布物到 `dist/`；`bundle` 固定生成经 Wasmtime 首帧/viewport 校验的 release WASM 包，`win32` 交叉构建开发壳，`all` 先重建目录；`--gpu` 走 WebGPU 后端（webgpu feature + wasm-bindgen glue，强制 release，产出 `tela_demo_gpu.js`/`_bg.wasm`） | 手工三步 |
 | `ops verify demo [--build]` | 由 `ops` 内置的 Node wasm 适配器验证 `dist/tela_demo.wasm`（--build 真的先构建） | 外部 smoke 脚本 |
 | `ops serve [port]` | 开发静态服务器（默认 8000，端口占用自动递增，MIME/防穿越同旧脚本） | serve-demo.mjs |
 
-`ops build all [--gpu]` 是完整发布组合：它先重建 `dist/`，再生成 CPU wasm、可选 GPU glue
-和浏览器 bundle。单目标 `build demo` / `build frontend` 只更新自己拥有的工件，不清除其他输出。
+`ops build all [--gpu]` 是默认发布组合：它先重建 `dist/`，再生成 CPU wasm、可选 GPU glue、浏览器
+bundle 和 `tela-dev` 原生开发包。`ops build win32` 保持显式：它需要 GNU Windows target，且不应让
+日常浏览器构建被本机交叉编译器阻塞。单目标构建只更新自己拥有的工件，不清除其他输出。
 
 ## DDD 分层
 

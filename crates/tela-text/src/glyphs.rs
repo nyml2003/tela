@@ -1,12 +1,73 @@
 //! 字形覆盖事件：renderer 只消费事件，不自行推导字体位置。
 
-use ab_glyph::{Font, ScaleFont, point};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
+
+use ab_glyph::{Font, FontArc, GlyphId, ScaleFont, point};
 use tela_contract::TextContent;
 
 use crate::{
-    font::{em_pixel_height, font_for},
+    font::{em_pixel_height, font_for, is_icon_font},
     measure::normalized_wrap_width,
 };
+
+const MAX_CACHED_GLYPH_OUTLINES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct GlyphOutlineCacheKey {
+    is_icon_font: bool,
+    glyph_id: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlyphOutlineBounds {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+fn glyph_outline_cache() -> &'static Mutex<HashMap<GlyphOutlineCacheKey, Option<GlyphOutlineBounds>>>
+{
+    static CACHE: OnceLock<Mutex<HashMap<GlyphOutlineCacheKey, Option<GlyphOutlineBounds>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_outline_bounds(
+    font: &FontArc,
+    is_icon_font: bool,
+    glyph_id: GlyphId,
+) -> Option<GlyphOutlineBounds> {
+    let key = GlyphOutlineCacheKey {
+        is_icon_font,
+        glyph_id: glyph_id.0,
+    };
+    {
+        let cache = glyph_outline_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(bounds) = cache.get(&key) {
+            return *bounds;
+        }
+    }
+
+    let bounds = font.outline(glyph_id).map(|outline| GlyphOutlineBounds {
+        min_x: outline.bounds.min.x,
+        min_y: outline.bounds.min.y,
+        max_x: outline.bounds.max.x,
+        max_y: outline.bounds.max.y,
+    });
+    let mut cache = glyph_outline_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() < MAX_CACHED_GLYPH_OUTLINES {
+        cache.insert(key, bounds);
+    }
+    bounds
+}
 
 /// 一段文本在物理像素空间中的定位输入。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,6 +197,7 @@ pub fn glyph_ink_metrics(text: &TextContent) -> Option<GlyphInkMetrics> {
     }
 
     let font = font_for(&text.font);
+    let is_icon_font = is_icon_font(&text.font);
     let glyph_scale = em_pixel_height(font, text.font_size);
     if !(glyph_scale.is_finite() && glyph_scale > 0.0) {
         return None;
@@ -159,15 +221,14 @@ pub fn glyph_ink_metrics(text: &TextContent) -> Option<GlyphInkMetrics> {
         }
 
         let glyph_id = scaled.glyph_id(character);
-        if let Some(outline) = font.outline(glyph_id) {
+        if let Some(bounds) = cached_outline_bounds(font, is_icon_font, glyph_id) {
             let scale = scaled.scale_factor();
-            let bounds = outline.bounds;
-            let x0 = pen_x + bounds.min.x * scale.horizontal;
-            let x1 = pen_x + bounds.max.x * scale.horizontal;
+            let x0 = pen_x + bounds.min_x * scale.horizontal;
+            let x1 = pen_x + bounds.max_x * scale.horizontal;
             // Font outline y grows upward while tela's logical y grows downward. Raw outline
             // bounds are therefore deliberately reversed after applying the vertical scale.
-            let y0 = baseline_y - bounds.min.y * scale.vertical;
-            let y1 = baseline_y - bounds.max.y * scale.vertical;
+            let y0 = baseline_y - bounds.min_y * scale.vertical;
+            let y1 = baseline_y - bounds.max_y * scale.vertical;
             min_x = min_x.min(x0.min(x1));
             min_y = min_y.min(y0.min(y1));
             max_x = max_x.max(x0.max(x1));

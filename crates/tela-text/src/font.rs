@@ -5,12 +5,17 @@ use std::sync::OnceLock;
 use ab_glyph::{Font, FontArc};
 use tela_contract::FontRef;
 
+/// 是否选择受控图标字体；其余引用稳定回退到正文。
+pub(crate) fn is_icon_font(font_ref: &FontRef) -> bool {
+    font_ref.0 == tela_fonts::ICON_FONT_NAME
+}
+
 /// 按 `FontRef` 解析受控字体；未知引用稳定回退到正文。
 pub(crate) fn font_for(font_ref: &FontRef) -> &'static FontArc {
     static UI_FONT: OnceLock<FontArc> = OnceLock::new();
     static ICON_FONT: OnceLock<FontArc> = OnceLock::new();
 
-    if font_ref.0 == tela_fonts::ICON_FONT_NAME {
+    if is_icon_font(font_ref) {
         ICON_FONT.get_or_init(|| {
             FontArc::try_from_slice(tela_fonts::ICON_FONT_BYTES).expect("内嵌图标字体必须可解析")
         })

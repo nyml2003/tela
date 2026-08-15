@@ -13,6 +13,7 @@ const MIME: Record<string, string> = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.cjs': 'text/javascript; charset=utf-8',
   '.wasm': 'application/wasm',
+  '.tela': 'application/vnd.tela.bundle+zip',
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',

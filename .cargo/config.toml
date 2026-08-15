@@ -2,3 +2,7 @@
 # 只对 wasm32 目标生效，不影响 native 构建与测试。
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", "web_sys_unstable_apis"]
+
+# 开发期 Win32 壳在 WSL 交叉构建；链接器随项目 flake 提供，不进入全局环境。
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

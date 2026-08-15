@@ -36,6 +36,7 @@
 | [020-字体基线焦点与键盘意图实施目标](docs/020-字体基线焦点与键盘意图实施目标.md) | 字体和图标如何按真实基线排版？焦点、键盘意图与运行时键位表如何闭环？ | 启动输入与排版基础设施 Goal 时 |
 | [021-图标原语与行内内容架构](docs/021-图标原语与行内内容架构.md) | 图标 provider、原子交互与 prefix/suffix 行内内容如何分层？ | 设计图标或文本组合时 |
 | [022-构建产物与浏览器宿主目录](docs/022-构建产物与浏览器宿主目录.md) | 浏览器源码、wasm 和静态发布物如何分离？ | 改构建、服务或浏览器诊断页时 |
+| [023-平台SDK与WASM开发包](docs/023-平台SDK与WASM开发包.md) | 原生壳如何一次性加载可验证 WASM 包？Win32 开发态怎样运行？ | 接原生平台 SDK、包协议或系统桥时 |
 
 ## 开发工作流（ops）
 
@@ -46,13 +47,15 @@
 
 ```bash
 ops check                # 四道验证门（fmt/clippy/test/依赖方向）
-ops build all --gpu      # 构建 CPU/GPU wasm、glue 与浏览器宿主
+ops build all --gpu      # 构建浏览器产物与 tela-dev WASM 开发包
+ops build win32          # 在 WSL 交叉构建 Win32 开发壳到 dist/win32/
 ops verify [demo|gpu]    # 冒烟测试（默认 demo）；gpu = 环境自检（原生 JS 三角形回读）
 ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 ```
 
-`dist/` 是唯一浏览器静态发布目录，已被 Git 忽略；其全部内容都必须能由 `ops build` 重新生成。
-浏览器页面模板与宿主代码保留在 `web/`，Rust 演示逻辑保留在 `crates/tela-demo/`。
+`dist/` 是唯一发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包和 `win32` 壳都必须能由
+`ops build` 重新生成。浏览器页面模板与宿主代码保留在 `web/`，Rust 演示逻辑保留在
+`crates/tela-demo/`，原生壳与包协议不存放手写内容到 `dist/`。
 
 浏览器演示只保留一个共享场景：`?backend=raster` 使用 CPU 光栅，
 `?backend=wgpu` 使用 wgpu，`?backend=auto` 优先尝试 wgpu 后回退 CPU。三个模式都先由

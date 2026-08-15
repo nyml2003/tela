@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/tela-contract",
+    "crates/tela-app-abi",
+    "crates/tela-bundle",
     "crates/tela-log",
     "crates/tela-fonts",
     "crates/tela-text",
@@ -14,6 +16,7 @@ members = [
     "crates/tela-widgets",
     "crates/tela-ui",
     "crates/tela-demo",
+    "crates/tela-win32-sdk",
 ]
 
 [workspace.package]

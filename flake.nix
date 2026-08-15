@@ -7,6 +7,11 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
+      win32Cargo = pkgs.pkgsCross.mingwW64.buildPackages.cargo;
+      win32Clippy = pkgs.pkgsCross.mingwW64.buildPackages.clippy;
+      # Rust 的 x86_64-pc-windows-gnu std 仍请求 libpthread.a；当前 MinGW GCC 默认使用
+      # mcfgthread，因此显式保留 GNU pthread 兼容 archive 给这个交叉命令。
+      win32Pthreads = pkgs.pkgsCross.mingwW64.windows.pthreads;
     in {
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
@@ -23,6 +28,23 @@
           rustc
           rustfmt
           vulkan-loader
+          # Win32 开发壳：在 WSL 中交叉链接 x86_64-pc-windows-gnu 工件。
+          pkgsCross.mingwW64.stdenv.cc
+          # nixpkgs 的 cargo wrapper 自带 x86_64-pc-windows-gnu Rust std；用独立命令避免
+          # 覆盖日常 native / wasm 所用的 cargo。
+          (writeShellApplication {
+            name = "cargo-win32";
+            runtimeInputs = [
+              win32Cargo
+              win32Clippy
+              win32Pthreads
+              pkgsCross.mingwW64.stdenv.cc
+            ];
+            text = ''
+              export RUSTFLAGS="-L native=${win32Pthreads}/lib''${RUSTFLAGS:+ ''${RUSTFLAGS}}"
+              exec ${win32Cargo}/bin/cargo "$@"
+            '';
+          })
           # wasm-bindgen-cli must match the Rust wasm-bindgen schema in Cargo.lock.
           wasm-bindgen-cli_0_2_126
           (writeShellApplication {

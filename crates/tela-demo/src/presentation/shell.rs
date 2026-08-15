@@ -1,7 +1,7 @@
 //! 客户端固定框架：顶栏、工具栏、路径栏和状态栏。
 
 use tela_contract::{
-    Fill, IdentityConcern, KeymapScopeId, LayoutConcern, ShortcutScopeSpec, Size, UiNode,
+    Fill, IdentityConcern, Insets, KeymapScopeId, LayoutConcern, ShortcutScopeSpec, Size, UiNode,
     UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer};
@@ -49,8 +49,8 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
     let compact = viewport.width < 900.0;
     let horizontal_inset = APP_INSET.min((viewport.width - 1.0).max(0.0) * 0.5);
     let vertical_inset = APP_INSET.min((viewport.height - MIN_CLIENT_SHELL_H).max(0.0) * 0.5);
-    let shell_width = viewport.width;
-    let shell_height = viewport.height;
+    let shell_width = (viewport.width - horizontal_inset * 2.0).max(1.0);
+    let shell_height = (viewport.height - vertical_inset * 2.0).max(1.0);
     let content_h = (shell_height - TOP_BAR_H - TOOLBAR_H - STATUS_BAR_H).max(120.0);
     let detail_w = (shell_width - if narrow { 0.0 } else { SIDEBAR_W }).max(1.0);
     let mut workspace = Vec::new();
@@ -66,7 +66,7 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
         props.detail_scroll_y,
     ));
 
-    let shell: UiNode = LayoutContainer::column([
+    let workspace_shell: UiNode = LayoutContainer::column([
         top_bar(props.search_input.clone(), search_focused, shell_width),
         command_toolbar(model, session, shell_width, props.hovered_target.as_deref()),
         workspace_stack(workspace, model, session, shell_width, content_h, narrow),
@@ -75,10 +75,16 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
     .layout(LayoutConcern {
         width: Some(Size::fixed(shell_width)),
         height: Some(Size::fixed(shell_height)),
+        margin: Insets {
+            top: vertical_inset,
+            right: horizontal_inset,
+            bottom: vertical_inset,
+            left: horizontal_inset,
+        },
         ..LayoutConcern::default()
     })
     .into();
-    let shell: UiNode = LayoutContainer::frame(shell)
+    let shell: UiNode = LayoutContainer::stack([workspace_shell])
         .layout(LayoutConcern {
             width: Some(Size::fixed(viewport.width)),
             height: Some(Size::fixed(viewport.height)),

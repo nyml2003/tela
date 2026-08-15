@@ -24,6 +24,7 @@ function filesystem(exists: boolean): FsPort {
     ensureDir: async () => undefined,
     resetDir: async () => undefined,
     copyFile: async () => undefined,
+    rename: async () => undefined,
     statSize: async () => null,
     touch: async () => undefined,
   };

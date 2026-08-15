@@ -26,6 +26,11 @@ pub(crate) fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
     APP.with(|app| f(&mut app.borrow_mut()))
 }
 
+#[cfg(all(feature = "app-wasm", target_arch = "wasm32"))]
+pub(crate) fn reset_app() {
+    APP.with(|app| *app.borrow_mut() = App::new());
+}
+
 #[cfg(feature = "webgpu")]
 pub(crate) fn now_ms() -> f32 {
     js_sys::Date::now() as f32

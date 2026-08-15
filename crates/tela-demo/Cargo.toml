@@ -10,6 +10,8 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+# 平台 SDK 通用 WASM guest：只导出应用 ABI，不依赖浏览器 Canvas 或 WebGPU surface。
+app-wasm = ["dep:tela-app-abi"]
 # WebGPU 网页入口（wasm-bindgen 生成 JS glue；启用后 wasm 含 wbindgen 导入，需 wasm-bindgen 加载）。
 webgpu = ["dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:wasm-bindgen-futures", "wgpu", "dep:tela-render-wgpu"]
 
@@ -25,6 +27,7 @@ tela-widgets = { path = "../tela-widgets" }
 tela-ui = { path = "../tela-ui" }
 tela-render-raster = { path = "../tela-render-raster" }
 tela-render-wgpu = { path = "../tela-render-wgpu", optional = true }
+tela-app-abi = { path = "../tela-app-abi", optional = true }
 wgpu = { version = "30", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }

@@ -38,6 +38,13 @@ export class CargoPort {
     return this.gate('build', args);
   }
 
+  /** 构建 Win32 GNU 开发壳（交叉 target 由项目 flake 与 .cargo/config.toml 提供）。 */
+  async buildWin32(crate: string, profile: BuildProfile): Promise<GateResult> {
+    const args = ['build', '--target', 'x86_64-pc-windows-gnu', '-p', crate];
+    if (profile === 'release') args.push('--release');
+    return this.gateWithCommand('cargo-win32', 'build', args);
+  }
+
   /** 读取 workspace 各 crate 的声明依赖（--no-deps：只取成员声明，不解析外部树）。 */
   async metadata(): Promise<CrateInfo[]> {
     const res = await this.process.run(
@@ -60,8 +67,12 @@ export class CargoPort {
   }
 
   private async gate(id: GateResult['id'], args: string[]): Promise<GateResult> {
+    return this.gateWithCommand('cargo', id, args);
+  }
+
+  private async gateWithCommand(command: string, id: GateResult['id'], args: string[]): Promise<GateResult> {
     const t0 = performance.now();
-    const res: ProcessResult = await this.process.run('cargo', args, {
+    const res: ProcessResult = await this.process.run(command, args, {
       cwd: this.workspace.root,
     });
     const durationMs = performance.now() - t0;
