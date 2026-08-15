@@ -44,7 +44,9 @@ fn setup() -> (wgpu::Device, wgpu::Queue) {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: None,
-        force_fallback_adapter: true,
+        // 不强制 fallback：Linux 上 lavapipe 仍会被枚举为唯一 Vulkan 适配器，
+        // macOS 上则避免 Metal 无 fallback 适配器导致 NotFound。
+        force_fallback_adapter: false,
         apply_limit_buckets: false,
     }))
     .expect("无可用适配器（需要 lavapipe/llvmpipe 或真实 GPU）");

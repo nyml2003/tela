@@ -1,6 +1,6 @@
 # 024-macOS 开发 SDK 实施目标
 
-> **状态：🔧 源码与 macOS 构建入口已实现；需在 Apple Silicon macOS 真机完成首次编译和图形验收。**
+> **状态：✅ 已在 Apple Silicon macOS 真机（M3 Pro，macOS 26.6）完成首次编译与图形验收：`ops build macos` 产出 `Tela.app`，`ops build bundle` + `ops serve 8001` 提供开发包，窗口正常呈现；`ops check` 四道门全过（2026-08）。**
 >
 > 本文只定义开发态 AppKit 壳。签名、公证、DMG、沙盒分发与完整原生文本服务统一归档在 [011](011-已知限制与未来扩展清单.md) 第 5 节。
 
