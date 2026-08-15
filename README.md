@@ -43,9 +43,8 @@
 ## 开发工作流（ops）
 
 日常开发统一走 [ops](ops/README.md)（DDD 分层 CLI，运行时零依赖，Node 24 直接跑 TS）。
-进入 nix dev shell（direnv/flake）后 `ops` 命令即可用；未在 nix 环境时用
-`node ops/src/interface/cli.ts`，或安装用户级入口：`cp` 包装脚本到 `~/.local/bin/ops`
-（见 ops/README.md「安装」）。
+进入本仓库的 nix dev shell（direnv/flake）后，flake 提供的项目级 `ops` 命令即可用；
+不要安装用户级同名入口。未在 nix 环境时，可在仓库根执行 `node ops/src/interface/cli.ts`。
 
 ```bash
 ops check                # 四道验证门（fmt/clippy/test/依赖方向）

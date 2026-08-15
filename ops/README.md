@@ -13,24 +13,14 @@
 - 验证门没有统一入口（fmt/clippy/test/arch 散在 flake 脚本里）；
 - bash 解析 TOML 脆弱，改了依赖就崩。
 
-## 安装与入口
+## 入口
 
-`ops` 命令有三层入口（优先级从高到低）：
+`ops` 是**项目级**开发命令，不提供用户级同名入口，避免一个仓库的工作流误指向另一个仓库。
 
-1. **用户级安装**（推荐，任何 shell 可用）：把包装脚本放到 PATH 里的 `~/.local/bin`：
+1. **nix dev shell**（推荐）：执行 `direnv allow` 或 `nix develop` 后，flake 提供本项目的 `ops`
+   可执行文件；在仓库根及任意子目录都可运行。
 
-   ```bash
-   cat > ~/.local/bin/ops <<'EOF'
-   #!/usr/bin/env bash
-   exec node "/绝对路径/tela/ops/src/interface/cli.ts" "$@"
-   EOF
-   chmod +x ~/.local/bin/ops
-   ```
-
-2. **nix dev shell 自动**：flake `shellHook` 在未检测到 `ops` 命令时注册
-   `alias ops="node <仓库根>/ops/src/interface/cli.ts"`（git 定位，任意目录进入都稳）。
-
-3. **临时调用**：`node ops/src/interface/cli.ts <命令>`（仓库根下，任意 cwd）。
+2. **临时调用**：在仓库根执行 `node ops/src/interface/cli.ts <命令>`。
 
 `ops --help` / `ops help` 显示全部命令。
 

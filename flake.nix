@@ -14,6 +14,32 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          opsCommand = pkgs.writeShellApplication {
+            name = "ops";
+            runtimeInputs = [ pkgs.bash pkgs.nodejs ];
+            text = ''
+              set -euo pipefail
+              root="$PWD"
+
+              while true; do
+                if [ -f "$root/ops/src/interface/cli.ts" ]; then
+                  exec node "$root/ops/src/interface/cli.ts" "$@"
+                fi
+
+                if [ "$root" = "/" ]; then
+                  break
+                fi
+
+                root="''${root%/*}"
+                if [ -z "$root" ]; then
+                  root="/"
+                fi
+              done
+
+              printf '%s\n' "ops: could not locate ops/src/interface/cli.ts from $PWD" >&2
+              exit 1
+            '';
+          };
           commonPackages = with pkgs; [
             cargo
             clippy
@@ -27,23 +53,21 @@
             rustfmt
             # wasm-bindgen-cli must match the Rust wasm-bindgen schema in Cargo.lock.
             wasm-bindgen-cli_0_2_126
+            opsCommand
           ];
           checkCommand = pkgs.writeShellApplication {
             name = "check";
             # 统一走 ops 工作流（DDD，零运行时依赖；含 TS 版依赖方向检查，
             # 见 ops/README.md）。ops check 内部调 cargo fmt/clippy/test。
-            runtimeInputs = with pkgs; [ bash cargo nodejs ];
+            runtimeInputs = [ pkgs.bash pkgs.cargo opsCommand ];
             text = ''
               set -euo pipefail
-              node ops/src/interface/cli.ts check
+              exec ${opsCommand}/bin/ops check
             '';
           };
           commonShellHook = ''
-            # ops 工作流命令（DDD CLI，Node 24 直接跑 TS，见 ops/README.md）。
-            # 优先用用户级安装（~/.local/bin/ops）；未安装时回退到项目内脚本。
-            if ! command -v ops >/dev/null 2>&1; then
-              alias ops="node $(git rev-parse --show-toplevel 2>/dev/null || echo "$(pwd)")/ops/src/interface/cli.ts"
-            fi
+            # nix-direnv 会保留宿主 PATH 的顺序；显式前置项目级 ops，避免命中其他仓库的同名命令。
+            export PATH="${opsCommand}/bin:$PATH"
             echo "tela dev shell ready (cargo $(cargo --version | cut -d' ' -f2), node $(node --version), pnpm $(pnpm --version))"
           '';
         in {
