@@ -12,6 +12,7 @@ pub struct Input {
     bind_id: Option<BindId>,
     disabled: bool,
     focused: bool,
+    border_radius: f32,
 }
 
 impl Default for Input {
@@ -29,6 +30,7 @@ impl Input {
             bind_id: None,
             disabled: false,
             focused: false,
+            border_radius: 4.0,
         }
     }
 
@@ -62,6 +64,12 @@ impl Input {
         self
     }
 
+    /// 设置输入框圆角（逻辑像素）。
+    pub fn border_radius(mut self, border_radius: f32) -> Self {
+        self.border_radius = border_radius.max(0.0);
+        self
+    }
+
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let shown = if self.value.is_empty() {
@@ -69,14 +77,21 @@ impl Input {
         } else {
             text(&self.value, 13.0, TEXT)
         };
-        let mut node: UiNode = field_box(vec![shown], 180.0, 28.0, self.disabled, self.focused)
-            .layout(LayoutConcern {
-                width: Some(tela_contract::Size::fixed(180.0)),
-                height: Some(tela_contract::Size::fixed(28.0)),
-                cross_align: tela_contract::CrossAlign::Center,
-                ..LayoutConcern::default()
-            })
-            .into();
+        let mut node: UiNode = field_box(
+            vec![shown],
+            180.0,
+            28.0,
+            self.disabled,
+            self.focused,
+            self.border_radius,
+        )
+        .layout(LayoutConcern {
+            width: Some(tela_contract::Size::fixed(180.0)),
+            height: Some(tela_contract::Size::fixed(28.0)),
+            cross_align: tela_contract::CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .into();
         if !self.disabled {
             node.interact = Some(InteractConcern {
                 clickable: true,
@@ -105,6 +120,7 @@ pub struct InputNumber {
     step: f64,
     disabled: bool,
     bind_id: Option<BindId>,
+    border_radius: f32,
 }
 
 impl Default for InputNumber {
@@ -123,6 +139,7 @@ impl InputNumber {
             step: 1.0,
             disabled: false,
             bind_id: None,
+            border_radius: 4.0,
         }
     }
 
@@ -157,6 +174,12 @@ impl InputNumber {
         self
     }
 
+    /// 设置输入框圆角（逻辑像素）。
+    pub fn border_radius(mut self, border_radius: f32) -> Self {
+        self.border_radius = border_radius.max(0.0);
+        self
+    }
+
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let value_text = if self.value.fract() == 0.0 {
@@ -182,6 +205,7 @@ impl InputNumber {
             28.0,
             self.disabled,
             false,
+            self.border_radius,
         )
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(120.0)),
@@ -213,7 +237,7 @@ impl From<InputNumber> for UiNode {
 #[cfg(test)]
 mod tests {
     use super::{Input, InputNumber};
-    use tela_contract::ContentConcern;
+    use tela_contract::{BorderRadius, ContentConcern};
 
     #[test]
     fn input_shows_placeholder_when_empty() {
@@ -243,5 +267,20 @@ mod tests {
             shown.content,
             Some(ContentConcern::Text(ref t)) if t.text == "42"
         ));
+    }
+
+    #[test]
+    fn input_variants_apply_the_configured_corner_radius() {
+        let input = Input::new().border_radius(7.0).into_node();
+        let number = InputNumber::new().border_radius(9.0).into_node();
+
+        assert_eq!(
+            input.visual.as_ref().map(|visual| visual.border_radius),
+            Some(BorderRadius::all(7.0))
+        );
+        assert_eq!(
+            number.visual.as_ref().map(|visual| visual.border_radius),
+            Some(BorderRadius::all(9.0))
+        );
     }
 }

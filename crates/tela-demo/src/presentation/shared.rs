@@ -1,6 +1,8 @@
 //! View 组件共用的设计令牌与小型构件。
 
-use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, Size, TextContent, UiNode};
+use tela_contract::{
+    BindId, BorderRadius, Color, InteractConcern, LayoutConcern, Size, TextContent, UiNode,
+};
 use tela_core::builder::{LayoutContainer, Primitive};
 use tela_icon::{Icon, IconName};
 use tela_ui::Text;
@@ -17,9 +19,57 @@ pub const ROW_H: f32 = 32.0;
 pub const PREVIEW_ROW_H: f32 = 20.0;
 pub const OVERSCAN: u32 = 3;
 
-pub const BG: Color = Color::rgba(0.97, 0.98, 0.99, 1.0);
+/// Canvas 仍完整占据视口；应用工作区在其中保留这一级轻量边距。
+pub const APP_INSET: f32 = 8.0;
+/// 保持短视口下两行文件无需产生虚假滚动范围的最小客户端高度。
+pub const MIN_CLIENT_SHELL_H: f32 = TOP_BAR_H
+    + TOOLBAR_H
+    + STATUS_BAR_H
+    + DETAIL_HEADER_H
+    + 32.0
+    + ROW_H * 2.0
+    + BORDER_WIDTH * 2.0;
+pub const TOOLBAR_SURFACE_INSET: f32 = 4.0;
+pub const TOOLBAR_SURFACE_H: f32 = TOOLBAR_H - TOOLBAR_SURFACE_INSET * 2.0;
+pub const TABLE_CONTENT_INSET: f32 = 4.0;
+pub const BORDER_WIDTH: f32 = 1.0;
+
+pub const CONTROL_RADIUS: f32 = 6.0;
+pub const ROW_RADIUS: f32 = 6.0;
+pub const SURFACE_RADIUS: f32 = 8.0;
+pub const TILE_RADIUS: f32 = 10.0;
+pub const SHELL_RADIUS: f32 = 12.0;
+
+pub const SHELL_TOP_RADIUS: BorderRadius = BorderRadius {
+    top_left: SHELL_RADIUS,
+    top_right: SHELL_RADIUS,
+    bottom_right: 0.0,
+    bottom_left: 0.0,
+};
+pub const SHELL_BOTTOM_RADIUS: BorderRadius = BorderRadius {
+    top_left: 0.0,
+    top_right: 0.0,
+    bottom_right: SHELL_RADIUS,
+    bottom_left: SHELL_RADIUS,
+};
+pub const TABLE_HEADER_RADIUS: BorderRadius = BorderRadius {
+    top_left: SURFACE_RADIUS,
+    top_right: SURFACE_RADIUS,
+    bottom_right: 0.0,
+    bottom_left: 0.0,
+};
+pub const TABLE_BODY_RADIUS: BorderRadius = BorderRadius {
+    top_left: 0.0,
+    top_right: 0.0,
+    bottom_right: SURFACE_RADIUS,
+    bottom_left: SURFACE_RADIUS,
+};
+
+pub const BG: Color = Color::rgba(0.94, 0.96, 0.99, 1.0);
 pub const SURFACE: Color = Color::WHITE;
-pub const MUTED_SURFACE: Color = Color::rgba(0.95, 0.97, 0.99, 1.0);
+pub const SIDEBAR_SURFACE: Color = Color::rgba(0.975, 0.985, 1.0, 1.0);
+pub const MUTED_SURFACE: Color = Color::rgba(0.95, 0.97, 0.995, 1.0);
+pub const BORDER: Color = Color::rgba(0.85, 0.89, 0.95, 1.0);
 pub const TEXT: Color = Color::rgba(0.06, 0.09, 0.15, 1.0);
 pub const SECONDARY: Color = Color::rgba(0.36, 0.42, 0.50, 1.0);
 pub const PRIMARY: Color = Color::rgba(0.15, 0.39, 0.92, 1.0);
@@ -73,6 +123,7 @@ pub fn command_button(
         })
         .palette(palette)
         .disabled(disabled)
+        .border_radius(CONTROL_RADIUS)
         .text_metrics(12.0, 15.0)
         .into_node();
     if let Some(interact) = &mut node.interact {

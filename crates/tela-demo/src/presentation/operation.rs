@@ -9,7 +9,10 @@ use tela_ui::{DraftInput, DraftInputSnapshot};
 
 use crate::domain::{FileManagerSession, OperationKind};
 
-use super::shared::{SECONDARY, SURFACE, TEXT, command_button, fixed, text};
+use super::shared::{
+    BORDER, BORDER_WIDTH, CONTROL_RADIUS, SECONDARY, SHELL_RADIUS, SURFACE, TEXT, command_button,
+    fixed, text,
+};
 
 pub const OPERATION_MODAL_KEY: &str = "operation-modal";
 
@@ -48,6 +51,7 @@ pub fn operation_modal(
             )
             .placeholder("输入名称")
             .focused(input_focused)
+            .border_radius(CONTROL_RADIUS)
             .into_node(),
             300.0,
             32.0,
@@ -77,12 +81,14 @@ pub fn operation_modal(
             width: Some(Size::fixed(360.0)),
             height: Some(Size::fixed(if needs_input { 220.0 } else { 180.0 })),
             padding: tela_contract::Insets::all(22.0),
+            border_width: BORDER_WIDTH,
             gap: 16.0,
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
             fill: Some(Fill::Solid(SURFACE)),
-            border_radius: BorderRadius::all(8.0),
+            border_color: Some(BORDER),
+            border_radius: BorderRadius::all(SHELL_RADIUS),
             ..VisualConcern::default()
         })
         .into();

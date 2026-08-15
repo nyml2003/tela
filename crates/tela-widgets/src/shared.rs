@@ -43,13 +43,14 @@ pub(crate) fn field_box(
     height: f32,
     disabled: bool,
     focused: bool,
+    border_radius: f32,
 ) -> LayoutContainer {
     let border = if focused { BORDER_HOVER } else { BORDER };
     LayoutContainer::row(children)
         .visual(VisualConcern {
             fill: Some(Fill::Solid(if disabled { DISABLED_BG } else { FIELD_BG })),
             border_color: Some(border),
-            border_radius: tela_contract::BorderRadius::all(4.0),
+            border_radius: tela_contract::BorderRadius::all(border_radius.max(0.0)),
             ..VisualConcern::default()
         })
         .layout(LayoutConcern {

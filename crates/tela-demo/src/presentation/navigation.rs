@@ -1,6 +1,8 @@
 //! 目录导航组件。
 
-use tela_contract::{Fill, LayoutConcern, OverlaySpec, Size, StackAlign, UiNode, VisualConcern};
+use tela_contract::{
+    BorderRadius, Fill, LayoutConcern, OverlaySpec, Size, StackAlign, UiNode, VisualConcern,
+};
 use tela_core::builder::LayoutContainer;
 use tela_icon::IconName;
 
@@ -19,7 +21,7 @@ pub fn directory_tree(
     } else {
         SIDEBAR_W
     };
-    let row_width = (width - 20.0).max(1.0);
+    let row_width = (width - 20.0 - BORDER_WIDTH * 2.0).max(1.0);
     let mut rows = vec![
         text("快速访问", 11.0, SECONDARY),
         scope_row(
@@ -60,11 +62,18 @@ pub fn directory_tree(
             height: Some(Size::fixed(height)),
             gap: 2.0,
             padding: tela_contract::Insets::all(10.0),
+            border_width: BORDER_WIDTH,
             overflow: tela_contract::Overflow::Scroll,
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
-            fill: Some(Fill::Solid(SURFACE)),
+            fill: Some(Fill::Solid(SIDEBAR_SURFACE)),
+            border_color: Some(BORDER),
+            border_radius: if overlay {
+                BorderRadius::all(SHELL_RADIUS)
+            } else {
+                BorderRadius::default()
+            },
             ..VisualConcern::default()
         })
         .into()
@@ -111,6 +120,7 @@ fn nav_row(entry: &Entry, selected: bool, width: f32) -> UiNode {
     })
     .visual(VisualConcern {
         fill: selected.then_some(Fill::Solid(SELECTED)),
+        border_radius: BorderRadius::all(ROW_RADIUS),
         ..VisualConcern::default()
     })
     .into();
@@ -146,6 +156,7 @@ fn scope_row(label: &str, bind_id: &str, selected: bool, width: f32) -> UiNode {
     })
     .visual(VisualConcern {
         fill: selected.then_some(Fill::Solid(SELECTED)),
+        border_radius: BorderRadius::all(ROW_RADIUS),
         ..VisualConcern::default()
     })
     .into();

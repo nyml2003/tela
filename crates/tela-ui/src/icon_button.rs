@@ -22,6 +22,7 @@ pub struct IconButton {
     label_size: f32,
     label_line_height: f32,
     gap: f32,
+    border_radius: f32,
 }
 
 impl IconButton {
@@ -39,6 +40,7 @@ impl IconButton {
             label_size: 12.0,
             label_line_height: 16.0,
             gap: 6.0,
+            border_radius: 6.0,
         }
     }
 
@@ -92,6 +94,12 @@ impl IconButton {
         self
     }
 
+    /// 设置外层 Button 圆角（逻辑像素）。
+    pub fn border_radius(mut self, border_radius: f32) -> Self {
+        self.border_radius = border_radius.max(0.0);
+        self
+    }
+
     /// 生成本帧节点树。
     pub fn into_node(self) -> UiNode {
         let palette = self.palette.unwrap_or_else(|| self.variant.palette());
@@ -120,6 +128,7 @@ impl IconButton {
             .variant(self.variant)
             .palette(palette)
             .state(self.state)
+            .border_radius(self.border_radius)
             .into_node()
     }
 }
@@ -132,7 +141,7 @@ impl From<IconButton> for UiNode {
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{ContentConcern, CrossAlign, FontRef, NodeKind};
+    use tela_contract::{BorderRadius, ContentConcern, CrossAlign, FontRef, NodeKind};
     use tela_icon::IconName;
     use tela_widgets::{ButtonState, ButtonVariant};
 
@@ -164,6 +173,18 @@ mod tests {
         assert!(
             matches!(inline.children[1].content, Some(ContentConcern::Text(ref text))
             if text.text == "设计")
+        );
+    }
+
+    #[test]
+    fn forwards_the_configured_corner_radius_to_its_button_root() {
+        let node = IconButton::new(IconName::Folder)
+            .border_radius(7.0)
+            .into_node();
+
+        assert_eq!(
+            node.visual.as_ref().map(|visual| visual.border_radius),
+            Some(BorderRadius::all(7.0))
         );
     }
 }

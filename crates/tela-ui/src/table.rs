@@ -4,8 +4,8 @@
 //! [`Tr::data_row`] 消费业务数据的唯一 id，以满足虚拟列表跨窗口复用的 `semantic-id` 要求。
 
 use tela_contract::{
-    Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy, LayoutConcern, SemanticKey,
-    Size, UiNode, VirtualListSpec, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy,
+    LayoutConcern, SemanticKey, Size, UiNode, VirtualListSpec, VisualConcern,
 };
 use tela_core::{LayoutContainer, ViewStateStore};
 
@@ -24,6 +24,36 @@ pub enum CellAlign {
     Center,
     /// 内容贴近单元格右侧。
     End,
+}
+
+/// 表格表体与内容区域的主题无关视觉参数。
+///
+/// `content_inset` 包裹表头和表体，表格对外仍保持传入的宽度；调用方应按扣除横向
+/// inset 后的内宽计算列宽，保证固定表头和虚拟行对齐。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TableStyle {
+    /// 表头与表体相对表格外框的内缩。
+    pub content_inset: Insets,
+    /// 虚拟表体背景。
+    pub body_background: Color,
+    /// 可选的虚拟表体边框颜色。
+    pub body_border_color: Option<Color>,
+    /// 虚拟表体边框宽度（逻辑像素）。
+    pub body_border_width: f32,
+    /// 虚拟表体圆角。
+    pub body_border_radius: BorderRadius,
+}
+
+impl Default for TableStyle {
+    fn default() -> Self {
+        Self {
+            content_inset: Insets::default(),
+            body_background: Color::WHITE,
+            body_border_color: Some(BORDER),
+            body_border_width: 0.0,
+            body_border_radius: BorderRadius::default(),
+        }
+    }
 }
 
 /// 表格单元格：内容（文本或任意节点）+ 宽度 + 对齐 + 内边距。
@@ -118,6 +148,7 @@ pub struct Tr {
     selected: bool,
     hovered: bool,
     interactive: bool,
+    border_radius: BorderRadius,
 }
 
 impl Tr {
@@ -132,6 +163,7 @@ impl Tr {
             selected: false,
             hovered: false,
             interactive: false,
+            border_radius: BorderRadius::default(),
         }
     }
 
@@ -158,6 +190,12 @@ impl Tr {
     /// 设置行背景色。
     pub fn background(mut self, background: Color) -> Self {
         self.background = Some(background);
+        self
+    }
+
+    /// 设置行背景的独立四角圆角。
+    pub fn border_radius(mut self, border_radius: BorderRadius) -> Self {
+        self.border_radius = border_radius;
         self
     }
 
@@ -204,6 +242,7 @@ impl Tr {
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(bg)),
                 border_color: None,
+                border_radius: self.border_radius,
                 ..VisualConcern::default()
             })
             .layout(layout);
@@ -245,6 +284,7 @@ pub struct Table {
     row_height: f32,
     row_spacing: f32,
     overscan: u32,
+    style: TableStyle,
 }
 
 impl Table {
@@ -261,6 +301,7 @@ impl Table {
             row_height: 28.0,
             row_spacing: 0.0,
             overscan: 0,
+            style: TableStyle::default(),
         }
     }
 
@@ -303,17 +344,33 @@ impl Table {
         self
     }
 
+    /// 设置表体与内容区域的主题无关视觉参数。
+    pub fn style(mut self, style: TableStyle) -> Self {
+        self.style = style;
+        self
+    }
+
     /// 生成固定表头 + 可滚动虚拟表体。表体自身是唯一的滚动命中目标。
     pub fn into_node(self) -> UiNode {
+        let surface_width =
+            (self.width - self.style.content_inset.left - self.style.content_inset.right).max(0.0);
+        let body_border_width = self.style.body_border_width.max(0.0);
+        let row_width = (surface_width - body_border_width * 2.0).max(0.0);
         let mut header_row = self.header;
         let header_layout = header_row.layout.get_or_insert_with(LayoutConcern::default);
-        header_layout.width = Some(Size::fixed(self.width));
+        header_layout.width = Some(Size::fixed(row_width));
         header_layout.height = Some(Size::fixed(self.header_height));
         header_layout.cross_align = tela_contract::CrossAlign::Center;
         let header: UiNode = LayoutContainer::frame(header_row)
             .layout(LayoutConcern {
-                width: Some(Size::fixed(self.width)),
+                width: Some(Size::fixed(surface_width)),
                 height: Some(Size::fixed(self.header_height)),
+                padding: Insets {
+                    top: 0.0,
+                    right: body_border_width,
+                    bottom: 0.0,
+                    left: body_border_width,
+                },
                 ..LayoutConcern::default()
             })
             .into();
@@ -322,7 +379,7 @@ impl Table {
             .into_iter()
             .map(|mut row| {
                 let layout = row.layout.get_or_insert_with(LayoutConcern::default);
-                layout.width = Some(Size::fixed(self.width));
+                layout.width = Some(Size::fixed(row_width));
                 layout.height = Some(Size::fixed(self.row_height));
                 layout.cross_align = tela_contract::CrossAlign::Center;
                 row
@@ -339,13 +396,15 @@ impl Table {
             rows,
         )
         .visual(VisualConcern {
-            fill: Some(Fill::Solid(Color::WHITE)),
-            border_color: Some(BORDER),
+            fill: Some(Fill::Solid(self.style.body_background)),
+            border_color: self.style.body_border_color,
+            border_radius: self.style.body_border_radius,
             ..VisualConcern::default()
         })
         .layout(LayoutConcern {
-            width: Some(Size::fixed(self.width)),
+            width: Some(Size::fixed(surface_width)),
             height: Some(Size::fixed(self.body_height)),
+            border_width: body_border_width,
             ..LayoutConcern::default()
         })
         .interact(InteractConcern {
@@ -353,10 +412,26 @@ impl Table {
             ..InteractConcern::default()
         })
         .into();
-        LayoutContainer::column([header, body])
+        let content: UiNode = LayoutContainer::column([header, body])
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(surface_width)),
+                height: Some(Size::fixed(self.header_height + self.body_height)),
+                ..LayoutConcern::default()
+            })
+            .into();
+        if self.style.content_inset == Insets::default() {
+            return content;
+        }
+        LayoutContainer::frame(content)
             .layout(LayoutConcern {
                 width: Some(Size::fixed(self.width)),
-                height: Some(Size::fixed(self.header_height + self.body_height)),
+                height: Some(Size::fixed(
+                    self.header_height
+                        + self.body_height
+                        + self.style.content_inset.top
+                        + self.style.content_inset.bottom,
+                )),
+                padding: self.style.content_inset,
                 ..LayoutConcern::default()
             })
             .into()
@@ -371,8 +446,10 @@ impl From<Table> for UiNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Table, Td, Tr};
-    use tela_contract::{ContentConcern, Fill, NodeKind, VirtualListSpec};
+    use super::{Table, TableStyle, Td, Tr};
+    use tela_contract::{
+        BorderRadius, Color, ContentConcern, Fill, Insets, NodeKind, Size, VirtualListSpec,
+    };
 
     #[test]
     fn td_text_sets_label_without_identity() {
@@ -430,5 +507,77 @@ mod tests {
             })
         ));
         assert!(body.interact.as_ref().is_some_and(|i| i.hoverable));
+    }
+
+    #[test]
+    fn styled_surface_keeps_header_and_virtual_rows_on_the_same_inner_width() {
+        let row_radius = BorderRadius::all(6.0);
+        let table = Table::new(Tr::new(vec![Td::text("名称").into()]).height(32.0))
+            .virtual_rows(
+                1,
+                0,
+                vec![
+                    Tr::data_row("row-0", vec![Td::text("文件").into()])
+                        .height(32.0)
+                        .border_radius(row_radius)
+                        .into(),
+                ],
+            )
+            .width(320.0)
+            .header_height(32.0)
+            .body_height(224.0)
+            .row_metrics(32.0, 0.0, 0)
+            .style(TableStyle {
+                content_inset: Insets {
+                    top: 0.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                    left: 4.0,
+                },
+                body_background: Color::WHITE,
+                body_border_color: Some(Color::BLUE),
+                body_border_width: 1.0,
+                body_border_radius: BorderRadius::all(8.0),
+            })
+            .into_node();
+
+        assert_eq!(table.kind, NodeKind::Frame);
+        let content = &table.children[0];
+        let header = &content.children[0];
+        let body = &content.children[1];
+
+        assert_eq!(
+            header.layout.as_ref().and_then(|layout| layout.width),
+            Some(Size::fixed(312.0))
+        );
+        assert_eq!(
+            header.children[0]
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.width),
+            Some(Size::fixed(310.0))
+        );
+        assert_eq!(
+            body.layout.as_ref().and_then(|layout| layout.width),
+            Some(Size::fixed(312.0))
+        );
+        assert_eq!(
+            body.layout.as_ref().map(|layout| layout.border_width),
+            Some(1.0)
+        );
+        assert_eq!(
+            body.children[0]
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.width),
+            Some(Size::fixed(310.0))
+        );
+        assert_eq!(
+            body.children[0]
+                .visual
+                .as_ref()
+                .map(|visual| visual.border_radius),
+            Some(row_radius)
+        );
     }
 }

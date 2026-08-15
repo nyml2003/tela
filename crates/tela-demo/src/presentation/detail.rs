@@ -1,11 +1,11 @@
 //! 目录内容、元数据摘要与文件预览组件。
 
 use tela_contract::{
-    Color, Fill, IdentityConcern, KeyStrategy, LayoutConcern, SemanticKey, Size, UiNode,
-    VirtualListSpec, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, KeyStrategy, LayoutConcern, SemanticKey, Size,
+    UiNode, VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::LayoutContainer;
-use tela_ui::{Table, Td, Tr, VirtualWindow};
+use tela_ui::{Table, TableStyle, Td, Tr, VirtualWindow};
 
 use crate::domain::{DirectoryView, Entry, EntryKind, FileManagerModel, FileManagerSession};
 
@@ -45,6 +45,10 @@ pub fn detail_pane(
             width: Some(Size::fixed(width.max(1.0))),
             height: Some(Size::fixed(height)),
             ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(SURFACE)),
+            ..VisualConcern::default()
         })
         .into()
 }
@@ -151,18 +155,19 @@ fn file_list(
     compact: bool,
     scroll_y: f32,
 ) -> UiNode {
+    let content_width = (width - TABLE_CONTENT_INSET * 2.0 - BORDER_WIDTH * 2.0).max(1.0);
     let columns: Vec<(&str, f32)> = if compact {
         vec![
-            ("名称", width * 0.58),
-            ("类型", width * 0.20),
-            ("大小", width * 0.18),
+            ("名称", content_width * 0.58),
+            ("类型", content_width * 0.20),
+            ("大小", content_width * 0.18),
         ]
     } else {
         vec![
-            ("名称", width * 0.44),
-            ("类型", width * 0.16),
-            ("修改时间", width * 0.22),
-            ("大小", width * 0.14),
+            ("名称", content_width * 0.44),
+            ("类型", content_width * 0.16),
+            ("修改时间", content_width * 0.22),
+            ("大小", content_width * 0.14),
         ]
     };
     let header = Tr::new(
@@ -172,7 +177,8 @@ fn file_list(
             .collect(),
     )
     .height(32.0)
-    .background(MUTED_SURFACE);
+    .background(MUTED_SURFACE)
+    .border_radius(TABLE_HEADER_RADIUS);
     let body_height = (height - 32.0).max(ROW_H);
     let window = VirtualWindow::for_viewport(
         entries.len() as u32,
@@ -192,6 +198,18 @@ fn file_list(
         .header_height(32.0)
         .body_height(body_height)
         .row_metrics(ROW_H, 0.0, OVERSCAN)
+        .style(TableStyle {
+            content_inset: tela_contract::Insets {
+                top: 0.0,
+                right: TABLE_CONTENT_INSET,
+                bottom: 0.0,
+                left: TABLE_CONTENT_INSET,
+            },
+            body_background: SURFACE,
+            body_border_color: Some(BORDER),
+            body_border_width: BORDER_WIDTH,
+            body_border_radius: TABLE_BODY_RADIUS,
+        })
         .into()
 }
 
@@ -231,6 +249,7 @@ fn file_row(entry: &Entry, selected: bool, columns: &[(&str, f32)]) -> UiNode {
     let row: UiNode = Tr::data_row(format!("entry-{}", entry.id), cells)
         .height(ROW_H)
         .selected(selected)
+        .border_radius(BorderRadius::all(ROW_RADIUS))
         .interactive(true)
         .into();
     clickable(row, format!("entry.select.{}", entry.id))
@@ -306,11 +325,14 @@ fn thumbnail_card(entry: &Entry, selected: bool) -> UiNode {
         width: Some(Size::fixed(140.0)),
         height: Some(Size::fixed(122.0)),
         padding: tela_contract::Insets::all(10.0),
+        border_width: BORDER_WIDTH,
         gap: 8.0,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
         fill: Some(Fill::Solid(if selected { SELECTED } else { SURFACE })),
+        border_color: Some(BORDER),
+        border_radius: BorderRadius::all(TILE_RADIUS),
         ..VisualConcern::default()
     })
     .into();
@@ -380,6 +402,7 @@ fn text_preview(entry: &Entry, width: f32, height: f32, scroll_y: f32) -> UiNode
     })
     .visual(VisualConcern {
         fill: Some(Fill::Solid(CODE_BG)),
+        border_radius: BorderRadius::all(SURFACE_RADIUS),
         ..VisualConcern::default()
     })
     .into()
@@ -401,11 +424,14 @@ fn asset_preview(entry: &Entry, width: f32, height: f32) -> UiNode {
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
             height: Some(Size::fixed(height.max(1.0))),
+            border_width: BORDER_WIDTH,
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
             fill: Some(Fill::Solid(SURFACE)),
+            border_color: Some(BORDER),
+            border_radius: BorderRadius::all(SURFACE_RADIUS),
             ..VisualConcern::default()
         })
         .into()

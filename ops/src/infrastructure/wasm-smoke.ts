@@ -19,7 +19,7 @@ function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-/** 从 dist/ 加载 CPU wasm，验证首帧、全视口尺寸、frame trace 与壳层像素分区。 */
+/** 从 dist/ 加载 CPU wasm，验证首帧、全视口尺寸、frame trace 与客户端壳层像素分区。 */
 export class NodeWasmSmokePort implements WasmSmokePort {
   async verify(path: string): Promise<WasmSmokeResult> {
     try {
@@ -52,11 +52,18 @@ export class NodeWasmSmokePort implements WasmSmokePort {
       for (const label of REQUIRED_TRACE_LABELS) {
         assert(trace.includes(label), `首帧缺少 ${label}`);
       }
-      const header = pixel(4, 4);
-      const footer = pixel(4, height - 4);
+      // Canvas 仍覆盖完整视口，四角是应用工作区底色；客户端壳层从 8px 内缩处开始。
+      // 顶/底壳使用相同的 Surface，不再依赖已经废弃的深色顶栏与浅色底栏对比。
+      const outside = pixel(4, 4);
+      const header = pixel(Math.floor(width / 2), 34);
+      const footer = pixel(Math.floor(width / 2), height - 22);
       assert(
-        header[3] === 255 && footer[3] === 255 && header.join() !== footer.join(),
-        `客户端顶栏/状态栏像素未分区：header=${header} footer=${footer}`,
+        outside[3] === 255
+          && header[3] === 255
+          && footer[3] === 255
+          && outside.join() !== header.join()
+          && header.join() === footer.join(),
+        `客户端工作区/壳层像素分区错误：outside=${outside} header=${header} footer=${footer}`,
       );
       return { ok: true, detail: `${width}x${height}, client-shell/frame-trace` };
     } catch (error: unknown) {

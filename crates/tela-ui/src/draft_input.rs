@@ -15,6 +15,7 @@ pub struct DraftInput {
     placeholder: String,
     disabled: bool,
     focused: bool,
+    border_radius: f32,
 }
 
 impl DraftInput {
@@ -26,6 +27,7 @@ impl DraftInput {
             placeholder: String::new(),
             disabled: false,
             focused: false,
+            border_radius: 4.0,
         }
     }
 
@@ -47,6 +49,12 @@ impl DraftInput {
         self
     }
 
+    /// 设置输入框圆角（逻辑像素）。
+    pub fn border_radius(mut self, border_radius: f32) -> Self {
+        self.border_radius = border_radius.max(0.0);
+        self
+    }
+
     /// 返回当前局部状态快照。
     pub fn snapshot(&self) -> &DraftInputSnapshot {
         &self.snapshot
@@ -60,6 +68,7 @@ impl DraftInput {
             .placeholder(self.placeholder)
             .disabled(self.disabled)
             .focused(self.focused)
+            .border_radius(self.border_radius)
             .into_node()
     }
 }

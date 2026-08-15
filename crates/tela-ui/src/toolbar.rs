@@ -1,7 +1,8 @@
 //! 主题无关的命令工具栏。
 
 use tela_contract::{
-    Color, Fill, IdentityConcern, Insets, KeyStrategy, LayoutConcern, Size, UiNode, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, Insets, KeyStrategy, LayoutConcern, Size, UiNode,
+    VisualConcern,
 };
 use tela_core::LayoutContainer;
 use tela_icon::IconName;
@@ -22,6 +23,14 @@ pub struct ToolbarStyle {
     pub gap: f32,
     /// 容器内边距。
     pub padding: Insets,
+    /// 工具栏表面的圆角。
+    pub border_radius: BorderRadius,
+    /// 可选的工具栏表面边框颜色。
+    pub border_color: Option<Color>,
+    /// 工具栏表面边框宽度（逻辑像素）。
+    pub border_width: f32,
+    /// 工具栏内命令 Button 的圆角（逻辑像素）。
+    pub button_border_radius: f32,
     /// 可选的原子 Button 调色板覆盖。
     pub button_palette: Option<ButtonPalette>,
     /// 可选的破坏性 Button 调色板覆盖。
@@ -40,6 +49,10 @@ impl Default for ToolbarStyle {
                 bottom: 0.0,
                 left: 12.0,
             },
+            border_radius: BorderRadius::default(),
+            border_color: None,
+            border_width: 0.0,
+            button_border_radius: 6.0,
             button_palette: None,
             destructive_button_palette: None,
         }
@@ -121,10 +134,12 @@ impl ToolbarItem {
         self,
         palette: Option<ButtonPalette>,
         destructive_palette: Option<ButtonPalette>,
+        button_border_radius: f32,
     ) -> UiNode {
         let mut button = if let Some(icon) = self.icon {
             let mut value = IconButton::new(icon)
                 .size(self.width, 30.0)
+                .border_radius(button_border_radius)
                 .variant(if self.destructive {
                     ButtonVariant::Danger
                 } else {
@@ -162,6 +177,7 @@ impl ToolbarItem {
                 })
                 .disabled(self.disabled)
                 .hovered(self.hovered)
+                .border_radius(button_border_radius)
                 .text_metrics(12.0, 15.0)
         };
         if let Some(palette) = if self.destructive {
@@ -302,6 +318,7 @@ impl Toolbar {
                 item.into_node(
                     self.style.button_palette,
                     self.style.destructive_button_palette,
+                    self.style.button_border_radius,
                 )
             })
             .collect();
@@ -315,6 +332,7 @@ impl Toolbar {
             children.push(trigger.into_node(
                 self.style.button_palette,
                 self.style.destructive_button_palette,
+                self.style.button_border_radius,
             ));
         }
         LayoutContainer::row(children)
@@ -327,11 +345,14 @@ impl Toolbar {
                 height: Some(Size::fixed(self.style.height)),
                 gap: self.style.gap,
                 padding: self.style.padding,
+                border_width: self.style.border_width.max(0.0),
                 cross_align: tela_contract::CrossAlign::Center,
                 ..LayoutConcern::default()
             })
             .visual(VisualConcern {
                 fill: Some(Fill::Solid(self.style.background)),
+                border_color: self.style.border_color,
+                border_radius: self.style.border_radius,
                 ..VisualConcern::default()
             })
             .into()
@@ -346,10 +367,11 @@ impl From<Toolbar> for UiNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Toolbar, ToolbarItem, ToolbarOverflow};
+    use super::{Toolbar, ToolbarItem, ToolbarOverflow, ToolbarStyle};
     use crate::{UiIntent, intent_from_action};
-    use tela_contract::{NodeId, SemanticKey, UiAction};
+    use tela_contract::{BorderRadius, Color, NodeId, SemanticKey, UiAction};
     use tela_core::{IdentityAllocator, UiTree};
+    use tela_icon::IconName;
 
     fn key_for_target(tree: &UiTree, target: &str) -> SemanticKey {
         let bind_id = format!("ui.invoke:{target}");
@@ -462,6 +484,37 @@ mod tests {
             key_for_target(&second, "command.toggle-view"),
             view_key,
             "同一命令移动后仍由 core 保持其身份"
+        );
+    }
+
+    #[test]
+    fn style_applies_surface_and_command_corner_radii() {
+        let surface_radius = BorderRadius::all(8.0);
+        let node = Toolbar::new()
+            .item(ToolbarItem::new("新建", "command.new").icon(IconName::Add))
+            .style(ToolbarStyle {
+                border_radius: surface_radius,
+                border_color: Some(Color::BLUE),
+                border_width: 1.0,
+                button_border_radius: 6.0,
+                ..ToolbarStyle::default()
+            })
+            .into_node();
+
+        assert_eq!(
+            node.visual.as_ref().map(|visual| visual.border_radius),
+            Some(surface_radius)
+        );
+        assert_eq!(
+            node.layout.as_ref().map(|layout| layout.border_width),
+            Some(1.0)
+        );
+        assert_eq!(
+            node.children[0]
+                .visual
+                .as_ref()
+                .map(|visual| visual.border_radius),
+            Some(BorderRadius::all(6.0))
         );
     }
 }

@@ -611,6 +611,10 @@ fn node_at<'a>(node: &'a UiNode, target: usize, i: &mut usize) -> Option<&'a UiN
 mod tests {
     use super::*;
     use crate::domain::FileCommand;
+    use crate::presentation::shared::{
+        APP_INSET, BORDER, BORDER_WIDTH, SHELL_BOTTOM_RADIUS, SHELL_TOP_RADIUS, STATUS_BAR_H,
+        SURFACE, TOP_BAR_H,
+    };
     use tela_core::FocusSlot;
     use tela_icon::{Icon, IconName};
 
@@ -668,6 +672,68 @@ mod tests {
         for label in ["TELA 文件", "新建", "工作区", "README.md"] {
             assert!(labels.contains(&label.to_owned()), "缺少 {label}");
         }
+    }
+
+    #[test]
+    fn client_shell_insets_and_rounds_its_chrome_without_shrinking_the_viewport() {
+        let mut app = App::new();
+        app.set_viewport(1440.0, 900.0);
+        assert!(app.ensure_frame());
+
+        let top_bar = app
+            .frame()
+            .commands
+            .iter()
+            .find_map(|command| match &command.payload {
+                tela_contract::DrawPayload::RoundedRect {
+                    fill: Some(fill),
+                    border: Some(border),
+                    radius,
+                } if *fill == SURFACE
+                    && border.color == BORDER
+                    && border.width == BORDER_WIDTH
+                    && *radius == SHELL_TOP_RADIUS
+                    && (command.geometry.y - APP_INSET).abs() <= f32::EPSILON
+                    && (command.geometry.h - TOP_BAR_H).abs() <= f32::EPSILON =>
+                {
+                    Some(command.geometry)
+                }
+                _ => None,
+            })
+            .expect("正常视口的顶栏必须以带圆角的客户端外框绘制");
+        let status_bar = app
+            .frame()
+            .commands
+            .iter()
+            .find_map(|command| match &command.payload {
+                tela_contract::DrawPayload::RoundedRect {
+                    fill: Some(fill),
+                    border: Some(border),
+                    radius,
+                } if *fill == SURFACE
+                    && border.color == BORDER
+                    && border.width == BORDER_WIDTH
+                    && *radius == SHELL_BOTTOM_RADIUS
+                    && (command.geometry.h - STATUS_BAR_H).abs() <= f32::EPSILON =>
+                {
+                    Some(command.geometry)
+                }
+                _ => None,
+            })
+            .expect("正常视口的状态栏必须闭合客户端外框的底部圆角");
+
+        assert!((top_bar.x - APP_INSET).abs() <= f32::EPSILON);
+        assert!((top_bar.w - (1440.0 - APP_INSET * 2.0)).abs() <= f32::EPSILON);
+        assert!((status_bar.x - APP_INSET).abs() <= f32::EPSILON);
+        assert!((status_bar.y + status_bar.h - (900.0 - APP_INSET)).abs() <= f32::EPSILON);
+        assert_eq!(
+            app.frame().viewport,
+            Viewport {
+                width: 1440.0,
+                height: 900.0,
+            },
+            "客户端留白只能作用于应用工作区，不能缩小 Canvas 的逻辑视口",
+        );
     }
 
     #[test]
@@ -980,6 +1046,16 @@ mod tests {
                     )
             })
             .expect("聚焦文件行必须投影自身的 FocusRing");
+
+        let focus_radius = match &focus_ring.payload {
+            tela_contract::DrawPayload::RoundedRect { radius, .. } => *radius,
+            _ => unreachable!("FocusRing 已按 RoundedRect 筛选"),
+        };
+        assert_eq!(
+            focus_radius,
+            tela_contract::BorderRadius::all(crate::presentation::shared::ROW_RADIUS),
+            "焦点环必须继承文件行圆角，不能退化为矩形",
+        );
 
         let ring_center = focus_ring.geometry.y + focus_ring.geometry.h / 2.0;
         for (name, command) in [("图标", icon), ("文字", label)] {

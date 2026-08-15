@@ -47,8 +47,12 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
     let operation_focused = props.operation_focused;
     let narrow = viewport.width < 1200.0;
     let compact = viewport.width < 900.0;
-    let content_h = (viewport.height - TOP_BAR_H - TOOLBAR_H - STATUS_BAR_H).max(120.0);
-    let detail_w = viewport.width - if narrow { 0.0 } else { SIDEBAR_W };
+    let horizontal_inset = APP_INSET.min((viewport.width - 1.0).max(0.0) * 0.5);
+    let vertical_inset = APP_INSET.min((viewport.height - MIN_CLIENT_SHELL_H).max(0.0) * 0.5);
+    let shell_width = viewport.width;
+    let shell_height = viewport.height;
+    let content_h = (shell_height - TOP_BAR_H - TOOLBAR_H - STATUS_BAR_H).max(120.0);
+    let detail_w = (shell_width - if narrow { 0.0 } else { SIDEBAR_W }).max(1.0);
     let mut workspace = Vec::new();
     if !narrow {
         workspace.push(directory_tree(model, session, content_h, narrow));
@@ -63,30 +67,32 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
     ));
 
     let shell: UiNode = LayoutContainer::column([
-        top_bar(props.search_input.clone(), search_focused, viewport.width),
-        command_toolbar(
-            model,
-            session,
-            viewport.width,
-            props.hovered_target.as_deref(),
-        ),
-        workspace_stack(workspace, model, session, viewport.width, content_h, narrow),
-        status_bar(model, session, viewport.width, props.hovered_target.clone()),
+        top_bar(props.search_input.clone(), search_focused, shell_width),
+        command_toolbar(model, session, shell_width, props.hovered_target.as_deref()),
+        workspace_stack(workspace, model, session, shell_width, content_h, narrow),
+        status_bar(model, session, shell_width, props.hovered_target.clone()),
     ])
     .layout(LayoutConcern {
-        width: Some(Size::fixed(viewport.width)),
-        height: Some(Size::fixed(viewport.height)),
+        width: Some(Size::fixed(shell_width)),
+        height: Some(Size::fixed(shell_height)),
         ..LayoutConcern::default()
     })
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(BG)),
-        ..VisualConcern::default()
-    })
-    .identity(IdentityConcern {
-        update_mode: UpdateMode::Dirty,
-        ..IdentityConcern::default()
-    })
     .into();
+    let shell: UiNode = LayoutContainer::frame(shell)
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(viewport.width)),
+            height: Some(Size::fixed(viewport.height)),
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(BG)),
+            ..VisualConcern::default()
+        })
+        .identity(IdentityConcern {
+            update_mode: UpdateMode::Dirty,
+            ..IdentityConcern::default()
+        })
+        .into();
     let root = if session.operation.is_some() {
         LayoutContainer::stack([
             shell,
@@ -148,6 +154,7 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
         DraftInput::new(search_input, "file.search")
             .placeholder("搜索文件和目录")
             .focused(focused)
+            .border_radius(CONTROL_RADIUS)
             .into_node(),
         search_w,
         28.0,
@@ -179,11 +186,14 @@ fn top_bar(search_input: DraftInputSnapshot, focused: bool, width: f32) -> UiNod
                 bottom: 0.0,
                 left: 16.0,
             },
+            border_width: BORDER_WIDTH,
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .visual(VisualConcern {
             fill: Some(Fill::Solid(SURFACE)),
+            border_color: Some(BORDER),
+            border_radius: SHELL_TOP_RADIUS,
             ..VisualConcern::default()
         })
         .into()
@@ -200,6 +210,17 @@ fn command_toolbar(
     let control_width = if compact { 38.0 } else { 78.0 };
     let style = ToolbarStyle {
         background: SURFACE,
+        height: TOOLBAR_SURFACE_H,
+        padding: tela_contract::Insets {
+            top: 0.0,
+            right: 8.0,
+            bottom: 0.0,
+            left: 8.0,
+        },
+        border_radius: tela_contract::BorderRadius::all(SURFACE_RADIUS),
+        border_color: Some(BORDER),
+        border_width: BORDER_WIDTH,
+        button_border_radius: CONTROL_RADIUS,
         button_palette: Some(command_button_palette(false)),
         destructive_button_palette: Some(command_button_palette(true)),
         ..ToolbarStyle::default()
@@ -262,7 +283,7 @@ fn command_toolbar(
             );
         }
     }
-    toolbar
+    let toolbar = toolbar
         .item(
             ToolbarItem::new(
                 match session.view {
@@ -312,7 +333,15 @@ fn command_toolbar(
                 .width(control_width),
         )
         .hovered_target(hovered_target)
-        .into_node()
+        .into_node();
+    LayoutContainer::frame(toolbar)
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(TOOLBAR_H)),
+            padding: tela_contract::Insets::all(TOOLBAR_SURFACE_INSET),
+            ..LayoutConcern::default()
+        })
+        .into()
 }
 
 fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {
@@ -326,20 +355,16 @@ fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {
         text(current, 13.0, TEXT),
     ])
     .layout(LayoutConcern {
-        height: Some(Size::fixed(TOOLBAR_H)),
+        height: Some(Size::fixed(TOOLBAR_SURFACE_H)),
         gap: 8.0,
         padding: tela_contract::Insets {
             top: 0.0,
-            right: 16.0,
+            right: 8.0,
             bottom: 0.0,
-            left: 16.0,
+            left: 8.0,
         },
         cross_align: tela_contract::CrossAlign::Center,
         ..LayoutConcern::default()
-    })
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(SURFACE)),
-        ..VisualConcern::default()
     })
     .into()
 }
@@ -390,11 +415,14 @@ fn status_bar(
             bottom: 0.0,
             left: 12.0,
         },
+        border_width: BORDER_WIDTH,
         cross_align: tela_contract::CrossAlign::Center,
         ..LayoutConcern::default()
     })
     .visual(VisualConcern {
         fill: Some(Fill::Solid(SURFACE)),
+        border_color: Some(BORDER),
+        border_radius: SHELL_BOTTOM_RADIUS,
         ..VisualConcern::default()
     })
     .into()
