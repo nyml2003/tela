@@ -3,8 +3,8 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build [demo|frontend|bundle|win32|macos|all] [--release] [--gpu]  构建发布物到 dist/
-//   ops verify demo [--build]    冒烟测试（可先自动构建）
+//   ops build [webview|frontend|bundle|win32|macos|all] [--release]  构建发布物到 dist/
+//   ops verify bundle [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -14,16 +14,15 @@ import type { Reporter } from '../domain/ports.ts';
 import { TerminalReporter } from '../infrastructure/reporter.ts';
 import { NodeProcessPort } from '../infrastructure/process.ts';
 import { NodeFsPort } from '../infrastructure/fs.ts';
-import { NodeWasmSmokePort } from '../infrastructure/wasm-smoke.ts';
 import { CargoPort } from '../infrastructure/cargo.ts';
 import { HttpServerPort } from '../infrastructure/server.ts';
 import { runCheck } from '../application/check.ts';
-import { runBuildDemo } from '../application/build-demo.ts';
+import { runBuildWebview } from '../application/build-webview.ts';
 import { runBuildFrontend } from '../application/build-frontend.ts';
 import { runBuildBundle } from '../application/build-bundle.ts';
 import { runBuildWin32 } from '../application/build-win32.ts';
 import { runBuildMacos } from '../application/build-macos.ts';
-import { runVerifyDemo } from '../application/verify-demo.ts';
+import { runVerifyBundle } from '../application/verify-bundle.ts';
 import { runServe } from '../application/serve.ts';
 import { runVerifyGpu } from '../application/verify-gpu.ts';
 import { TelemetryStore } from '../infrastructure/telemetry-store.ts';
@@ -32,12 +31,12 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build [demo|frontend|bundle|win32|macos|all] [--release] [--gpu]
-                              构建发布物到 dist/；all 会先重建目录（--gpu：WebGPU 后端
-                              + wasm-bindgen glue，强制 release）
-  ops verify [demo|gpu] [--build] [--port N]
-                              验证（默认 demo）：demo = 冒烟测试（--build 先构建）；
-                              gpu = 原生 JS WebGPU 环境自检（不经 wgpu，离屏三角形
+  ops build [webview|frontend|bundle|win32|macos|all] [--release]
+                              构建发布物到 dist/；默认 all，会先重建目录。webview 是
+                              WGPU shell + wasm-bindgen glue，bundle 是可移植应用 guest。
+  ops verify [bundle|gpu] [--build] [--port N]
+                              验证（默认 bundle）：bundle = archive/ABI/guest 首帧校验
+                              （--build 先生成 bundle）；gpu = 原生 JS WebGPU 环境自检（不经 wgpu，离屏三角形
                               回读上报，判定环境 vs wgpu 层问题）
   ops serve [port]            开发静态服务器（默认 8000）
   ops help                    显示本帮助`;
@@ -65,7 +64,6 @@ async function main(): Promise<number> {
       help: { type: 'boolean', short: 'h', default: false },
       release: { type: 'boolean', default: false },
       build: { type: 'boolean', default: false },
-      gpu: { type: 'boolean', default: false },
       port: { type: 'string', default: '' },
     },
   });
@@ -84,30 +82,22 @@ async function main(): Promise<number> {
       return result.passed ? 0 : 1;
     }
     case 'build': {
-      const targets = target === 'all' ? ['demo', 'frontend', 'bundle'] : [target ?? 'demo'];
+      const buildAll = target === undefined || target === 'all';
+      const targets = buildAll ? ['webview', 'frontend', 'bundle'] : [target];
       const processPort = new NodeProcessPort();
       const fs = new NodeFsPort();
-      if (target === 'all') {
+      if (buildAll) {
         reporter.section('准备发布目录（dist/）');
         await fs.resetDir(workspace.distDir);
         reporter.ok(`已重建 ${workspace.distDir}`);
       }
       for (const t of targets) {
-        if (t === 'demo') {
-          // `all --gpu` 必须留下可直接切换的 CPU 与 GPU 产物；只构建
-          // `demo --gpu` 时仍保持原有的 GPU-only 行为。
-          const modes = target === 'all' && values.gpu ? [false, true] : [values.gpu];
-          for (const gpu of modes) {
-            const cargo = new CargoPort(new NodeProcessPort(), workspace);
-            const result = await runBuildDemo(
-              { cargo, process: processPort, fs, reporter, workspace },
-              {
-                profile: values.release ? 'release' : 'dev',
-                gpu,
-              },
-            );
-            if (!result.ok) return 1;
-          }
+        if (t === 'webview') {
+          const cargo = new CargoPort(new NodeProcessPort(), workspace);
+          const result = await runBuildWebview(
+            { cargo, process: processPort, fs, reporter, workspace },
+          );
+          if (!result.ok) return 1;
         } else if (t === 'frontend') {
           const result = await runBuildFrontend({ process: processPort, reporter, workspace });
           if (!result.ok) return 1;
@@ -135,14 +125,14 @@ async function main(): Promise<number> {
           );
           if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（demo | frontend | bundle | win32 | macos | all）`);
+          reporter.fail(`未知构建目标: ${t}（webview | frontend | bundle | win32 | macos | all）`);
           return 1;
         }
       }
       return 0;
     }
     case 'verify': {
-      if (!target) target = 'demo';  // 默认 demo（收敛后 verify 不带 target = 冒烟）
+      if (!target) target = 'bundle';
       if (target === 'gpu') {
         const port = values.port ? Number(values.port) : 8200;
         const telemetry = new TelemetryStore();
@@ -152,24 +142,21 @@ async function main(): Promise<number> {
         );
         return ok ? 0 : 1;
       }
-      if (target === 'demo') {
+      if (target === 'bundle') {
         const process = new NodeProcessPort();
         const fs = new NodeFsPort();
         if (values.build) {
-          reporter.info('--build 已指定，先构建 CPU wasm…');
+          reporter.info('--build 已指定，先构建应用 bundle…');
           const cargo = new CargoPort(process, workspace);
-          const build = await runBuildDemo(
+          const build = await runBuildBundle(
             { cargo, process, fs, reporter, workspace },
-            { profile: values.release ? 'release' : 'dev', gpu: false },
           );
           if (!build.ok) return 1;
         }
-        const vresult = await runVerifyDemo(
-          { fs, smoke: new NodeWasmSmokePort(), reporter, workspace },
-        );
+        const vresult = await runVerifyBundle({ fs, process, reporter, workspace });
         return vresult.ok ? 0 : 1;
       }
-      reporter.fail(`未知验证目标: ${target ?? '(空)'}（demo | gpu）`);
+      reporter.fail(`未知验证目标: ${target ?? '(空)'}（bundle | gpu）`);
       return 1;
     }
     case 'serve': {

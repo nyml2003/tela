@@ -55,3 +55,25 @@ test('首选端口空闲时直接使用（不跳转）', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('仅开发 bundle 路径开放跨 origin 读取', async () => {
+  const base = await freePort();
+  const root = await mkdtemp(join(tmpdir(), 'ops-serve-cors-'));
+  await writeFile(join(root, 'index.html'), 'page');
+  await (async () => {
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(join(root, 'tela-dev'));
+  })();
+  await writeFile(join(root, 'tela-dev', 'latest.json'), '{}');
+  const serverPort = new HttpServerPort();
+  try {
+    const result = await serverPort.serve(root, base, () => {});
+    const bundle = await fetch(`http://127.0.0.1:${result.port}/tela-dev/latest.json`);
+    assert.equal(bundle.headers.get('access-control-allow-origin'), '*');
+    const page = await fetch(`http://127.0.0.1:${result.port}/`);
+    assert.equal(page.headers.get('access-control-allow-origin'), null);
+    await result.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

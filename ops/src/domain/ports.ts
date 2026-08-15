@@ -32,18 +32,8 @@ export interface FsPort {
   rename(from: string, to: string): Promise<void>;
   /** 文件字节数，不存在返回 null。 */
   statSize(path: string): Promise<number | null>;
-  /** 更新文件 mtime（touch；构建时间戳刷新用，见 build-demo.ts）。 */
+  /** 更新文件 mtime（供需要强制重跑 build script 的构建用例使用）。 */
   touch(path: string): Promise<void>;
-}
-
-/** 已发布 wasm 的最小渲染闭环验证；实现属于 Node 基础设施。 */
-export interface WasmSmokePort {
-  verify(path: string): Promise<WasmSmokeResult>;
-}
-
-export interface WasmSmokeResult {
-  ok: boolean;
-  detail: string;
 }
 
 /** 静态服务器端口（serve 命令）。 */

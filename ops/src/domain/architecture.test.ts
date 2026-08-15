@@ -94,6 +94,17 @@ test('完整合法 workspace 通过', () => {
       ['bytemuck', 'normal'],
       ['wgpu', 'normal'],
     ]),
+    crate('tela-webview-sdk', [
+      ['tela-app-abi', 'normal'],
+      ['tela-bundle', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['serde_json', 'normal'],
+      ['wasm-bindgen', 'normal'],
+      ['wasm-bindgen-futures', 'normal'],
+      ['web-sys', 'normal'],
+      ['wgpu', 'normal'],
+    ]),
     crate('tela-widgets', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
@@ -162,4 +173,15 @@ test('tela-text 禁止反向依赖 core 或 renderer', () => {
   ]);
   assert.equal(violations.length, 1);
   assert.match(violations[0]!.message, /tela-core/);
+});
+
+test('WebView SDK 不能静态依赖应用 guest', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-webview-sdk', [
+      ['tela-app-abi', 'normal'],
+      ['tela-demo', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /bundle 加载 guest/.test(violation.message)));
 });

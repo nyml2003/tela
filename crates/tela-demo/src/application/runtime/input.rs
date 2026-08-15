@@ -127,31 +127,6 @@ impl App {
             .unwrap_or(0)
     }
 
-    pub fn begin_input_upload(&mut self, bytes: usize) -> *mut u8 {
-        self.input_upload.resize(bytes, 0);
-        self.input_upload.as_mut_ptr()
-    }
-
-    pub fn input_value_ptr(&mut self) -> *const u8 {
-        self.input_upload = self.input_value().into_bytes();
-        self.input_upload.as_ptr()
-    }
-
-    pub fn input_value_len(&mut self) -> u32 {
-        self.input_value().len() as u32
-    }
-
-    pub fn finish_input_upload(&mut self, bytes: usize) -> u32 {
-        if bytes != self.input_upload.len() {
-            self.input_upload.clear();
-            return 0;
-        }
-        let Ok(value) = String::from_utf8(std::mem::take(&mut self.input_upload)) else {
-            return 0;
-        };
-        self.set_input_value(value)
-    }
-
     pub(super) fn commit_operation_input_before_confirm(&mut self) {
         self.dispatch_draft_input_for(&IntentTarget::new("operation.value"), DraftInputEvent::Blur);
     }

@@ -42,7 +42,7 @@ export async function runBuildBundle(
     'cargo',
     [
       'run', '--quiet', '-p', 'tela-bundle', '--bin', 'tela-bundle', '--',
-      workspace.wasmArtifactPath(profile),
+      workspace.appGuestWasmArtifactPath(profile),
       workspace.bundleArchiveTempPath(),
       workspace.bundleIndexTempPath(),
       '/tela-dev/tela-demo.tela',

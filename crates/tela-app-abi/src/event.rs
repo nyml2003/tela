@@ -70,6 +70,20 @@ pub enum AppEvent {
     InputEnter,
     /// Cancel the focused draft input.
     InputCancel,
+    /// The platform IME began composing text for the focused input.
+    ///
+    /// Composition is an interaction-lifetime marker. It does not commit text by itself.
+    InputCompositionStart,
+    /// The platform IME finished composing text for the focused input.
+    ///
+    /// The host sends the resulting controlled value separately, then lets the guest decide
+    /// whether an explicit confirmation should commit it.
+    InputCompositionEnd,
+    /// Atomically replace the runtime keymap with a validated JSON snapshot.
+    ///
+    /// This is intentionally an ABI event rather than a browser-only escape hatch, so every
+    /// host can use the same key intent and physical-key-table pipeline.
+    ReplaceKeymapJson(String),
 }
 
 /// Cursor requested by the application for the current pointer location.
@@ -171,5 +185,19 @@ mod tests {
             decode_status(&encode_status(&status).expect("encode")).expect("decode"),
             status
         );
+    }
+
+    #[test]
+    fn extended_input_events_round_trip() {
+        for event in [
+            AppEvent::InputCompositionStart,
+            AppEvent::InputCompositionEnd,
+            AppEvent::ReplaceKeymapJson(r#"{\"bindings\":[]}"#.to_owned()),
+        ] {
+            assert_eq!(
+                decode_event(&encode_event(&event).expect("encode")).expect("decode"),
+                event
+            );
+        }
     }
 }

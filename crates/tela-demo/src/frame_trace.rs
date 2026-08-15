@@ -1,8 +1,8 @@
 //! `UiFrame` 的稳定调试投影。
 //!
 //! 这是 demo 宿主的只读观测格式，不是另一个场景描述或 renderer 输入。
-//! 它直接从已经 resolve 完成的 `tela_contract::UiFrame` 生成，因此 CPU 与
-//! WebGPU 可打印完全相同的逻辑帧。
+//! 它直接从已经 resolve 完成的 `tela_contract::UiFrame` 生成，因此任一 SDK renderer
+//! 都可观测完全相同的逻辑帧。
 
 use std::fmt::Write;
 

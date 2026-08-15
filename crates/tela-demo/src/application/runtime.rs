@@ -42,7 +42,6 @@ pub struct App {
     pub(crate) model: FileManagerModel,
     pub(crate) session: FileManagerSession,
     viewport: Viewport,
-    raster_dpi: f32,
     frame: Option<UiFrame>,
     tree: Option<UiTree>,
     layout_cache: LayoutCache,
@@ -53,11 +52,8 @@ pub struct App {
     clickable_keys: BTreeSet<SemanticKey>,
     hovered_toolbar_target: Option<String>,
     keymap: KeymapSnapshot,
+    #[cfg(test)]
     frame_trace: Vec<u8>,
-    cpu_rendered: bool,
-    cpu_bitmap: Vec<u8>,
-    input_upload: Vec<u8>,
-    keymap_upload: Vec<u8>,
     /// 由 `runtime::input` 管理的隐藏 DOM 编辑器目标，不是 tela key 或业务状态。
     dom_input_target: Option<tela_ui::IntentTarget>,
     /// 弹窗关闭后的显式焦点恢复延迟到新树建好后执行，避免把旧帧 node id 带回页面。
@@ -76,7 +72,6 @@ impl App {
             model: FileManagerModel::sample(),
             session: FileManagerSession::default(),
             viewport: DEFAULT_VIEWPORT,
-            raster_dpi: 1.0,
             frame: None,
             tree: None,
             layout_cache: LayoutCache::new(),
@@ -87,11 +82,8 @@ impl App {
             clickable_keys: BTreeSet::new(),
             hovered_toolbar_target: None,
             keymap: KeymapSnapshot::file_manager_default(),
+            #[cfg(test)]
             frame_trace: Vec::new(),
-            cpu_rendered: false,
-            cpu_bitmap: Vec::new(),
-            input_upload: Vec::new(),
-            keymap_upload: Vec::new(),
             dom_input_target: None,
             restore_focus_pending: false,
             revision,
@@ -111,14 +103,6 @@ impl App {
         self.viewport = viewport;
         self.invalidate_frame();
         true
-    }
-
-    pub fn set_raster_dpi(&mut self, dpi: f32) {
-        let dpi = dpi.clamp(1.0, 3.0);
-        if (dpi - self.raster_dpi).abs() > f32::EPSILON {
-            self.raster_dpi = dpi;
-            self.cpu_rendered = false;
-        }
     }
 
     pub fn ensure_frame(&mut self) -> bool {
@@ -206,35 +190,26 @@ impl App {
             self.invalidate_frame();
             return self.ensure_frame();
         }
-        self.frame_trace = crate::frame_trace::to_json(&frame).into_bytes();
+        #[cfg(test)]
+        {
+            self.frame_trace = crate::frame_trace::to_json(&frame).into_bytes();
+        }
         self.nav_scroll_key = controls.scrolls.first().cloned();
         self.detail_scroll_key = controls.scrolls.get(1).cloned();
         self.clickable_keys = controls.clickable;
         self.tree = Some(tree);
         self.frame = Some(frame);
-        self.cpu_rendered = false;
         true
     }
 
     pub fn frame(&self) -> &UiFrame {
         self.frame.as_ref().expect("共享逻辑帧必须已构建")
     }
-    #[cfg(feature = "webgpu")]
-    pub fn viewport(&self) -> Viewport {
-        self.viewport
-    }
+    #[cfg(test)]
     pub fn frame_trace(&self) -> &[u8] {
         &self.frame_trace
     }
-    pub fn cpu_bitmap(&self) -> &[u8] {
-        &self.cpu_bitmap
-    }
-    pub fn raster_size(&self) -> (u32, u32) {
-        (
-            (self.viewport.width * self.raster_dpi).round() as u32,
-            (self.viewport.height * self.raster_dpi).round() as u32,
-        )
-    }
+    #[cfg(all(feature = "app-wasm", target_arch = "wasm32"))]
     pub fn pointer_cursor(&self) -> u32 {
         if self.input_is_focused() {
             1
@@ -247,20 +222,6 @@ impl App {
         } else {
             0
         }
-    }
-
-    pub fn render_cpu_if_needed(&mut self) -> bool {
-        self.ensure_frame();
-        if self.cpu_rendered {
-            return false;
-        }
-        let mut config = tela_render_raster::RasterConfig::default_with(
-            tela_contract::Color::rgba(0.96, 0.97, 0.99, 1.0),
-        );
-        config.dpi_scale = self.raster_dpi;
-        self.cpu_bitmap = tela_render_raster::render_frame(self.frame(), &config).pixels;
-        self.cpu_rendered = true;
-        true
     }
 
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
@@ -339,29 +300,11 @@ impl App {
         true
     }
 
-    /// 为 CPU WASM ABI 分配键位表 JSON 上传缓冲区。
-    pub fn begin_keymap_upload(&mut self, bytes: usize) -> *mut u8 {
-        self.keymap_upload.resize(bytes, 0);
-        self.keymap_upload.as_mut_ptr()
-    }
-
-    /// 校验并原子替换刚上传的键位表 JSON；失败时旧快照保持生效。
-    pub fn finish_keymap_upload(&mut self, bytes: usize) -> u32 {
-        if bytes != self.keymap_upload.len() {
-            self.keymap_upload.clear();
-            return 0;
-        }
-        let Ok(json) = String::from_utf8(std::mem::take(&mut self.keymap_upload)) else {
-            return 0;
-        };
-        u32::from(self.replace_keymap_json(&json).is_ok())
-    }
-
     fn invalidate_frame(&mut self) {
         self.frame = None;
         self.tree = None;
+        #[cfg(test)]
         self.frame_trace.clear();
-        self.cpu_rendered = false;
     }
     fn mark_view_dirty(&mut self) {
         self.revision.update(|value| *value = value.wrapping_add(1));
@@ -860,21 +803,6 @@ mod tests {
             "完整 20px 图标行盒内不应再有溢出墨迹: {overflow_pixels:?}"
         );
         assert!(!ink_pixels.is_empty(), "图片图标必须产生可见墨迹");
-
-        assert!(app.render_cpu_if_needed());
-        let (width, height) = app.raster_size();
-        let pixels = app.cpu_bitmap();
-        assert!(
-            ink_pixels.iter().any(|&(x, y)| {
-                if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
-                    return false;
-                }
-                let offset = (y as usize * width as usize + x as usize) * 4;
-                let pixel = &pixels[offset..offset + 4];
-                pixel[2] > pixel[0].saturating_add(12) && pixel[0] < 240
-            }),
-            "hero.png 图标的完整墨迹必须由 Raster 绘制"
-        );
     }
 
     #[test]

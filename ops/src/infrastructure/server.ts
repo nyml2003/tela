@@ -76,15 +76,22 @@ export class HttpServerPort implements ServerPort {
         const data = await readFile(target);
         const type = MIME[extname(target)] ?? 'application/octet-stream';
         // 开发服务器禁缓存，避免页面或 wasm/glue 静默使用旧版本。
-        res.writeHead(200, {
+        const headers: Record<string, string> = {
           'Content-Type': type,
           'Cache-Control': 'no-store',
-        });
+        };
+        // 浏览器页面、Win32 和 macOS 开发壳可以从不同 origin 请求同一开发 bundle。
+        // 只给 bundle 路径开放读取权限，普通静态页面和调试 API 不被一并暴露。
+        if (urlPath.startsWith('/tela-dev/')) {
+          headers['Access-Control-Allow-Origin'] = '*';
+        }
+        res.writeHead(200, headers);
         res.end(data);
         log(`200 ${req.method} ${urlPath}`);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          res.writeHead(404).end('Not Found');
+          const headers = urlPathForCors(req.url) ? { 'Access-Control-Allow-Origin': '*' } : {};
+          res.writeHead(404, headers).end('Not Found');
           log(`404 ${req.method} ${req.url ?? '/'}`);
         } else {
           res.writeHead(500).end('Internal Error');
@@ -105,7 +112,7 @@ export class HttpServerPort implements ServerPort {
         if (port !== preferredPort) {
           log(`端口 ${preferredPort} 被占用，自动使用 ${port}`);
         }
-        log(`tela demo: http://127.0.0.1:${port}/`);
+        log(`tela WebView: http://127.0.0.1:${port}/`);
         log(`  root: ${root}`);
         return {
           port,
@@ -133,5 +140,13 @@ export class HttpServerPort implements ServerPort {
     } catch {
       return false;
     }
+  }
+}
+
+function urlPathForCors(requestUrl: string | undefined): boolean {
+  try {
+    return new URL(requestUrl ?? '/', 'http://x').pathname.startsWith('/tela-dev/');
+  } catch {
+    return false;
   }
 }

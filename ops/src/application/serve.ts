@@ -15,17 +15,21 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
   reporter.section('开发服务器（serve）');
   const hasBrowserPage = await fs.exists(`${workspace.distDir}/index.html`);
   const hasSdkBundle = await fs.exists(workspace.bundleIndexPath());
+  const hasWebviewShell = (await fs.exists(workspace.webviewSdkGluePath()))
+    && (await fs.exists(workspace.webviewSdkWasmPath()));
   if (!hasBrowserPage && !hasSdkBundle) {
     reporter.fail(`缺少 ${workspace.distDir}/index.html 和 ${workspace.bundleIndexPath()}`);
-    reporter.info('请先运行: ops build all --gpu（浏览器）或 ops build bundle（原生 SDK）');
+    reporter.info('请先运行: ops build（浏览器）或 ops build bundle（原生 SDK）');
     return undefined;
   }
   const result = await server.serve(workspace.distDir, preferredPort, (msg) => reporter.info(msg));
   reporter.ok(`监听 0.0.0.0:${result.port}`);
-  if (hasBrowserPage) {
+  if (hasBrowserPage && hasSdkBundle && hasWebviewShell) {
     reporter.info('可用页面（URL 单独一行，点击直达）：');
-    reporter.info(`http://127.0.0.1:${result.port}/              （蓝色矩形；?backend=raster|wgpu|auto）`);
+    reporter.info(`http://127.0.0.1:${result.port}/              （统一 bundle + WGPU WebView SDK）`);
     reporter.info(`http://127.0.0.1:${result.port}/rawgpu.html   （原生 WebGPU 自检页）`);
+  } else if (hasBrowserPage) {
+    reporter.warn('浏览器页面构建不完整：还需要 WebView shell 与 tela-dev bundle；运行 ops build。');
   }
   if (hasSdkBundle) {
     reporter.info(`平台 SDK bundle（本机）: http://127.0.0.1:${result.port}/tela-dev/latest.json`);

@@ -106,8 +106,8 @@
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 node ops/src/interface/cli.ts check
-node ops/src/interface/cli.ts build all --gpu
-node ops/src/interface/cli.ts verify demo
+node ops/src/interface/cli.ts build
+node ops/src/interface/cli.ts verify bundle
 cargo fmt --all -- --check
 git diff --check
 ```
@@ -122,8 +122,7 @@ git diff --check
   未见/显式父卸载回收；`crates/tela-ui/src/draft_input.rs` 将其投影为主题中立的 `DraftInput`。
 - `tela-demo` 的顶部搜索和文件操作弹窗均从该运行时读取草稿；输入过程不再直接改
   `session.query` 或 `session.operation.value`，仅 `UiIntent::Commit` 经 Controller 写回。
-- 浏览器隐藏 `textarea` 现转发 `input`、IME composition、`Enter`、`Escape` 与 `blur`；CPU 和
-  WebGPU wasm 入口使用同一组运行时方法。
-- 已执行并通过 `node ops/src/interface/cli.ts check`、`node ops/src/interface/cli.ts build all --gpu`
-  与 `node ops/src/interface/cli.ts verify demo`；定向测试覆盖草稿初始化、IME、取消、冲突、卸载、
-  新建/重命名/标签操作。
+- 浏览器隐藏 `textarea` 现转发 `input`、IME composition、`Enter`、`Escape` 与 `blur`；当前由
+  `tela-webview-sdk` WebView 壳接入同一组应用运行时方法。
+- 本阶段原始验收曾使用已删除的直载 demo 路径；当前工程门禁以 `ops check`、`ops build` 与
+  `ops verify bundle` 为准，定向测试覆盖草稿初始化、IME、取消、冲突、卸载、新建/重命名/标签操作。

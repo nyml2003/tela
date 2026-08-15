@@ -32,6 +32,10 @@ const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
   ['tela-render-raster', ['tela-contract', 'tela-text', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],
   ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-text', 'bytemuck', 'wgpu']],
+  ['tela-webview-sdk', [
+    'tela-app-abi', 'tela-bundle', 'tela-contract', 'tela-render-wgpu',
+    'serde_json', 'wasm-bindgen', 'wasm-bindgen-futures', 'web-sys', 'wgpu',
+  ]],
   ['tela-widgets', ['tela-contract', 'tela-core', 'tela-fonts']],
   ['tela-ui', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-icon', 'tela-text', 'tela-widgets']],
 ];
@@ -90,6 +94,13 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
   const ui = byName.get('tela-ui');
   if (ui && ui.deps.some((d) => d.name.startsWith('tela-render-') || d.name === 'tela-demo')) {
     violations.push({ crate: 'tela-ui', message: '分子组件层禁止依赖 renderer 或 tela-demo' });
+  }
+
+  // 5. 浏览器 WebView 壳只消费协议与 renderer；应用 guest 必须继续来自经过验证的
+  // bundle，不能把 tela-demo 重新静态链接进壳。
+  const webview = byName.get('tela-webview-sdk');
+  if (webview && webview.deps.some((d) => d.name === 'tela-demo')) {
+    violations.push({ crate: 'tela-webview-sdk', message: 'WebView SDK 必须通过 bundle 加载 guest，禁止依赖 tela-demo' });
   }
 
   return violations;

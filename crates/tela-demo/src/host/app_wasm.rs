@@ -157,6 +157,9 @@ fn apply_event(app: &mut crate::App, event: AppEvent) -> bool {
         AppEvent::InputBlur => app.input_blur() != 0,
         AppEvent::InputEnter => app.input_enter() != 0,
         AppEvent::InputCancel => app.input_cancel() != 0,
+        AppEvent::InputCompositionStart => app.composition_start() != 0,
+        AppEvent::InputCompositionEnd => app.composition_end() != 0,
+        AppEvent::ReplaceKeymapJson(json) => app.replace_keymap_json(&json).is_ok(),
     }
 }
 

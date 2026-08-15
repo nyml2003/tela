@@ -17,5 +17,8 @@ pub use event::{
 };
 pub use frame::{WireFrame, decode_frame, encode_frame};
 
-/// ABI version expected by the first development bundle runtime.
-pub const ABI_VERSION: u32 = 1;
+/// ABI version expected by the current development bundle runtime.
+///
+/// Version 2 adds explicit IME composition lifetime events and runtime keymap replacement. Hosts
+/// must reject a bundle whose declared version does not exactly match this value.
+pub const ABI_VERSION: u32 = 2;

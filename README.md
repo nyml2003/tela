@@ -38,6 +38,7 @@
 | [022-构建产物与浏览器宿主目录](docs/022-构建产物与浏览器宿主目录.md) | 浏览器源码、wasm 和静态发布物如何分离？ | 改构建、服务或浏览器诊断页时 |
 | [023-平台SDK与WASM开发包](docs/023-平台SDK与WASM开发包.md) | 原生壳如何一次性加载可验证 WASM 包？Win32 开发态怎样运行？ | 接原生平台 SDK、包协议或系统桥时 |
 | [024-macOS开发SDK实施目标](docs/024-macOS开发SDK实施目标.md) | macOS AppKit/Metal 壳怎样在 Mac 本地构建、从 WSL 请求一次 bundle 并缓存？ | 在 Apple Silicon Mac 接入或验收开发 SDK 时 |
+| [025-WebView开发SDK实施目标](docs/025-WebView开发SDK实施目标.md) | 浏览器如何作为 WebView 壳，从同一 `.tela` 包启动 WGPU 应用？ | 接浏览器、嵌入式 WebView 或排查开发态启动时 |
 
 ## 开发工作流（ops）
 
@@ -48,10 +49,10 @@
 
 ```bash
 ops check                # 四道验证门（fmt/clippy/test/依赖方向）
-ops build all --gpu      # 构建浏览器产物与 tela-dev WASM 开发包
+ops build                # 重建 dist/，构建 WebView WGPU 壳、前端与 tela-dev 开发包
 ops build win32          # 在 WSL 交叉构建 Win32 开发壳到 dist/win32/
 ops build macos          # 在 Apple Silicon macOS 本机构建 Tela.app 到 dist/macos/
-ops verify [demo|gpu]    # 冒烟测试（默认 demo）；gpu = 环境自检（原生 JS 三角形回读）
+ops verify [bundle|gpu]  # 默认校验应用包；gpu = 原生 JS WebGPU 环境自检
 ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 ```
 
@@ -59,9 +60,10 @@ ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 `ops build` 重新生成。浏览器页面模板与宿主代码保留在 `web/`，Rust 演示逻辑保留在
 `crates/tela-demo/`，原生壳与包协议不存放手写内容到 `dist/`。
 
-浏览器演示只保留一个共享场景：`?backend=raster` 使用 CPU 光栅，
-`?backend=wgpu` 使用 wgpu，`?backend=auto` 优先尝试 wgpu 后回退 CPU。三个模式都先由
-`UiTree` 解析出同一个 `UiFrame`，后端只负责最终绘制。
+浏览器是 `tela-webview-sdk` 的一个开发态壳：页面先加载固定的 WebView SDK，再以
+`cache: "no-store"` 请求 `/tela-dev/latest.json` 和 `.tela` archive，校验后实例化其中的
+`app.wasm`。产品页面只走 WGPU；`rawgpu.html` 仍保留为不经过 tela renderer 的浏览器环境诊断页。
+应用 guest、Win32 壳、macOS 壳和浏览器壳共享同一份应用 ABI 与 bundle 协议。
 
 ## 非需求（明确不在基座范围）
 

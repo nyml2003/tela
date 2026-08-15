@@ -1664,7 +1664,6 @@ dependencies = [
 name = "tela-demo"
 version = "0.1.0"
 dependencies = [
- "js-sys",
  "serde",
  "serde_json",
  "tela-app-abi",
@@ -1672,15 +1671,9 @@ dependencies = [
  "tela-core",
  "tela-fonts",
  "tela-icon",
- "tela-render-raster",
- "tela-render-wgpu",
  "tela-text",
  "tela-ui",
  "tela-widgets",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "wgpu",
 ]
 
 [[package]]
@@ -1787,6 +1780,21 @@ dependencies = [
  "tela-icon",
  "tela-text",
  "tela-widgets",
+]
+
+[[package]]
+name = "tela-webview-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tela-app-abi",
+ "tela-bundle",
+ "tela-contract",
+ "tela-render-wgpu",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
 ]
 
 [[package]]

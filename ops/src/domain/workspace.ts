@@ -13,10 +13,14 @@ export interface WorkspacePaths {
   distDir: string;
   /** web 前端源码目录（TypeScript，esbuild 构建到 dist/assets/tela-web）。 */
   webDir: string;
-  /** 演示 wasm 工件目标路径（构建输出）。 */
-  wasmArtifactPath(profile: BuildProfile): string;
-  /** 演示 wasm 发布位置（dist 目录内）。 */
-  wasmDistPath(): string;
+  /** 应用 guest wasm 工件目标路径（构建输出）。 */
+  appGuestWasmArtifactPath(profile: BuildProfile): string;
+  /** 浏览器 WebView SDK wasm 工件目标路径。 */
+  webviewSdkArtifactPath(profile: BuildProfile): string;
+  /** wasm-bindgen 生成的浏览器 WebView SDK glue。 */
+  webviewSdkGluePath(): string;
+  /** wasm-bindgen 生成的浏览器 WebView SDK 背景 wasm。 */
+  webviewSdkWasmPath(): string;
   /** 开发期平台 SDK 请求的 bundle 目录。 */
   bundleDir(): string;
   /** 开发期平台 SDK 请求的压缩 bundle。 */
@@ -61,12 +65,19 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     cratesDir,
     distDir,
     webDir,
-    wasmArtifactPath(profile) {
+    appGuestWasmArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
       return `${root}/target/wasm32-unknown-unknown/${dir}/tela_demo.wasm`;
     },
-    wasmDistPath() {
-      return `${distDir}/tela_demo.wasm`;
+    webviewSdkArtifactPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/wasm32-unknown-unknown/${dir}/tela_webview_sdk.wasm`;
+    },
+    webviewSdkGluePath() {
+      return `${distDir}/tela_webview_sdk.js`;
+    },
+    webviewSdkWasmPath() {
+      return `${distDir}/tela_webview_sdk_bg.wasm`;
     },
     bundleDir() {
       return `${distDir}/tela-dev`;
@@ -123,5 +134,5 @@ export function resolveWorkspace(root: string): WorkspacePaths {
 
 /** demo 演示二进制所属 crate。 */
 export const DEMO_CRATE = 'tela-demo';
-/** 演示页依赖的 CPU wasm 文件名。 */
-export const DEMO_WASM = 'tela_demo.wasm';
+/** 浏览器 WebView 壳所属 crate。 */
+export const WEBVIEW_SDK_CRATE = 'tela-webview-sdk';

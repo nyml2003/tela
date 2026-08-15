@@ -119,8 +119,8 @@ enum UiIntent {
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 node ops/src/interface/cli.ts check
-node ops/src/interface/cli.ts build all --gpu
-node ops/src/interface/cli.ts verify demo
+node ops/src/interface/cli.ts build
+node ops/src/interface/cli.ts verify bundle
 git diff --check
 ```
 

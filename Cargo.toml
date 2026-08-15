@@ -17,6 +17,7 @@ members = [
     "crates/tela-ui",
     "crates/tela-demo",
     "crates/tela-native-sdk-runtime",
+    "crates/tela-webview-sdk",
     "crates/tela-win32-sdk",
     "crates/tela-macos-sdk",
 ]
