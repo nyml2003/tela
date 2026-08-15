@@ -14,12 +14,12 @@ tela-demo 应用源码
   -> SHA-256 / ABI / archive 条目校验
   -> Wasmtime guest
   -> UiFrame
-  -> tela-render-wgpu -> HWND surface
+  -> tela-render-wgpu -> platform surface（HWND / NSView）
 ```
 
-壳是 Rust 编译出的原生 exe，拥有 Win32 SDK、WGPU surface、事件循环和将来系统桥的位置；应用是可替换的 WASM guest，拥有状态、DSL、布局、交互和 `UiFrame`。两者只交换版本化字节包，不交换 Rust 引用、trait object、HWND 或业务 Store。
+壳是 Rust 编译出的原生应用（Win32 exe 或 macOS App 内 executable），拥有平台 SDK、WGPU surface、事件循环和将来系统桥的位置；应用是可替换的 WASM guest，拥有状态、DSL、布局、交互和 `UiFrame`。两者只交换版本化字节包，不交换 Rust 引用、trait object、native window handle 或业务 Store。
 
-开发态每次**进程启动**请求一次包。没有热更新、轮询、跨版本状态迁移、后台预取或运行期二次下载；请求失败时仅回退到本机最后一个仍然通过校验的包。窗口会先显示一个原生 loading 页面，随后仅由一次启动 worker 执行这次请求和 Wasmtime 初始化，UI 线程不会因为网络或 guest 编译失去 Win32 消息泵。
+开发态每次**进程启动**请求一次包。没有热更新、轮询、跨版本状态迁移、后台预取或运行期二次下载；请求失败时仅回退到本机最后一个仍然通过校验的包。窗口会先显示一个原生 loading 页面，随后仅由一次启动 worker 执行这次请求和 Wasmtime 初始化，UI 线程不会因为网络或 guest 编译失去 native event loop。
 
 ## 2. 为什么不是 C ABI 动态库
 
@@ -33,7 +33,7 @@ Win32 壳加载 C ABI DLL 在生产安装器、插件 ABI 或第三方语言嵌�
 | --- | --- | --- |
 | `tela-app-abi` | `AppEvent`、`AppStatus`、帧包编解码、ABI 版本 | 窗口、renderer、业务副作用 |
 | `tela-bundle` | `.tela` archive、内部清单、SHA-256、路径与条目验证 | HTTP、平台缓存、窗口 |
-| `tela-demo` 的 `app-wasm` feature | 可移植 guest exports、应用状态和 DSL | DOM、HWND、GPU API |
+| `tela-demo` 的 `app-wasm` feature | 可移植 guest exports、应用状态和 DSL | DOM、native window、GPU API |
 | `tela-native-sdk-runtime` | HTTP bundle loader、最后有效缓存策略、Wasmtime guest、无窗口 verifier、共享生命周期与启动 CLI | 窗口、WGPU surface、平台输入 |
 | `tela-win32-sdk` | HWND/WGPU、Win32 输入归一化和 Windows 启动 worker | `tela-core` 内部实现、业务逻辑 |
 | `tela-macos-sdk` | AppKit/NSView、Metal/WGPU、macOS 输入和 `~/Library/Caches` 启动 worker | Win32 消息、业务逻辑 |
@@ -59,7 +59,7 @@ v1 会把 `assets/` 一并校验并缓存，保证开发包的完整性；但 gu
 
 启动顺序：
 
-1. UI 线程创建并显示 HWND，立即画出原生 loading 页面，然后继续处理关闭、移动、焦点和 DPI 消息。
+1. UI 线程创建并显示 native window（Win32 HWND 或 macOS `NSWindow`），立即画出原生 loading 页面，然后继续处理关闭、移动、焦点和尺寸/DPI 消息。
 2. 启动 worker 读取 `latest.json`，检查格式版本、ABI、大小和 archive URL。
 3. worker 下载一个 archive，核对压缩包大小与 SHA-256，并读取 archive 检查内部 ABI、条目路径、长度和每条内容哈希。
 4. 成功后 worker 写入 `%LOCALAPPDATA%\\tela\\development\\last-valid.tela`；临时文件完成后再替换缓存。网络或校验失败时，worker 以同一套校验尝试最后有效缓存。
@@ -174,6 +174,6 @@ ops serve
 - `ops build bundle` 可从干净的 `dist/` 产出 release guest 包，并在 Wasmtime 首帧与 viewport 校验通过后最后发布索引。
 - `ops build win32` 交叉编译 GNU Windows 壳到 `dist/win32/`。
 - `ops build macos` 在 Apple Silicon macOS 构建 `dist/macos/Tela.app`；App 只含本地壳，仍启动时请求 bundle。
-- 壳对 ABI、SHA-256、路径和缓存回退有自动化测试；`ShellLifecycle` 对启动/关闭、最小化、重绘合并、surface retry、device-loss 额度与文本焦点边沿有无 HWND 单测；WASM guest export 可由构建产物验证。
+- 壳对 ABI、SHA-256、路径和缓存回退有自动化测试；`ShellLifecycle` 对启动/关闭、最小化、重绘合并、surface retry、device-loss 额度与文本焦点边沿有无 native window 单测；WASM guest export 可由构建产物验证。
 - Windows 真机启动时应先出现可关闭的 loading 窗口，随后显示完整 `UiFrame`，并响应鼠标、键盘、Tab/方向焦点和窗口失焦恢复；`--verbose` 不应再出现 `No DisplayHandle is available`。WSL 交叉编译本身不替代该验收。
 - macOS 真机验收应使用显式 `--bundle-index` 指向开发机的可达地址，验证 AppKit/Metal 呈现、resize、输入、cache fallback 和 WGPU display handle；详细步骤见 [024](024-macOS开发SDK实施目标.md)。

@@ -15,7 +15,7 @@ pub enum ShellPhase {
     Suspended,
     /// Startup failed and the native shell is showing its diagnostic page.
     Failed,
-    /// The HWND is being torn down and must not accept late work.
+    /// The native window is being torn down and must not accept late work.
     Closing,
 }
 
@@ -39,8 +39,9 @@ pub enum DeviceLossAction {
 
 /// State shared conceptually by the native message pump and its background startup worker.
 ///
-/// It deliberately carries no HWND, guest, WGPU object, timer handle, or application state. Those
-/// values remain owned by the Win32 shell; this type only makes their ordering explicit.
+/// It deliberately carries no native-window handle, guest, WGPU object, timer handle, or
+/// application state. Those values remain owned by the platform shell; this type only makes their
+/// ordering explicit.
 #[derive(Debug)]
 pub struct ShellLifecycle {
     phase: ShellPhase,

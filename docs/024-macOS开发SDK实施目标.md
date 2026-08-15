@@ -2,7 +2,7 @@
 
 > **状态：🔧 源码与 macOS 构建入口已实现；需在 Apple Silicon macOS 真机完成首次编译和图形验收。**
 >
-> 本文只定义开发态 AppKit 壳。它不承诺签名、公证、DMG、沙盒分发或完整原生文本服务。
+> 本文只定义开发态 AppKit 壳。签名、公证、DMG、沙盒分发与完整原生文本服务统一归档在 [011](011-已知限制与未来扩展清单.md) 第 5 节。
 
 ## 1. 结论
 
@@ -65,7 +65,7 @@ v1 将 AppKit 事件规范化为现有 `tela-app-abi::AppEvent`：
 - Tab、方向键、Enter、Escape、Backspace 和可打印 ASCII 的受控输入；
 - `AppStatus.cursor` 映射为 arrow / I-beam / pointing-hand cursor。
 
-中文/日文 IME、死键、剪贴板、拖放、原生 accessibility tree 和系统桥尚未实现。特别是当前没有把 `keyDown` 伪装成完整文本服务：ASCII 输入明确是开发态最小子集。后续应由 `tela-widgets` 的文本原子定义 composition/selection/commit 契约，再在 AppKit `NSTextInputClient` 通道实现。
+中文/日文 IME、死键、剪贴板、拖放、原生 accessibility tree 和系统桥尚未实现。特别是当前没有把 `keyDown` 伪装成完整文本服务：ASCII 输入明确是开发态最小子集。后续应由 `tela-widgets` 的文本原子定义 composition/selection/commit 契约，再在 AppKit `NSTextInputClient` 通道实现；完整后置清单见 [011](011-已知限制与未来扩展清单.md) 第 5 节。
 
 ## 5. 构建产物
 
