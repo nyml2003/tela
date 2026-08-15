@@ -50,7 +50,12 @@ pub enum BundleLoadError {
     /// The cached bundle is absent or no longer valid.
     Cache(String),
     /// Neither the current remote package nor cache can start the app.
-    Unavailable { network: String, cache: String },
+    Unavailable {
+        /// The remote request or validation failure.
+        network: String,
+        /// The last-valid cache read or validation failure.
+        cache: String,
+    },
 }
 
 impl fmt::Display for BundleLoadError {

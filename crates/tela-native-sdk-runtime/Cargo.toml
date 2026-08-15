@@ -1,0 +1,20 @@
+[package]
+name = "tela-native-sdk-runtime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Portable runtime support shared by Tela native development SDKs"
+
+[dependencies]
+tela-app-abi = { path = "../tela-app-abi" }
+tela-bundle = { path = "../tela-bundle" }
+tela-contract = { path = "../tela-contract" }
+serde_json = "1"
+wasmtime = { version = "47.0.3", default-features = false, features = ["cranelift", "runtime"] }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tela-sdk-verify"
+path = "src/bin/tela-sdk-verify.rs"

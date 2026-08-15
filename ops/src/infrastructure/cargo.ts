@@ -45,6 +45,13 @@ export class CargoPort {
     return this.gateWithCommand('cargo-win32', 'build', args);
   }
 
+  /** 构建 Apple Silicon macOS 开发壳；只能在本机 Apple SDK 环境中链接。 */
+  async buildMacos(crate: string, profile: BuildProfile): Promise<GateResult> {
+    const args = ['build', '--target', 'aarch64-apple-darwin', '-p', crate];
+    if (profile === 'release') args.push('--release');
+    return this.gate('build', args);
+  }
+
   /** 读取 workspace 各 crate 的声明依赖（--no-deps：只取成员声明，不解析外部树）。 */
   async metadata(): Promise<CrateInfo[]> {
     const res = await this.process.run(

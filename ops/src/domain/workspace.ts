@@ -35,6 +35,20 @@ export interface WorkspacePaths {
   win32DistPath(): string;
   /** Win32 GNU target 的二进制工件位置。 */
   win32ArtifactPath(profile: BuildProfile): string;
+  /** macOS App bundle 的根目录。 */
+  macosAppDir(): string;
+  /** macOS App bundle 的 Contents 目录。 */
+  macosContentsDir(): string;
+  /** macOS App bundle 的可执行文件目录。 */
+  macosExecutableDir(): string;
+  /** macOS App bundle 内的 Info.plist 位置。 */
+  macosInfoPlistPath(): string;
+  /** macOS App bundle 内的原生壳可执行文件位置。 */
+  macosExecutablePath(): string;
+  /** macOS App 的可编辑 Info.plist 源文件。 */
+  macosInfoPlistSourcePath(): string;
+  /** Apple Silicon macOS target 的二进制工件位置。 */
+  macosArtifactPath(profile: BuildProfile): string;
 }
 
 /** 根据仓库根构造路径模型（纯函数）。 */
@@ -81,6 +95,28 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     win32ArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
       return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-win32-sdk.exe`;
+    },
+    macosAppDir() {
+      return `${distDir}/macos/Tela.app`;
+    },
+    macosContentsDir() {
+      return `${distDir}/macos/Tela.app/Contents`;
+    },
+    macosExecutableDir() {
+      return `${distDir}/macos/Tela.app/Contents/MacOS`;
+    },
+    macosInfoPlistPath() {
+      return `${distDir}/macos/Tela.app/Contents/Info.plist`;
+    },
+    macosExecutablePath() {
+      return `${distDir}/macos/Tela.app/Contents/MacOS/tela-macos-sdk`;
+    },
+    macosInfoPlistSourcePath() {
+      return `${cratesDir}/tela-macos-sdk/resources/Info.plist`;
+    },
+    macosArtifactPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/aarch64-apple-darwin/${dir}/tela-macos-sdk`;
     },
   };
 }

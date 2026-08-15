@@ -3,7 +3,7 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build [demo|frontend|bundle|win32|all] [--release] [--gpu]  构建发布物到 dist/
+//   ops build [demo|frontend|bundle|win32|macos|all] [--release] [--gpu]  构建发布物到 dist/
 //   ops verify demo [--build]    冒烟测试（可先自动构建）
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
@@ -22,6 +22,7 @@ import { runBuildDemo } from '../application/build-demo.ts';
 import { runBuildFrontend } from '../application/build-frontend.ts';
 import { runBuildBundle } from '../application/build-bundle.ts';
 import { runBuildWin32 } from '../application/build-win32.ts';
+import { runBuildMacos } from '../application/build-macos.ts';
 import { runVerifyDemo } from '../application/verify-demo.ts';
 import { runServe } from '../application/serve.ts';
 import { runVerifyGpu } from '../application/verify-gpu.ts';
@@ -31,7 +32,7 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build [demo|frontend|bundle|win32|all] [--release] [--gpu]
+  ops build [demo|frontend|bundle|win32|macos|all] [--release] [--gpu]
                               构建发布物到 dist/；all 会先重建目录（--gpu：WebGPU 后端
                               + wasm-bindgen glue，强制 release）
   ops verify [demo|gpu] [--build] [--port N]
@@ -84,7 +85,7 @@ async function main(): Promise<number> {
     }
     case 'build': {
       const targets = target === 'all' ? ['demo', 'frontend', 'bundle'] : [target ?? 'demo'];
-      const process = new NodeProcessPort();
+      const processPort = new NodeProcessPort();
       const fs = new NodeFsPort();
       if (target === 'all') {
         reporter.section('准备发布目录（dist/）');
@@ -99,7 +100,7 @@ async function main(): Promise<number> {
           for (const gpu of modes) {
             const cargo = new CargoPort(new NodeProcessPort(), workspace);
             const result = await runBuildDemo(
-              { cargo, process, fs, reporter, workspace },
+              { cargo, process: processPort, fs, reporter, workspace },
               {
                 profile: values.release ? 'release' : 'dev',
                 gpu,
@@ -108,21 +109,33 @@ async function main(): Promise<number> {
             if (!result.ok) return 1;
           }
         } else if (t === 'frontend') {
-          const result = await runBuildFrontend({ process, reporter, workspace });
+          const result = await runBuildFrontend({ process: processPort, reporter, workspace });
           if (!result.ok) return 1;
         } else if (t === 'bundle') {
-          const cargo = new CargoPort(process, workspace);
-          const result = await runBuildBundle({ cargo, process, fs, reporter, workspace });
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildBundle({ cargo, process: processPort, fs, reporter, workspace });
           if (!result.ok) return 1;
         } else if (t === 'win32') {
-          const cargo = new CargoPort(process, workspace);
+          const cargo = new CargoPort(processPort, workspace);
           const result = await runBuildWin32(
             { cargo, fs, reporter, workspace },
             values.release ? 'release' : 'dev',
           );
           if (!result.ok) return 1;
+        } else if (t === 'macos') {
+          if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+            reporter.fail('macos 目标必须在 Apple Silicon macOS 上构建（需要本机 Apple SDK）。');
+            reporter.info('当前机器仍可执行 ops build bundle，并在 Mac 上运行 ops build macos。');
+            return 1;
+          }
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildMacos(
+            { cargo, fs, reporter, workspace },
+            values.release ? 'release' : 'dev',
+          );
+          if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（demo | frontend | bundle | win32 | all）`);
+          reporter.fail(`未知构建目标: ${t}（demo | frontend | bundle | win32 | macos | all）`);
           return 1;
         }
       }

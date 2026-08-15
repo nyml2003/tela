@@ -21,6 +21,7 @@ test('Win32 壳只复制原生二进制，应用内容保持在远程 bundle', a
     ensureDir: async () => undefined,
     resetDir: async () => undefined,
     copyFile: async (from, to) => { copied.push(`${from}->${to}`); },
+    setMode: async () => undefined,
     rename: async () => undefined,
     statSize: async () => 1024,
     touch: async () => undefined,

@@ -59,7 +59,7 @@ export async function runBuildBundle(
   const guestVerification = await process.run(
     'cargo',
     [
-      'run', '--quiet', '-p', 'tela-win32-sdk', '--', '--verify-bundle',
+      'run', '--quiet', '-p', 'tela-native-sdk-runtime', '--bin', 'tela-sdk-verify', '--',
       workspace.bundleArchiveTempPath(),
     ],
     { cwd: workspace.root },

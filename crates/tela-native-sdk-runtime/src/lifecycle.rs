@@ -1,12 +1,12 @@
-//! Pure lifecycle policy for the Win32 development shell.
+//! Pure lifecycle policy shared by native development shells.
 //!
-//! Native resources and Win32 messages stay in `win32.rs`. This module only decides which state
-//! transitions are legal, so the non-Windows test target can exercise the shell contract without
-//! creating an HWND or GPU device.
+//! Native resources and platform messages stay in their SDK crate. This module only decides which
+//! state transitions are legal, so ordinary host tests can exercise the shell contract without
+//! creating a native window or GPU device.
 
 /// A shell-visible phase that owns the meaning of redraw and input requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ShellPhase {
+pub enum ShellPhase {
     /// The window is visible while bundle loading and guest initialization happen off the UI thread.
     Loading,
     /// A guest, a non-zero client area, and a renderable GPU session are available.
@@ -21,7 +21,7 @@ pub(crate) enum ShellPhase {
 
 /// One edge of the native text-editor channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TextChannelAction {
+pub enum TextChannelAction {
     /// Attach the native text channel to the guest-selected input target.
     Focus,
     /// Detach the native text channel and let the guest commit its local draft once.
@@ -30,7 +30,7 @@ pub(crate) enum TextChannelAction {
 
 /// How the shell responds to a device-lost callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeviceLossAction {
+pub enum DeviceLossAction {
     /// Recreate the complete GPU session once on the UI thread.
     RecreateGpu,
     /// Stop instead of entering an unbounded device-loss loop.
@@ -42,7 +42,7 @@ pub(crate) enum DeviceLossAction {
 /// It deliberately carries no HWND, guest, WGPU object, timer handle, or application state. Those
 /// values remain owned by the Win32 shell; this type only makes their ordering explicit.
 #[derive(Debug)]
-pub(crate) struct ShellLifecycle {
+pub struct ShellLifecycle {
     phase: ShellPhase,
     redraw_pending: bool,
     retry_timer_pending: bool,
@@ -60,7 +60,7 @@ impl Default for ShellLifecycle {
 
 impl ShellLifecycle {
     /// Starts before the window is shown, while no guest or GPU resource exists yet.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             phase: ShellPhase::Loading,
             redraw_pending: false,
@@ -73,17 +73,17 @@ impl ShellLifecycle {
     }
 
     /// Current shell phase.
-    pub(crate) fn phase(&self) -> ShellPhase {
+    pub fn phase(&self) -> ShellPhase {
         self.phase
     }
 
     /// Whether drawing a guest frame is currently valid.
-    pub(crate) fn can_render(&self) -> bool {
+    pub fn can_render(&self) -> bool {
         self.phase == ShellPhase::Running
     }
 
-    /// Coalesces invalidations. The caller only asks Win32 to repaint when this returns `true`.
-    pub(crate) fn request_redraw(&mut self) -> bool {
+    /// Coalesces invalidations. The platform shell asks its native view to repaint only on `true`.
+    pub fn request_redraw(&mut self) -> bool {
         if !matches!(
             self.phase,
             ShellPhase::Loading | ShellPhase::Running | ShellPhase::Failed
@@ -96,12 +96,12 @@ impl ShellLifecycle {
     }
 
     /// Marks the pending invalidation as being serviced by `WM_PAINT`.
-    pub(crate) fn begin_paint(&mut self) {
+    pub fn begin_paint(&mut self) {
         self.redraw_pending = false;
     }
 
     /// Accepts a background startup result. Late results after close are intentionally ignored.
-    pub(crate) fn startup_succeeded(&mut self, client_available: bool) {
+    pub fn startup_succeeded(&mut self, client_available: bool) {
         if self.phase != ShellPhase::Loading {
             return;
         }
@@ -113,14 +113,33 @@ impl ShellLifecycle {
     }
 
     /// Moves the startup page to a native error page. It never revives a closing shell.
-    pub(crate) fn startup_failed(&mut self) {
-        if self.phase == ShellPhase::Loading {
-            self.phase = ShellPhase::Failed;
+    pub fn startup_failed(&mut self) {
+        let _ = self.failed();
+    }
+
+    /// Stops a loading or running shell at a native diagnostic page.
+    ///
+    /// A platform can use this for a fatal guest, renderer, or surface failure without pretending
+    /// that the window was cleanly closed. It cancels pending redraw/retry work and emits the text
+    /// channel's one required blur edge when a controlled input had been attached.
+    pub fn failed(&mut self) -> Option<TextChannelAction> {
+        if matches!(self.phase, ShellPhase::Failed | ShellPhase::Closing) {
+            return None;
+        }
+        self.phase = ShellPhase::Failed;
+        self.redraw_pending = false;
+        self.retry_timer_pending = false;
+        self.window_focused = false;
+        if self.text_channel_attached {
+            self.text_channel_attached = false;
+            Some(TextChannelAction::Blur)
+        } else {
+            None
         }
     }
 
     /// Applies a zero/non-zero client-area transition after the guest exists.
-    pub(crate) fn client_area_changed(&mut self, client_available: bool) {
+    pub fn client_area_changed(&mut self, client_available: bool) {
         match (self.phase, client_available) {
             (ShellPhase::Running, false) => self.phase = ShellPhase::Suspended,
             (ShellPhase::Suspended, true) => self.phase = ShellPhase::Running,
@@ -129,7 +148,7 @@ impl ShellLifecycle {
     }
 
     /// Schedules one bounded retry after an acquire timeout.
-    pub(crate) fn surface_timeout(&mut self) -> Option<u32> {
+    pub fn surface_timeout(&mut self) -> Option<u32> {
         if !self.can_render() || self.retry_timer_pending {
             return None;
         }
@@ -141,7 +160,7 @@ impl ShellLifecycle {
     }
 
     /// Consumes the one-shot retry timer. A suspended or closing window does not repaint.
-    pub(crate) fn take_surface_retry(&mut self) -> bool {
+    pub fn take_surface_retry(&mut self) -> bool {
         if !self.retry_timer_pending {
             return false;
         }
@@ -150,18 +169,18 @@ impl ShellLifecycle {
     }
 
     /// A frame made forward progress, so the next timeout returns to the lowest retry delay.
-    pub(crate) fn surface_presented(&mut self) {
+    pub fn surface_presented(&mut self) {
         self.retry_attempt = 0;
         self.retry_timer_pending = false;
     }
 
     /// Discards a retry made obsolete by resize, suspension, or teardown.
-    pub(crate) fn cancel_surface_retry(&mut self) {
+    pub fn cancel_surface_retry(&mut self) {
         self.retry_timer_pending = false;
     }
 
     /// Allows exactly one complete GPU reconstruction for this process lifetime.
-    pub(crate) fn device_lost(&mut self) -> Option<DeviceLossAction> {
+    pub fn device_lost(&mut self) -> Option<DeviceLossAction> {
         if !matches!(self.phase, ShellPhase::Running | ShellPhase::Suspended) {
             return None;
         }
@@ -174,7 +193,7 @@ impl ShellLifecycle {
     }
 
     /// Records native window focus and returns a text-channel edge when one is required.
-    pub(crate) fn set_window_focus(
+    pub fn set_window_focus(
         &mut self,
         window_focused: bool,
         guest_wants_text: bool,
@@ -183,11 +202,13 @@ impl ShellLifecycle {
         self.reconcile_text_channel(guest_wants_text)
     }
 
+    /// Whether the platform window is currently key/focused according to its native event loop.
+    pub fn window_focused(&self) -> bool {
+        self.window_focused
+    }
+
     /// Reconciles guest focus after a guest event changes its current focus key.
-    pub(crate) fn reconcile_text_channel(
-        &mut self,
-        guest_wants_text: bool,
-    ) -> Option<TextChannelAction> {
+    pub fn reconcile_text_channel(&mut self, guest_wants_text: bool) -> Option<TextChannelAction> {
         let should_attach = self.can_render() && self.window_focused && guest_wants_text;
         if should_attach == self.text_channel_attached {
             return None;
@@ -201,7 +222,7 @@ impl ShellLifecycle {
     }
 
     /// Stops accepting work and detaches the text channel at most once.
-    pub(crate) fn begin_close(&mut self) -> Option<TextChannelAction> {
+    pub fn begin_close(&mut self) -> Option<TextChannelAction> {
         if self.phase == ShellPhase::Closing {
             return None;
         }
@@ -241,6 +262,20 @@ mod tests {
         lifecycle.startup_succeeded(true);
         lifecycle.startup_failed();
         assert_eq!(lifecycle.phase(), ShellPhase::Closing);
+    }
+
+    #[test]
+    fn fatal_runtime_failure_blurs_once_and_keeps_the_native_error_page() {
+        let mut lifecycle = ShellLifecycle::new();
+        lifecycle.startup_succeeded(true);
+        assert_eq!(
+            lifecycle.set_window_focus(true, true),
+            Some(TextChannelAction::Focus)
+        );
+        assert_eq!(lifecycle.failed(), Some(TextChannelAction::Blur));
+        assert_eq!(lifecycle.phase(), ShellPhase::Failed);
+        assert_eq!(lifecycle.failed(), None);
+        assert!(!lifecycle.can_render());
     }
 
     #[test]

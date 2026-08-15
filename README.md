@@ -37,6 +37,7 @@
 | [021-图标原语与行内内容架构](docs/021-图标原语与行内内容架构.md) | 图标 provider、原子交互与 prefix/suffix 行内内容如何分层？ | 设计图标或文本组合时 |
 | [022-构建产物与浏览器宿主目录](docs/022-构建产物与浏览器宿主目录.md) | 浏览器源码、wasm 和静态发布物如何分离？ | 改构建、服务或浏览器诊断页时 |
 | [023-平台SDK与WASM开发包](docs/023-平台SDK与WASM开发包.md) | 原生壳如何一次性加载可验证 WASM 包？Win32 开发态怎样运行？ | 接原生平台 SDK、包协议或系统桥时 |
+| [024-macOS开发SDK实施目标](docs/024-macOS开发SDK实施目标.md) | macOS AppKit/Metal 壳怎样在 Mac 本地构建、从 WSL 请求一次 bundle 并缓存？ | 在 Apple Silicon Mac 接入或验收开发 SDK 时 |
 
 ## 开发工作流（ops）
 
@@ -49,11 +50,12 @@
 ops check                # 四道验证门（fmt/clippy/test/依赖方向）
 ops build all --gpu      # 构建浏览器产物与 tela-dev WASM 开发包
 ops build win32          # 在 WSL 交叉构建 Win32 开发壳到 dist/win32/
+ops build macos          # 在 Apple Silicon macOS 本机构建 Tela.app 到 dist/macos/
 ops verify [demo|gpu]    # 冒烟测试（默认 demo）；gpu = 环境自检（原生 JS 三角形回读）
 ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 ```
 
-`dist/` 是唯一发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包和 `win32` 壳都必须能由
+`dist/` 是唯一发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包、`win32` 壳和 macOS `Tela.app` 都必须能由
 `ops build` 重新生成。浏览器页面模板与宿主代码保留在 `web/`，Rust 演示逻辑保留在
 `crates/tela-demo/`，原生壳与包协议不存放手写内容到 `dist/`。
 

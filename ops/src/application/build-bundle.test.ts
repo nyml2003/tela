@@ -22,6 +22,7 @@ test('bundle 在索引发布前先原子替换 archive', async () => {
     ensureDir: async (path) => { calls.push(`dir:${path}`); },
     resetDir: async () => undefined,
     copyFile: async () => undefined,
+    setMode: async () => undefined,
     rename: async (from, to) => { calls.push(`rename:${from}->${to}`); },
     statSize: async () => 1536,
     touch: async () => undefined,
@@ -48,7 +49,7 @@ test('bundle 在索引发布前先原子替换 archive', async () => {
 
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls.slice(-3), [
-    'cargo:run --quiet -p tela-win32-sdk -- --verify-bundle /repo/dist/tela-dev/tela-demo.tela.tmp',
+    'cargo:run --quiet -p tela-native-sdk-runtime --bin tela-sdk-verify -- /repo/dist/tela-dev/tela-demo.tela.tmp',
     'rename:/repo/dist/tela-dev/tela-demo.tela.tmp->/repo/dist/tela-dev/tela-demo.tela',
     'rename:/repo/dist/tela-dev/latest.json.tmp->/repo/dist/tela-dev/latest.json',
   ]);
@@ -63,6 +64,7 @@ test('guest 初始化校验失败时不发布临时 archive 或索引', async ()
     ensureDir: async (path) => { calls.push(`dir:${path}`); },
     resetDir: async () => undefined,
     copyFile: async () => undefined,
+    setMode: async () => undefined,
     rename: async (from, to) => { calls.push(`rename:${from}->${to}`); },
     statSize: async () => 1536,
     touch: async () => undefined,

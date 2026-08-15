@@ -1,6 +1,6 @@
 # 023-平台SDK与WASM开发包
 
-> **状态：🔧 Win32 开发态已落地。** 本文定义平台 SDK 的最小边界、可验证 WASM 开发包和后续平台的扩展方式；它不承诺生产分发方案。
+> **状态：🔧 Win32 与 macOS 开发态已落地。** 本文定义平台 SDK 的最小边界、可验证 WASM 开发包和后续平台的扩展方式；它不承诺生产分发方案。
 
 ## 1. 结论
 
@@ -10,7 +10,7 @@
 tela-demo 应用源码
   -> app-wasm 编译
   -> tela-bundle (.tela + latest.json)
-  -> Win32 SDK 启动时请求一次
+  -> Win32 / macOS SDK 启动时请求一次
   -> SHA-256 / ABI / archive 条目校验
   -> Wasmtime guest
   -> UiFrame
@@ -34,7 +34,9 @@ Win32 壳加载 C ABI DLL 在生产安装器、插件 ABI 或第三方语言嵌�
 | `tela-app-abi` | `AppEvent`、`AppStatus`、帧包编解码、ABI 版本 | 窗口、renderer、业务副作用 |
 | `tela-bundle` | `.tela` archive、内部清单、SHA-256、路径与条目验证 | HTTP、平台缓存、窗口 |
 | `tela-demo` 的 `app-wasm` feature | 可移植 guest exports、应用状态和 DSL | DOM、HWND、GPU API |
-| `tela-win32-sdk` | HTTP 获取、缓存、Wasmtime、HWND/WGPU、Win32 输入归一化 | `tela-core` 内部实现、业务逻辑 |
+| `tela-native-sdk-runtime` | HTTP bundle loader、最后有效缓存策略、Wasmtime guest、无窗口 verifier、共享生命周期与启动 CLI | 窗口、WGPU surface、平台输入 |
+| `tela-win32-sdk` | HWND/WGPU、Win32 输入归一化和 Windows 启动 worker | `tela-core` 内部实现、业务逻辑 |
+| `tela-macos-sdk` | AppKit/NSView、Metal/WGPU、macOS 输入和 `~/Library/Caches` 启动 worker | Win32 消息、业务逻辑 |
 | `ops` | 构建、发布顺序和静态服务 | runtime 协议解释、平台窗口 |
 
 `tela-render-wgpu` 仍只消费 `UiFrame`；浏览器、游戏与 Win32 不各自复制布局或绘制命令生成逻辑。
@@ -67,7 +69,7 @@ v1 会把 `assets/` 一并校验并缓存，保证开发包的完整性；但 gu
 
 缓存只服务开发体验，不是持久化业务数据；删除它只会使离线启动失去回退，不影响源码或 `dist/`。
 
-构建端也有同一条运行时门：`ops build bundle` 先写 `tela-demo.tela.tmp` 和 `latest.json.tmp`，然后执行 `tela-win32-sdk --verify-bundle <tmp>`。验证器会检查 archive、以 Wasmtime 实例化 guest、读取首帧，并派发一次 viewport 事件；只有全部通过才依次替换 archive 和索引。验证失败不会发布新索引，运行中的开发服务器仍可提供上一份完整包。
+构建端也有同一条运行时门：`ops build bundle` 先写 `tela-demo.tela.tmp` 和 `latest.json.tmp`，然后执行 `tela-sdk-verify <tmp>`（由 `tela-native-sdk-runtime` 提供）。验证器会检查 archive、以 Wasmtime 实例化 guest、读取首帧，并派发一次 viewport 事件；只有全部通过才依次替换 archive 和索引。验证失败不会发布新索引，运行中的开发服务器仍可提供上一份完整包。
 
 ## 5. WASM 应用 ABI
 
@@ -89,7 +91,7 @@ SDK 每次 dispatch 重新读取完整帧和状态，避免 host 持有 guest �
 
 ### 6.1 所有权与状态机
 
-`tela-win32-sdk` 以一个无 Win32/WGPU 依赖的 `ShellLifecycle` 管理壳状态；其转换可在 Linux 单测，不依赖 Windows 真机。平台资源仍严格由 UI 线程拥有：HWND、`WindowState`、WGPU instance/surface/device/renderer、解码后的 `UiFrame` 和所有 guest event dispatch 都不能离开消息线程。启动 worker 只拥有 loader 与 `GuestRuntime` 的构造过程，结果经 `mpsc` 队列和标量 `WM_APP` 消息交接。
+`tela-native-sdk-runtime` 以一个无窗口/WGPU 依赖的 `ShellLifecycle` 管理壳状态；其转换可在 Linux 单测，不依赖 Windows 或 macOS 真机。平台资源仍严格由各自 UI 线程拥有：HWND/NSView、WGPU instance/surface/device/renderer、解码后的 `UiFrame` 和所有 guest event dispatch 都不能离开消息线程。启动 worker 只拥有 loader 与 `GuestRuntime` 的构造过程，结果经 `mpsc` 队列交接；Win32 以标量 `WM_APP` 唤醒，macOS 由 AppKit run-loop timer 轮询已完成消息。
 
 | 状态 | 进入条件 | 壳行为 | 合法退出 |
 | --- | --- | --- | --- |
@@ -160,7 +162,7 @@ ops serve
 | 平台 | 壳职责 | 应用协议 | 当前状态 |
 | --- | --- | --- | --- |
 | Win32 | HWND、WGPU、Win32 输入、缓存 | `tela-app-abi` + `.tela` | 开发态已实现 |
-| macOS | AppKit/Metal surface、输入、沙盒资源 | 同一 ABI/bundle | 仅设计目标 |
+| macOS | AppKit/NSView、Metal WGPU surface、输入、缓存 | 同一 ABI/bundle | Apple Silicon 开发态已实现；真机图形验收见 024 |
 | Android | Activity/Surface、触摸、IME、生命周期 | 同一 ABI/bundle | 仅设计目标 |
 | iOS | UIKit/Metal layer、触摸、IME、生命周期 | 同一 ABI/bundle | 仅设计目标 |
 | WebView | WebView bridge、DOM 输入与系统能力 | browser adapter 或兼容 bundle loader | 仅设计目标 |
@@ -171,5 +173,7 @@ ops serve
 
 - `ops build bundle` 可从干净的 `dist/` 产出 release guest 包，并在 Wasmtime 首帧与 viewport 校验通过后最后发布索引。
 - `ops build win32` 交叉编译 GNU Windows 壳到 `dist/win32/`。
+- `ops build macos` 在 Apple Silicon macOS 构建 `dist/macos/Tela.app`；App 只含本地壳，仍启动时请求 bundle。
 - 壳对 ABI、SHA-256、路径和缓存回退有自动化测试；`ShellLifecycle` 对启动/关闭、最小化、重绘合并、surface retry、device-loss 额度与文本焦点边沿有无 HWND 单测；WASM guest export 可由构建产物验证。
 - Windows 真机启动时应先出现可关闭的 loading 窗口，随后显示完整 `UiFrame`，并响应鼠标、键盘、Tab/方向焦点和窗口失焦恢复；`--verbose` 不应再出现 `No DisplayHandle is available`。WSL 交叉编译本身不替代该验收。
+- macOS 真机验收应使用显式 `--bundle-index` 指向开发机的可达地址，验证 AppKit/Metal 呈现、resize、输入、cache fallback 和 WGPU display handle；详细步骤见 [024](024-macOS开发SDK实施目标.md)。

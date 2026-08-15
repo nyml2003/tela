@@ -7,10 +7,8 @@ description = "Tela Win32 development SDK host"
 
 [dependencies]
 tela-app-abi = { path = "../tela-app-abi" }
-tela-bundle = { path = "../tela-bundle" }
 tela-contract = { path = "../tela-contract" }
-serde_json = "1"
-wasmtime = { version = "47.0.3", default-features = false, features = ["cranelift", "runtime"] }
+tela-native-sdk-runtime = { path = "../tela-native-sdk-runtime" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 pollster = "0.4"

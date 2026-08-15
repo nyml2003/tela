@@ -1099,6 +1099,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-app-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1691,6 +1702,34 @@ name = "tela-log"
 version = "0.1.0"
 
 [[package]]
+name = "tela-macos-sdk"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "pollster",
+ "raw-window-handle",
+ "tela-app-abi",
+ "tela-contract",
+ "tela-native-sdk-runtime",
+ "tela-render-wgpu",
+ "ureq",
+ "wgpu",
+]
+
+[[package]]
+name = "tela-native-sdk-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tela-app-abi",
+ "tela-bundle",
+ "tela-contract",
+ "wasmtime",
+]
+
+[[package]]
 name = "tela-render-canvas"
 version = "0.1.0"
 dependencies = [
@@ -1765,13 +1804,11 @@ version = "0.1.0"
 dependencies = [
  "pollster",
  "raw-window-handle",
- "serde_json",
  "tela-app-abi",
- "tela-bundle",
  "tela-contract",
+ "tela-native-sdk-runtime",
  "tela-render-wgpu",
  "ureq",
- "wasmtime",
  "wgpu",
  "windows",
 ]

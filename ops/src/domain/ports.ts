@@ -26,6 +26,8 @@ export interface FsPort {
   /** 重建一个已知的构建输出目录。调用方必须传入 workspace 派生路径。 */
   resetDir(path: string): Promise<void>;
   copyFile(from: string, to: string): Promise<void>;
+  /** 设置一个已发布构建工件的 Unix 权限位。 */
+  setMode(path: string, mode: number): Promise<void>;
   /** 在同一文件系统内原子替换一个构建产物。 */
   rename(from: string, to: string): Promise<void>;
   /** 文件字节数，不存在返回 null。 */

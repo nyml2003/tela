@@ -1,5 +1,5 @@
 // 基础设施层：文件系统适配器（Node 内置 fs/promises）。
-import { copyFile as cp, mkdir, rename, rm, stat, utimes } from 'node:fs/promises';
+import { chmod, copyFile as cp, mkdir, rename, rm, stat, utimes } from 'node:fs/promises';
 import type { FsPort } from '../domain/ports.ts';
 
 export class NodeFsPort implements FsPort {
@@ -18,6 +18,10 @@ export class NodeFsPort implements FsPort {
 
   async copyFile(from: string, to: string): Promise<void> {
     await cp(from, to);
+  }
+
+  async setMode(path: string, mode: number): Promise<void> {
+    await chmod(path, mode);
   }
 
   async rename(from: string, to: string): Promise<void> {

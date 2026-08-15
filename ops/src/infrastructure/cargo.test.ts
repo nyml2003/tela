@@ -4,7 +4,7 @@ import type { ProcessPort } from '../domain/ports.ts';
 import { resolveWorkspace } from '../domain/workspace.ts';
 import { CargoPort } from './cargo.ts';
 
-test('Win32 构建使用隔离的 nix 交叉 cargo，WASM 保持普通 cargo', async () => {
+test('Win32 使用隔离交叉 cargo，macOS 使用本机 cargo，WASM 保持普通 cargo', async () => {
   const calls: { command: string; args: string[] }[] = [];
   const process: ProcessPort = {
     run: async (command, args) => {
@@ -16,6 +16,7 @@ test('Win32 构建使用隔离的 nix 交叉 cargo，WASM 保持普通 cargo', a
 
   await cargo.buildWasm('tela-demo', 'dev', ['app-wasm']);
   await cargo.buildWin32('tela-win32-sdk', 'release');
+  await cargo.buildMacos('tela-macos-sdk', 'dev');
 
   assert.deepEqual(calls, [
     {
@@ -25,6 +26,10 @@ test('Win32 构建使用隔离的 nix 交叉 cargo，WASM 保持普通 cargo', a
     {
       command: 'cargo-win32',
       args: ['build', '--target', 'x86_64-pc-windows-gnu', '-p', 'tela-win32-sdk', '--release'],
+    },
+    {
+      command: 'cargo',
+      args: ['build', '--target', 'aarch64-apple-darwin', '-p', 'tela-macos-sdk'],
     },
   ]);
 });

@@ -15,4 +15,9 @@ test('路径模型从仓库根派生', () => {
   assert.equal(w.bundleIndexPath(), '/repo/dist/tela-dev/latest.json');
   assert.equal(w.win32ArtifactPath('dev'), '/repo/target/x86_64-pc-windows-gnu/debug/tela-win32-sdk.exe');
   assert.equal(w.win32DistPath(), '/repo/dist/win32/tela-win32-sdk.exe');
+  assert.equal(w.macosAppDir(), '/repo/dist/macos/Tela.app');
+  assert.equal(w.macosInfoPlistPath(), '/repo/dist/macos/Tela.app/Contents/Info.plist');
+  assert.equal(w.macosExecutablePath(), '/repo/dist/macos/Tela.app/Contents/MacOS/tela-macos-sdk');
+  assert.equal(w.macosInfoPlistSourcePath(), '/repo/crates/tela-macos-sdk/resources/Info.plist');
+  assert.equal(w.macosArtifactPath('release'), '/repo/target/aarch64-apple-darwin/release/tela-macos-sdk');
 });

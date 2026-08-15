@@ -28,7 +28,8 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
     reporter.info(`http://127.0.0.1:${result.port}/rawgpu.html   （原生 WebGPU 自检页）`);
   }
   if (hasSdkBundle) {
-    reporter.info(`Win32 SDK bundle: http://127.0.0.1:${result.port}/tela-dev/latest.json`);
+    reporter.info(`平台 SDK bundle（本机）: http://127.0.0.1:${result.port}/tela-dev/latest.json`);
+    reporter.info('跨机器请以开发机可达的局域网 IP 替换 127.0.0.1，并传给 SDK 的 --bundle-index。');
   }
   reporter.info('Ctrl+C 停止');
   return result;

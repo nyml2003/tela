@@ -59,11 +59,9 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::{
-    PlatformLaunchOptions,
-    bundle_loader::{BundleLoader, BundleSource},
-    lifecycle::{DeviceLossAction, ShellLifecycle, ShellPhase, TextChannelAction},
-    runtime::GuestRuntime,
+use tela_native_sdk_runtime::{
+    BundleLoader, BundleSource, DeviceLossAction, GuestRuntime, PlatformLaunchOptions,
+    ShellLifecycle, ShellPhase, TextChannelAction,
 };
 
 const WINDOW_CLASS: &str = "TelaWin32DevelopmentShell";

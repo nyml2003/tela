@@ -16,7 +16,9 @@ members = [
     "crates/tela-widgets",
     "crates/tela-ui",
     "crates/tela-demo",
+    "crates/tela-native-sdk-runtime",
     "crates/tela-win32-sdk",
+    "crates/tela-macos-sdk",
 ]
 
 [workspace.package]
