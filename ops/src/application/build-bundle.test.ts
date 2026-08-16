@@ -49,11 +49,48 @@ test('bundle 在索引发布前先原子替换 archive', async () => {
 
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls.slice(-3), [
-    'cargo:run --quiet -p tela-native-sdk-runtime --bin tela-sdk-verify -- /repo/dist/tela-dev/tela-demo.tela.tmp',
+    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-dev/tela-demo.tela.tmp',
     'rename:/repo/dist/tela-dev/tela-demo.tela.tmp->/repo/dist/tela-dev/tela-demo.tela',
     'rename:/repo/dist/tela-dev/latest.json.tmp->/repo/dist/tela-dev/latest.json',
   ]);
   assert.deepEqual(wasmBuilds, [['tela-demo', 'release', ['app-wasm']]]);
+});
+
+test('mobile channel uses an independent guest and archive root', async () => {
+  const calls: string[] = [];
+  const wasmBuilds: unknown[][] = [];
+  const fs: FsPort = {
+    exists: async () => false,
+    ensureDir: async () => undefined,
+    resetDir: async () => undefined,
+    copyFile: async () => undefined,
+    setMode: async () => undefined,
+    rename: async () => undefined,
+    statSize: async () => 1536,
+    touch: async () => undefined,
+  };
+  const result = await runBuildBundle({
+    cargo: {
+      buildWasm: async (...args: unknown[]) => {
+        wasmBuilds.push(args);
+        return { id: 'build' as const, passed: true, durationMs: 1 };
+      },
+    } as never,
+    process: {
+      run: async (command, args) => {
+        calls.push(`${command}:${args.join(' ')}`);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    },
+    fs,
+    reporter: new TestReporter(),
+    workspace: resolveWorkspace('/repo'),
+  }, 'mobile');
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(wasmBuilds, [['tela-mobile-demo', 'release', ['app-wasm']]]);
+  assert.ok(calls.some((call) => call.includes('/repo/dist/tela-mobile/tela-mobile-demo.tela.tmp')));
+  assert.ok(calls.some((call) => call.includes('/tela-mobile/tela-mobile-demo.tela')));
 });
 
 test('guest 初始化校验失败时不发布临时 archive 或索引', async () => {

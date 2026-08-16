@@ -3,12 +3,12 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build [webview|frontend|bundle|win32|macos|all] [--release]  构建发布物到 dist/
-//   ops verify bundle [--build]  验证已发布的应用 guest
+//   ops build [webview|frontend|bundle|android|win32|macos|all] [--release]  构建发布物到 dist/
+//   ops verify bundle [desktop|mobile] [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import type { WorkspacePaths } from '../domain/workspace.ts';
+import type { BundleChannel, WorkspacePaths } from '../domain/workspace.ts';
 import { resolveWorkspace } from '../domain/workspace.ts';
 import type { Reporter } from '../domain/ports.ts';
 import { TerminalReporter } from '../infrastructure/reporter.ts';
@@ -22,6 +22,7 @@ import { runBuildFrontend } from '../application/build-frontend.ts';
 import { runBuildBundle } from '../application/build-bundle.ts';
 import { runBuildWin32 } from '../application/build-win32.ts';
 import { runBuildMacos } from '../application/build-macos.ts';
+import { runBuildAndroid } from '../application/build-android.ts';
 import { runVerifyBundle } from '../application/verify-bundle.ts';
 import { runServe } from '../application/serve.ts';
 import { runVerifyGpu } from '../application/verify-gpu.ts';
@@ -31,10 +32,10 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build [webview|frontend|bundle|win32|macos|all] [--release]
-                              构建发布物到 dist/；默认 all，会先重建目录。webview 是
-                              WGPU shell + wasm-bindgen glue，bundle 是可移植应用 guest。
-  ops verify [bundle|gpu] [--build] [--port N]
+  ops build [webview|frontend|bundle [desktop|mobile]|android|win32|macos|all] [--release] [--bundle-index URL]
+                              构建发布物到 dist/；默认 all，会先重建目录。bundle desktop/mobile 是
+                              两个独立 Guest；android 先构建 mobile bundle，再构建 x86_64 Vulkan APK，必须传 --bundle-index。
+  ops verify [bundle [desktop|mobile]|gpu] [--build] [--port N]
                               验证（默认 bundle）：bundle = archive/ABI/guest 首帧校验
                               （--build 先生成 bundle）；gpu = 原生 JS WebGPU 环境自检（不经 wgpu，离屏三角形
                               回读上报，判定环境 vs wgpu 层问题）
@@ -65,6 +66,7 @@ async function main(): Promise<number> {
       release: { type: 'boolean', default: false },
       build: { type: 'boolean', default: false },
       port: { type: 'string', default: '' },
+      'bundle-index': { type: 'string', default: '' },
     },
   });
 
@@ -73,7 +75,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const [command, targetArg] = positionals;
+  const [command, targetArg, variantArg] = positionals;
   let target = targetArg;
   switch (command) {
     case 'check': {
@@ -84,6 +86,10 @@ async function main(): Promise<number> {
     case 'build': {
       const buildAll = target === undefined || target === 'all';
       const targets = buildAll ? ['webview', 'frontend', 'bundle'] : [target];
+      if (variantArg && target !== 'bundle') {
+        reporter.fail(`构建目标 ${target ?? 'all'} 不接受额外参数: ${variantArg}`);
+        return 1;
+      }
       const processPort = new NodeProcessPort();
       const fs = new NodeFsPort();
       if (buildAll) {
@@ -102,8 +108,17 @@ async function main(): Promise<number> {
           const result = await runBuildFrontend({ process: processPort, reporter, workspace });
           if (!result.ok) return 1;
         } else if (t === 'bundle') {
+          const channel = resolveBundleChannel(variantArg, reporter);
+          if (!channel) return 1;
           const cargo = new CargoPort(processPort, workspace);
-          const result = await runBuildBundle({ cargo, process: processPort, fs, reporter, workspace });
+          const result = await runBuildBundle({ cargo, process: processPort, fs, reporter, workspace }, channel);
+          if (!result.ok) return 1;
+        } else if (t === 'android') {
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildAndroid(
+            { cargo, process: processPort, fs, reporter, workspace },
+            { bundleIndex: values['bundle-index'] },
+          );
           if (!result.ok) return 1;
         } else if (t === 'win32') {
           const cargo = new CargoPort(processPort, workspace);
@@ -125,7 +140,7 @@ async function main(): Promise<number> {
           );
           if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（webview | frontend | bundle | win32 | macos | all）`);
+          reporter.fail(`未知构建目标: ${t}（webview | frontend | bundle | android | win32 | macos | all）`);
           return 1;
         }
       }
@@ -143,6 +158,8 @@ async function main(): Promise<number> {
         return ok ? 0 : 1;
       }
       if (target === 'bundle') {
+        const channel = resolveBundleChannel(variantArg, reporter);
+        if (!channel) return 1;
         const process = new NodeProcessPort();
         const fs = new NodeFsPort();
         if (values.build) {
@@ -150,10 +167,11 @@ async function main(): Promise<number> {
           const cargo = new CargoPort(process, workspace);
           const build = await runBuildBundle(
             { cargo, process, fs, reporter, workspace },
+            channel,
           );
           if (!build.ok) return 1;
         }
-        const vresult = await runVerifyBundle({ fs, process, reporter, workspace });
+        const vresult = await runVerifyBundle({ fs, process, reporter, workspace }, channel);
         return vresult.ok ? 0 : 1;
       }
       reporter.fail(`未知验证目标: ${target ?? '(空)'}（bundle | gpu）`);
@@ -192,6 +210,13 @@ async function main(): Promise<number> {
       reporter.fail(`未知命令: ${command}${suggestCommand(command) ? `——是否想输入 ${suggestCommand(command)}？` : ''}`);
       return 1;
   }
+}
+
+function resolveBundleChannel(value: string | undefined, reporter: Reporter): BundleChannel | undefined {
+  if (value === undefined || value === 'desktop') return 'desktop';
+  if (value === 'mobile') return 'mobile';
+  reporter.fail(`未知 bundle channel: ${value}（desktop | mobile）`);
+  return undefined;
 }
 
 /** 未知命令的模糊提示（编辑距离 ≤ 2 的已知命令，防笔误如 obs → ops）。 */

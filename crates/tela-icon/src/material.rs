@@ -53,6 +53,8 @@ pub enum IconName {
     Filter,
     /// 向右展开。
     ChevronRight,
+    /// 返回上一级。
+    ArrowBack,
     /// 菜单/导航。
     Menu,
     /// 更多操作。
@@ -84,6 +86,7 @@ impl IconName {
         Self::Sort,
         Self::Filter,
         Self::ChevronRight,
+        Self::ArrowBack,
         Self::Menu,
         Self::More,
     ];
@@ -113,6 +116,7 @@ impl IconName {
             Self::Sort => "sort",
             Self::Filter => "filter",
             Self::ChevronRight => "chevron-right",
+            Self::ArrowBack => "arrow-back",
             Self::Menu => "menu",
             Self::More => "more",
         }
@@ -146,6 +150,7 @@ impl IconName {
             Self::Sort => '\u{e164}',
             Self::Filter => '\u{e152}',
             Self::ChevronRight => '\u{e5cc}',
+            Self::ArrowBack => '\u{e5c4}',
             Self::Menu => '\u{e5d2}',
             Self::More => '\u{e5d3}',
         }

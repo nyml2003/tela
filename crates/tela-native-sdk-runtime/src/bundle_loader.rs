@@ -1,15 +1,9 @@
 //! Development bundle retrieval, integrity verification, and one-file cache fallback.
 
-use std::{
-    fmt, fs,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{fmt, fs, path::PathBuf, time::Duration};
 
-use tela_app_abi::ABI_VERSION;
-use tela_bundle::{BundleArchive, DevelopmentManifest, read_archive, sha256_hex};
-
-const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+use tela_bundle::BundleArchive;
+use tela_guest_runtime::{MAX_ARCHIVE_BYTES, load_remote_bundle, validate_bundle_archive};
 
 /// Where the usable application package came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,51 +112,15 @@ impl BundleLoader {
     where
         F: FnMut(&str) -> Result<Vec<u8>, String>,
     {
-        let started = Instant::now();
-        let index = fetch(index_url).map_err(BundleLoadError::Network)?;
-        let manifest: DevelopmentManifest = serde_json::from_slice(&index).map_err(|error| {
-            BundleLoadError::Network(format!("invalid development index: {error}"))
-        })?;
-        manifest
-            .validate()
-            .map_err(|error| BundleLoadError::Network(error.to_string()))?;
-        if manifest.app_abi != ABI_VERSION {
-            return Err(BundleLoadError::Network(format!(
-                "app ABI mismatch: host={ABI_VERSION}, bundle={}",
-                manifest.app_abi
-            )));
-        }
-        if manifest.bytes > MAX_ARCHIVE_BYTES as u64 {
-            return Err(BundleLoadError::Network(format!(
-                "bundle exceeds {} MiB limit",
-                MAX_ARCHIVE_BYTES / 1024 / 1024
-            )));
-        }
-        let archive_url = resolve_bundle_url(index_url, &manifest.bundle_url)
-            .map_err(BundleLoadError::Network)?;
-        let archive_bytes = fetch(&archive_url).map_err(BundleLoadError::Network)?;
-        if archive_bytes.len() as u64 != manifest.bytes {
-            return Err(BundleLoadError::Network(format!(
-                "archive size mismatch: expected {}, got {}",
-                manifest.bytes,
-                archive_bytes.len()
-            )));
-        }
-        let actual_hash = sha256_hex(&archive_bytes);
-        if actual_hash != manifest.sha256 {
-            return Err(BundleLoadError::Network(format!(
-                "archive checksum mismatch: expected {}, got {actual_hash}",
-                manifest.sha256
-            )));
-        }
-        let archive = validate_archive(&archive_bytes).map_err(BundleLoadError::Network)?;
-        let cache_warning = self.persist_cache(&archive_bytes).err();
+        let remote =
+            load_remote_bundle(index_url, |url| fetch(url)).map_err(BundleLoadError::Network)?;
+        let cache_warning = self.persist_cache(&remote.archive_bytes).err();
         Ok(LoadedBundle {
-            archive,
+            archive: remote.archive,
             source: BundleSource::Network,
             metrics: BundleLoadMetrics {
-                download: started.elapsed(),
-                archive_bytes: archive_bytes.len(),
+                download: remote.metrics.download,
+                archive_bytes: remote.metrics.archive_bytes,
             },
             cache_warning,
         })
@@ -178,7 +136,7 @@ impl BundleLoader {
                 MAX_ARCHIVE_BYTES / 1024 / 1024
             )));
         }
-        let archive = validate_archive(&bytes).map_err(BundleLoadError::Cache)?;
+        let archive = validate_bundle_archive(&bytes).map_err(BundleLoadError::Cache)?;
         Ok(LoadedBundle {
             archive,
             source: BundleSource::Cache,
@@ -215,36 +173,6 @@ impl BundleLoader {
     }
 }
 
-fn validate_archive(bytes: &[u8]) -> Result<BundleArchive, String> {
-    let archive = read_archive(bytes).map_err(|error| error.to_string())?;
-    if archive.manifest.app_abi != ABI_VERSION {
-        return Err(format!(
-            "app ABI mismatch: host={ABI_VERSION}, archive={}",
-            archive.manifest.app_abi
-        ));
-    }
-    Ok(archive)
-}
-
-fn resolve_bundle_url(index_url: &str, bundle_url: &str) -> Result<String, String> {
-    if bundle_url.contains("://") {
-        return Ok(bundle_url.to_owned());
-    }
-    let scheme = index_url
-        .find("://")
-        .ok_or_else(|| format!("index URL must be absolute: {index_url}"))?;
-    let authority_start = scheme + 3;
-    let path_start = index_url[authority_start..]
-        .find('/')
-        .map(|offset| authority_start + offset)
-        .unwrap_or(index_url.len());
-    if bundle_url.starts_with('/') {
-        return Ok(format!("{}{}", &index_url[..path_start], bundle_url));
-    }
-    let directory_end = index_url.rfind('/').unwrap_or(path_start);
-    Ok(format!("{}/{}", &index_url[..directory_end], bundle_url))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -252,7 +180,11 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use tela_bundle::{BUNDLE_FORMAT_VERSION, BundleInput, build_archive, sha256_hex};
+    use tela_app_abi::ABI_VERSION;
+    use tela_bundle::{
+        BUNDLE_FORMAT_VERSION, BundleInput, DevelopmentManifest, build_archive, sha256_hex,
+    };
+    use tela_guest_runtime::resolve_bundle_url;
 
     use super::*;
 

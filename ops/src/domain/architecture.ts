@@ -32,6 +32,13 @@ const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
   ['tela-render-raster', ['tela-contract', 'tela-text', 'png', 'font8x8']],
   ['tela-render-canvas', ['tela-contract']],
   ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-text', 'bytemuck', 'wgpu']],
+  ['tela-guest-runtime', ['tela-app-abi', 'tela-bundle', 'tela-contract', 'serde_json', 'wasmtime']],
+  ['tela-native-sdk-runtime', ['tela-bundle', 'tela-guest-runtime']],
+  ['tela-mobile-demo', ['tela-app-abi', 'tela-contract', 'tela-core', 'tela-fonts', 'tela-icon', 'tela-text']],
+  ['tela-android-sdk', [
+    'jni', 'pollster', 'tela-app-abi', 'tela-contract', 'tela-guest-runtime', 'tela-log',
+    'tela-render-wgpu', 'ureq', 'wgpu', 'winit',
+  ]],
   ['tela-webview-sdk', [
     'tela-app-abi', 'tela-bundle', 'tela-contract', 'tela-render-wgpu',
     'serde_json', 'wasm-bindgen', 'wasm-bindgen-futures', 'web-sys', 'wgpu',
@@ -43,6 +50,7 @@ const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
 /** dev-dependencies 白名单：core 的 dev 依赖仅限测试专用后端（集成测试，不进入运行时）。 */
 const ALLOWED_DEV: readonly (readonly [string, readonly string[]])[] = [
   ['tela-core', ['tela-render-raster']],
+  ['tela-native-sdk-runtime', ['serde_json', 'tela-app-abi']],
 ];
 
 /** 校验依赖方向，返回违规列表（空 = 通过）。 */
@@ -101,6 +109,19 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
   const webview = byName.get('tela-webview-sdk');
   if (webview && webview.deps.some((d) => d.name === 'tela-demo')) {
     violations.push({ crate: 'tela-webview-sdk', message: 'WebView SDK 必须通过 bundle 加载 guest，禁止依赖 tela-demo' });
+  }
+
+  // 6. Android is a target host, not a static application shell. Its selected mobile Guest stays
+  // in a separate dynamic bundle so future game or TUI guests cannot leak into the host closure.
+  const android = byName.get('tela-android-sdk');
+  if (android && android.deps.some((d) => d.name === 'tela-mobile-demo' || d.name === 'tela-demo')) {
+    violations.push({ crate: 'tela-android-sdk', message: 'Android SDK 必须通过 mobile bundle 加载 guest，禁止静态依赖业务应用' });
+  }
+
+  // 7. The neutral guest runtime has no GUI loop, surface, or platform SDK dependency.
+  const guestRuntime = byName.get('tela-guest-runtime');
+  if (guestRuntime && guestRuntime.deps.some((d) => d.name === 'tela-android-sdk' || d.name === 'tela-webview-sdk' || d.name === 'tela-win32-sdk' || d.name === 'tela-macos-sdk')) {
+    violations.push({ crate: 'tela-guest-runtime', message: 'Guest Runtime 禁止依赖任一 Target SDK' });
   }
 
   return violations;

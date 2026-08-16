@@ -185,3 +185,25 @@ test('WebView SDK 不能静态依赖应用 guest', () => {
   ]);
   assert.ok(violations.some((violation) => /bundle 加载 guest/.test(violation.message)));
 });
+
+test('Android SDK 不能静态依赖 desktop 或 mobile guest', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-android-sdk', [
+      ['tela-contract', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /mobile bundle/.test(violation.message)));
+});
+
+test('Guest Runtime 不能反向依赖目标 SDK', () => {
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-guest-runtime', [
+      ['tela-app-abi', 'normal'],
+      ['tela-android-sdk', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /禁止依赖任一 Target SDK/.test(violation.message)));
+});

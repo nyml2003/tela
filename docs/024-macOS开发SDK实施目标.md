@@ -6,7 +6,7 @@
 
 ## 1. 结论
 
-macOS SDK 与 Win32 SDK 共享 **应用包协议、Wasmtime guest runtime 和生命周期策略**，但不共享一个伪统一的窗口 `Host` trait。macOS crate 只拥有 AppKit、Metal/WGPU surface、输入归一化和本机缓存：
+macOS SDK 与 Win32 SDK 共享 **应用包协议、中性 Wasmtime guest runtime 和桌面生命周期策略**，但不共享一个伪统一的窗口 `Host` trait。macOS crate 只拥有 AppKit、Metal/WGPU surface、输入归一化和本机缓存：
 
 ```text
 WSL / 任意开发机                         Apple Silicon Mac
@@ -28,7 +28,8 @@ WASM **不**被复制进 `Tela.app`；每个 App 进程只在启动阶段请求�
 
 | 位置 | 拥有 | 不拥有 |
 | --- | --- | --- |
-| `tela-native-sdk-runtime` | `.tela` 获取/校验/缓存策略、Wasmtime `GuestRuntime`、启动 CLI、`ShellLifecycle`、无窗口 verifier | AppKit、HWND、WGPU surface、平台输入 |
+| `tela-guest-runtime` | 严格 `.tela` archive 校验、Wasmtime `GuestRuntime`、无窗口 verifier | AppKit、HWND、WGPU surface、平台输入、cache、lifecycle |
+| `tela-native-sdk-runtime` | 桌面 `.tela` 获取/缓存策略、启动 CLI、`ShellLifecycle` | Wasmtime 核心执行、AppKit、HWND、WGPU surface、平台输入 |
 | `tela-macos-sdk/src/appkit.rs` | `NSApplication`、`NSWindow`、定时轮询、关闭顺序 | bundle 解包、应用业务状态 |
 | `tela-macos-sdk/src/view.rs` | `NSView`、主线程 guest dispatch、焦点边沿、指针/键盘、重绘与 surface retry | 后台 HTTP、全局业务 Store |
 | `tela-macos-sdk/src/gpu.rs` | AppKit raw handles、WGPU/Metal device/surface、device-loss 回收 | UI DSL、布局、业务资源语义 |

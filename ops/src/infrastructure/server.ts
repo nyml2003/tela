@@ -82,7 +82,7 @@ export class HttpServerPort implements ServerPort {
         };
         // 浏览器页面、Win32 和 macOS 开发壳可以从不同 origin 请求同一开发 bundle。
         // 只给 bundle 路径开放读取权限，普通静态页面和调试 API 不被一并暴露。
-        if (urlPath.startsWith('/tela-dev/')) {
+        if (isBundlePath(urlPath)) {
           headers['Access-Control-Allow-Origin'] = '*';
         }
         res.writeHead(200, headers);
@@ -145,8 +145,12 @@ export class HttpServerPort implements ServerPort {
 
 function urlPathForCors(requestUrl: string | undefined): boolean {
   try {
-    return new URL(requestUrl ?? '/', 'http://x').pathname.startsWith('/tela-dev/');
+    return isBundlePath(new URL(requestUrl ?? '/', 'http://x').pathname);
   } catch {
     return false;
   }
+}
+
+function isBundlePath(pathname: string): boolean {
+  return pathname.startsWith('/tela-dev/') || pathname.startsWith('/tela-mobile/');
 }

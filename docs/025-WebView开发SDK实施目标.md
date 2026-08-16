@@ -130,7 +130,7 @@ ops serve
 | --- | --- | --- |
 | 浏览器持久化缓存/离线 | 不做 | 有明确离线开发或生产 PWA 需求时，设计版本失效与完整性策略 |
 | raster/Canvas2D 产品回退 | 不做 | 有不支持 WebGPU 的目标设备且可接受独立产品矩阵时 |
-| Android/iOS native bridge | 不做 | 真实移动 SDK 需要系统能力、生命周期或性能边界时 |
+| iOS native bridge / Android WebView bridge | 不做 | Android native Target 见 027；只有真实 WebView bridge 需求出现时再设计 |
 | 原生完整 IME/剪贴板 | WebView 已有 DOM composition；原生仍后置 | Win32/macOS 有真实文本编辑交付需求时 |
 | bundle 资源到 GPU | archive 已校验，渲染通道未接 | 应用开始需要图片/二进制资源渲染时 |
 | 浏览器自动视觉测试 | 不做 | 明确选定受支持浏览器与 CI 图形环境后 |

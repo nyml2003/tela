@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HttpServerPort } from './server.ts';
@@ -56,20 +56,21 @@ test('首选端口空闲时直接使用（不跳转）', async () => {
   }
 });
 
-test('仅开发 bundle 路径开放跨 origin 读取', async () => {
+test('desktop 与 mobile 开发 bundle 路径开放跨 origin 读取', async () => {
   const base = await freePort();
   const root = await mkdtemp(join(tmpdir(), 'ops-serve-cors-'));
   await writeFile(join(root, 'index.html'), 'page');
-  await (async () => {
-    const { mkdir } = await import('node:fs/promises');
-    await mkdir(join(root, 'tela-dev'));
-  })();
+  await mkdir(join(root, 'tela-dev'));
+  await mkdir(join(root, 'tela-mobile'));
   await writeFile(join(root, 'tela-dev', 'latest.json'), '{}');
+  await writeFile(join(root, 'tela-mobile', 'latest.json'), '{}');
   const serverPort = new HttpServerPort();
   try {
     const result = await serverPort.serve(root, base, () => {});
     const bundle = await fetch(`http://127.0.0.1:${result.port}/tela-dev/latest.json`);
     assert.equal(bundle.headers.get('access-control-allow-origin'), '*');
+    const mobileBundle = await fetch(`http://127.0.0.1:${result.port}/tela-mobile/latest.json`);
+    assert.equal(mobileBundle.headers.get('access-control-allow-origin'), '*');
     const page = await fetch(`http://127.0.0.1:${result.port}/`);
     assert.equal(page.headers.get('access-control-allow-origin'), null);
     await result.close();

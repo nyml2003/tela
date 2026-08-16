@@ -3,6 +3,37 @@
 
 export type BuildProfile = 'dev' | 'release';
 
+/** A separately published guest channel. Channels do not imply a shared application UI. */
+export type BundleChannel = 'desktop' | 'mobile';
+
+/** Paths and build identity of one dynamically delivered guest. */
+export interface BundlePaths {
+  /** Delivery channel identifier used by the CLI. */
+  channel: BundleChannel;
+  /** Human-readable target label used in build diagnostics. */
+  label: string;
+  /** Guest crate compiled into this channel's WASM artifact. */
+  guestCrate: string;
+  /** Features required for its typed Guest ABI exports. */
+  guestFeatures: readonly string[];
+  /** WASM artifact generated for the selected profile. */
+  guestWasmArtifactPath(profile: BuildProfile): string;
+  /** Directory served as this channel's remote bundle root. */
+  dir(): string;
+  /** Published `.tela` archive. */
+  archivePath(): string;
+  /** Temporary archive written before the index is atomically replaced. */
+  archiveTempPath(): string;
+  /** Published development manifest. */
+  indexPath(): string;
+  /** Temporary manifest written before publication. */
+  indexTempPath(): string;
+  /** URL stored inside the development manifest, resolved relative to its index. */
+  archiveUrl: string;
+  /** Optional static assets included in this channel's archive. */
+  assetsDir(): string;
+}
+
 /** 工作区路径模型：全部路径从仓库根派生，纯函数计算，禁止魔法字符串散落。 */
 export interface WorkspacePaths {
   /** 仓库根目录。 */
@@ -13,6 +44,8 @@ export interface WorkspacePaths {
   distDir: string;
   /** web 前端源码目录（TypeScript，esbuild 构建到 dist/assets/tela-web）。 */
   webDir: string;
+  /** One independently published dynamic guest channel. */
+  bundle(channel: BundleChannel): BundlePaths;
   /** 应用 guest wasm 工件目标路径（构建输出）。 */
   appGuestWasmArtifactPath(profile: BuildProfile): string;
   /** 浏览器 WebView SDK wasm 工件目标路径。 */
@@ -53,6 +86,18 @@ export interface WorkspacePaths {
   macosInfoPlistSourcePath(): string;
   /** Apple Silicon macOS target 的二进制工件位置。 */
   macosArtifactPath(profile: BuildProfile): string;
+  /** Android Gradle project root. */
+  androidProjectDir(): string;
+  /** cargo-ndk writes the x86_64 JNI library into this Gradle source set. */
+  androidJniLibsDir(): string;
+  /** Expected x86_64 native library emitted by cargo-ndk. */
+  androidNativeLibraryPath(): string;
+  /** Gradle debug APK output. */
+  androidDebugApkPath(): string;
+  /** Final Android release directory under dist/. */
+  androidDistDir(): string;
+  /** Published debug APK path. */
+  androidDistPath(): string;
 }
 
 /** 根据仓库根构造路径模型（纯函数）。 */
@@ -60,14 +105,49 @@ export function resolveWorkspace(root: string): WorkspacePaths {
   const cratesDir = `${root}/crates`;
   const distDir = `${root}/dist`;
   const webDir = `${root}/web`;
+  const bundle = (channel: BundleChannel): BundlePaths => {
+    const mobile = channel === 'mobile';
+    const directory = mobile ? `${distDir}/tela-mobile` : `${distDir}/tela-dev`;
+    const archiveName = mobile ? 'tela-mobile-demo.tela' : 'tela-demo.tela';
+    const guestName = mobile ? 'tela_mobile_demo' : 'tela_demo';
+    return {
+      channel,
+      label: mobile ? 'Android mobile' : 'desktop platform SDK',
+      guestCrate: mobile ? MOBILE_DEMO_CRATE : DEMO_CRATE,
+      guestFeatures: ['app-wasm'],
+      guestWasmArtifactPath(profile) {
+        const profileDir = profile === 'release' ? 'release' : 'debug';
+        return `${root}/target/wasm32-unknown-unknown/${profileDir}/${guestName}.wasm`;
+      },
+      dir() {
+        return directory;
+      },
+      archivePath() {
+        return `${directory}/${archiveName}`;
+      },
+      archiveTempPath() {
+        return `${directory}/${archiveName}.tmp`;
+      },
+      indexPath() {
+        return `${directory}/latest.json`;
+      },
+      indexTempPath() {
+        return `${directory}/latest.json.tmp`;
+      },
+      archiveUrl: `/${mobile ? 'tela-mobile' : 'tela-dev'}/${archiveName}`,
+      assetsDir() {
+        return mobile ? `${root}/assets/mobile` : `${root}/assets`;
+      },
+    };
+  };
   return {
     root,
     cratesDir,
     distDir,
     webDir,
+    bundle,
     appGuestWasmArtifactPath(profile) {
-      const dir = profile === 'release' ? 'release' : 'debug';
-      return `${root}/target/wasm32-unknown-unknown/${dir}/tela_demo.wasm`;
+      return bundle('desktop').guestWasmArtifactPath(profile);
     },
     webviewSdkArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
@@ -80,22 +160,22 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       return `${distDir}/tela_webview_sdk_bg.wasm`;
     },
     bundleDir() {
-      return `${distDir}/tela-dev`;
+      return bundle('desktop').dir();
     },
     bundleArchivePath() {
-      return `${distDir}/tela-dev/tela-demo.tela`;
+      return bundle('desktop').archivePath();
     },
     bundleArchiveTempPath() {
-      return `${distDir}/tela-dev/tela-demo.tela.tmp`;
+      return bundle('desktop').archiveTempPath();
     },
     bundleIndexPath() {
-      return `${distDir}/tela-dev/latest.json`;
+      return bundle('desktop').indexPath();
     },
     bundleIndexTempPath() {
-      return `${distDir}/tela-dev/latest.json.tmp`;
+      return bundle('desktop').indexTempPath();
     },
     bundleAssetsDir() {
-      return `${root}/assets`;
+      return bundle('desktop').assetsDir();
     },
     win32DistDir() {
       return `${distDir}/win32`;
@@ -129,10 +209,30 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       const dir = profile === 'release' ? 'release' : 'debug';
       return `${root}/target/aarch64-apple-darwin/${dir}/tela-macos-sdk`;
     },
+    androidProjectDir() {
+      return `${root}/android`;
+    },
+    androidJniLibsDir() {
+      return `${root}/android/app/src/main/jniLibs`;
+    },
+    androidNativeLibraryPath() {
+      return `${root}/android/app/src/main/jniLibs/x86_64/libmain.so`;
+    },
+    androidDebugApkPath() {
+      return `${root}/android/app/build/outputs/apk/debug/app-debug.apk`;
+    },
+    androidDistDir() {
+      return `${distDir}/android`;
+    },
+    androidDistPath() {
+      return `${distDir}/android/tela-mobile-debug.apk`;
+    },
   };
 }
 
 /** demo 演示二进制所属 crate。 */
 export const DEMO_CRATE = 'tela-demo';
+/** First-party mobile Guest crate; it deliberately has an independent domain and presentation. */
+export const MOBILE_DEMO_CRATE = 'tela-mobile-demo';
 /** 浏览器 WebView 壳所属 crate。 */
 export const WEBVIEW_SDK_CRATE = 'tela-webview-sdk';

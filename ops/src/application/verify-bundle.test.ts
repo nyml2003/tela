@@ -1,7 +1,7 @@
 // application/verify-bundle：对已发布统一应用包复用 native guest 验证器。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { FsPort, ProcessPort, Reporter } from '../domain/ports.ts';
+import type { FsPort, Reporter } from '../domain/ports.ts';
 import { resolveWorkspace } from '../domain/workspace.ts';
 import { runVerifyBundle } from './verify-bundle.ts';
 
@@ -43,7 +43,26 @@ test('对发布 archive 调用 SDK 验证器', async () => {
   });
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls, [
-    'cargo:run --quiet -p tela-native-sdk-runtime --bin tela-sdk-verify -- /repo/dist/tela-dev/tela-demo.tela',
+    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-dev/tela-demo.tela',
+  ]);
+});
+
+test('mobile archive uses the same neutral verifier without selecting the desktop path', async () => {
+  const calls: string[] = [];
+  const result = await runVerifyBundle({
+    fs: filesystem(true),
+    process: {
+      run: async (command, args) => {
+        calls.push(`${command}:${args.join(' ')}`);
+        return { code: 0, stdout: 'verified', stderr: '' };
+      },
+    },
+    reporter: new TestReporter(),
+    workspace: resolveWorkspace('/repo'),
+  }, 'mobile');
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [
+    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-mobile/tela-mobile-demo.tela',
   ]);
 });
 

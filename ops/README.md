@@ -29,16 +29,15 @@
 | 命令 | 做什么 | 对应旧方式 |
 |---|---|---|
 | `ops check` | 四道验证门：fmt / clippy / test / **依赖方向检查**（TS 版，cargo metadata 真实依赖树，替代 bash 正则） | flake `check` + check-architecture.sh |
-| `ops build [webview\|frontend\|bundle\|win32\|macos\|all] [--release]` | 构建发布物到 `dist/`；`webview` 固定生成 release WGPU shell + wasm-bindgen glue，`bundle` 固定生成经 Wasmtime 首帧/viewport 校验的 release WASM 包，`win32` 交叉构建开发壳，`macos` 在 Apple Silicon Mac 构建最小 `Tela.app`，`all` 先重建目录 | 手工多步 |
-| `ops verify [bundle\|gpu] [--build]` | 默认 `bundle`：验证 `.tela` 的 archive/ABI/guest 首帧；`gpu`：服务原生 JS WebGPU 回读诊断页，不经过 tela renderer | 外部 smoke 脚本 |
+| `ops build [webview\|frontend\|bundle [desktop\|mobile]\|android\|win32\|macos\|all] [--release] [--bundle-index URL]` | `bundle` 可构建独立 desktop/mobile release Guest；`android` 先校验 mobile bundle，再构建 x86_64 Vulkan GameActivity APK，必须传精确 HTTP(S) index URL；`webview`/`win32`/`macos` 保持各自壳职责，`all` 先重建目录 | 手工多步 |
+| `ops verify [bundle [desktop\|mobile]\|gpu] [--build]` | 默认 desktop `bundle`：验证 `.tela` 的 archive/ABI/guest 首帧；可显式验证 mobile；`gpu`：服务原生 JS WebGPU 回读诊断页，不经过 tela renderer | 外部 smoke 脚本 |
 | `ops serve [port]` | 开发静态服务器（默认 8000，端口占用自动递增，MIME/防穿越同旧脚本） | serve-demo.mjs |
 
-`ops build`（等同 `ops build all`）是默认发布组合：它先重建 `dist/`，再生成 WebView WGPU shell、浏览器
-bundle 和 `tela-dev` 应用开发包。浏览器与原生壳都从同一个 `.tela` archive 启动，浏览器不再直载 CPU demo
-wasm 或选择 raster 回退。`ops build win32` 与 `ops build macos` 都保持显式：前者需要 GNU
-Windows 交叉 target，后者需要 Apple Silicon macOS 的本机 SDK；它们不应让日常浏览器构建被平台工具链
-阻塞。`macos` 只发布 AppKit/Metal 壳和 Info.plist，不把远程 WASM bundle 嵌入 App。单目标构建只更新
-自己拥有的工件，不清除其他输出。
+`ops build`（等同 `ops build all`）是默认 desktop/WebView 发布组合：它先重建 `dist/`，再生成 WebView
+WGPU shell、浏览器 bundle 和 `tela-dev` 应用开发包。`tela-mobile` 是独立 channel，只有 `ops build bundle mobile`
+或 `ops build android --bundle-index URL` 才会生成。Android command 不嵌入 guest archive，且需要 cargo-ndk、
+Rust Android target、NDK/SDK API 36、JDK 17 和 Gradle；它不会让日常浏览器构建被平台工具链阻塞。`ops build win32`
+与 `ops build macos` 同样保持显式。单目标构建只更新自己拥有的工件，不清除其他输出。
 
 ## DDD 分层
 

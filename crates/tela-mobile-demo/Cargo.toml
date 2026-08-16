@@ -1,0 +1,24 @@
+[package]
+name = "tela-mobile-demo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela Android first-party mobile file manager guest"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+app-wasm = ["dep:tela-app-abi"]
+
+[dependencies]
+tela-contract = { path = "../tela-contract" }
+tela-core = { path = "../tela-core" }
+tela-fonts = { path = "../tela-fonts" }
+tela-icon = { path = "../tela-icon" }
+tela-text = { path = "../tela-text" }
+tela-app-abi = { path = "../tela-app-abi", optional = true }
+
+[lints.rust]
+unsafe_code = "deny"

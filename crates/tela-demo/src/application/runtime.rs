@@ -9,8 +9,7 @@ use tela_contract::{
     ScrollState, SemanticKey, ShortcutId, UiAction, UiFrame, UiNode, Viewport,
 };
 use tela_core::{
-    IdentityAllocator, LayoutCache, UiTree, ViewStateStore, ensure_modal_focus, handle_input,
-    restore_focus, save_focus,
+    DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore, restore_focus, save_focus,
 };
 use tela_text::ControlledTextMeasurer;
 use tela_ui::{LocalStateRuntime, intent_from_action};
@@ -44,7 +43,7 @@ pub struct App {
     viewport: Viewport,
     frame: Option<UiFrame>,
     tree: Option<UiTree>,
-    layout_cache: LayoutCache,
+    profile: DefaultApplicationProfile,
     identity_allocator: IdentityAllocator,
     view_state: ViewStateStore,
     nav_scroll_key: Option<SemanticKey>,
@@ -74,7 +73,7 @@ impl App {
             viewport: DEFAULT_VIEWPORT,
             frame: None,
             tree: None,
-            layout_cache: LayoutCache::new(),
+            profile: DefaultApplicationProfile::new(),
             identity_allocator: IdentityAllocator::new(),
             view_state: ViewStateStore::new(),
             nav_scroll_key: None,
@@ -139,14 +138,12 @@ impl App {
             UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
                 .expect("文件管理器场景必须合法");
         let scroll_inputs = self.active_scroll_inputs();
-        let focusable_nodes = tree.focusable_nodes();
-        self.view_state.reconcile_focus(&focusable_nodes);
-        self.view_state.reconcile_hover(tree.keys());
+        self.profile.reconcile_tree(&tree, &mut self.view_state);
         if self.restore_focus_pending {
             restore_focus(&tree, &mut self.view_state);
             self.restore_focus_pending = false;
         }
-        ensure_modal_focus(&tree, &mut self.view_state);
+        self.profile.ensure_modal_focus(&tree, &mut self.view_state);
         let mut controls = discover_controls(&tree);
         let hovered_target = self.toolbar_target_for_hover_key(&tree);
         if self.hovered_toolbar_target != hovered_target {
@@ -161,7 +158,11 @@ impl App {
             restore_focus(&tree, &mut self.view_state);
             self.restore_focus_pending = false;
         }
-        let modal_focus_changed = !ensure_modal_focus(&tree, &mut self.view_state).is_empty();
+        self.profile.reconcile_tree(&tree, &mut self.view_state);
+        let modal_focus_changed = !self
+            .profile
+            .ensure_modal_focus(&tree, &mut self.view_state)
+            .is_empty();
         let (search_focused, operation_focused) = self.input_focus_projection(&tree);
         let focus_projection_changed =
             props.search_focused != search_focused || props.operation_focused != operation_focused;
@@ -174,13 +175,14 @@ impl App {
             controls = discover_controls(&tree);
         }
         self.finish_input_render();
-        let frame = tree
-            .resolve_dirty_with_focus(
+        let frame = self
+            .profile
+            .resolve(
+                &tree,
                 self.viewport,
                 &ControlledTextMeasurer,
                 &scroll_inputs,
-                &mut self.layout_cache,
-                self.view_state.current_focus_key(),
+                &self.view_state,
                 Some(FOCUS_APPEARANCE),
             )
             .expect("文件管理器场景必须可布局");
@@ -228,7 +230,7 @@ impl App {
         self.ensure_frame();
         let frame = self.frame().clone();
         let tree = self.tree.as_ref().expect("tree");
-        let actions = handle_input(
+        let actions = self.profile.dispatch_input(
             tree,
             &frame,
             &mut self.view_state,
@@ -259,7 +261,7 @@ impl App {
             return 0;
         };
         let frame = self.frame().clone();
-        let actions = handle_input(
+        let actions = self.profile.dispatch_input(
             self.tree.as_ref().expect("tree"),
             &frame,
             &mut self.view_state,

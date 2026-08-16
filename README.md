@@ -39,6 +39,8 @@
 | [023-平台SDK与WASM开发包](docs/023-平台SDK与WASM开发包.md) | 原生壳如何一次性加载可验证 WASM 包？Win32 开发态怎样运行？ | 接原生平台 SDK、包协议或系统桥时 |
 | [024-macOS开发SDK实施目标](docs/024-macOS开发SDK实施目标.md) | macOS AppKit/Metal 壳怎样在 Mac 本地构建、从 WSL 请求一次 bundle 并缓存？ | 在 Apple Silicon Mac 接入或验收开发 SDK 时 |
 | [025-WebView开发SDK实施目标](docs/025-WebView开发SDK实施目标.md) | 浏览器如何作为 WebView 壳，从同一 `.tela` 包启动 WGPU 应用？ | 接浏览器、嵌入式 WebView 或排查开发态启动时 |
+| [026-架构迭代方案](docs/026-架构迭代方案.md) | 一级/二级/三级能力目录如何和 Target、Profile、delivery 正交组织？ | 评审跨端、插件化、游戏或 TUI 边界时 |
+| [027-Android移动端实施](docs/027-Android移动端实施.md) | Android 为什么是独立移动 Guest + GameActivity Target？strict bundle、Vulkan、IME 和 Back 如何落地？ | 构建、验收或扩展 Android 移动端时 |
 
 ## 开发工作流（ops）
 
@@ -51,13 +53,18 @@ ops check                # 四道验证门（fmt/clippy/test/依赖方向）
 ops build                # 重建 dist/，构建 WebView WGPU 壳、前端与 tela-dev 开发包
 ops build win32          # 在 WSL 交叉构建 Win32 开发壳到 dist/win32/
 ops build macos          # 在 Apple Silicon macOS 本机构建 Tela.app 到 dist/macos/
-ops verify [bundle|gpu]  # 默认校验应用包；gpu = 原生 JS WebGPU 环境自检
+ops build bundle mobile  # 构建独立的 tela-mobile guest bundle
+ops verify bundle mobile # 校验独立的 tela-mobile bundle
+ops build android --bundle-index http://<host>:8000/tela-mobile/latest.json
+                         # 构建 x86_64 Vulkan GameActivity APK；需要项目 Android 工具链
+ops verify [bundle|gpu]  # 默认校验 desktop 应用包；bundle 可指定 desktop|mobile
 ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 ```
 
-`dist/` 是唯一发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包、`win32` 壳和 macOS `Tela.app` 都必须能由
-`ops build` 重新生成。浏览器页面模板与宿主代码保留在 `web/`，Rust 演示逻辑保留在
-`crates/tela-demo/`，原生壳与包协议不存放手写内容到 `dist/`。
+`dist/` 是唯一发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包、`tela-mobile` WASM 包、Win32
+壳、macOS `Tela.app` 和 Android APK 都必须由受控 `ops` 命令生成。浏览器页面模板与宿主代码保留在 `web/`，
+desktop/mobile Rust 演示逻辑分别保留在 `crates/tela-demo/`、`crates/tela-mobile-demo/`，原生壳与包协议不存放
+手写内容到 `dist/`。
 
 浏览器是 `tela-webview-sdk` 的一个开发态壳：页面先加载固定的 WebView SDK，再以
 `cache: "no-store"` 请求 `/tela-dev/latest.json` 和 `.tela` archive，校验后实例化其中的

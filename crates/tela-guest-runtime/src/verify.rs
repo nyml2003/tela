@@ -2,10 +2,8 @@
 
 use std::{fmt, fs, path::Path};
 
+use crate::{GuestRuntime, validate_bundle_archive};
 use tela_app_abi::AppEvent;
-use tela_bundle::read_archive;
-
-use crate::GuestRuntime;
 
 /// Diagnostic values collected while proving a bundle can initialize in Wasmtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,8 +52,8 @@ impl fmt::Display for BundleVerification {
 /// Validates an archive, starts its guest, and dispatches a standard non-zero viewport.
 pub fn verify_bundle(path: &Path) -> Result<BundleVerification, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    let archive =
-        read_archive(&bytes).map_err(|error| format!("validate {}: {error}", path.display()))?;
+    let archive = validate_bundle_archive(&bytes)
+        .map_err(|error| format!("validate {}: {error}", path.display()))?;
     let mut runtime = GuestRuntime::new(&archive.app_wasm)
         .map_err(|error| format!("start guest runtime: {error}"))?;
     let initial_commands = runtime
