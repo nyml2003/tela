@@ -197,6 +197,31 @@ test('Android SDK 不能静态依赖 desktop 或 mobile guest', () => {
   assert.ok(violations.some((violation) => /mobile bundle/.test(violation.message)));
 });
 
+test('iOS SDK 只静态链接 mobile app，不能接入动态 bundle runtime', () => {
+  const allowed = checkArchitecture([
+    ...base(),
+    crate('tela-ios-sdk', [
+      ['tela-contract', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['pollster', 'normal'],
+      ['raw-window-handle', 'normal'],
+      ['wgpu', 'normal'],
+      ['winit', 'normal'],
+    ]),
+  ]);
+  assert.deepEqual(allowed, []);
+
+  const violations = checkArchitecture([
+    ...base(),
+    crate('tela-ios-sdk', [
+      ['tela-mobile-demo', 'normal'],
+      ['tela-guest-runtime', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /静态链接 mobile app/.test(violation.message)));
+});
+
 test('Guest Runtime 不能反向依赖目标 SDK', () => {
   const violations = checkArchitecture([
     ...base(),

@@ -2391,6 +2391,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-ios-sdk"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "raw-window-handle",
+ "tela-contract",
+ "tela-mobile-demo",
+ "tela-render-wgpu",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "tela-log"
 version = "0.1.0"
 

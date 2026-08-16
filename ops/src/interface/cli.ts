@@ -3,7 +3,7 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build [webview|frontend|bundle|android|win32|macos|all] [--release]  构建发布物到 dist/
+//   ops build [webview|frontend|bundle|android|ios|win32|macos|all] [--release]  构建发布物到 dist/
 //   ops verify bundle [desktop|mobile] [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
@@ -23,10 +23,12 @@ import { runBuildBundle } from '../application/build-bundle.ts';
 import { runBuildWin32 } from '../application/build-win32.ts';
 import { runBuildMacos } from '../application/build-macos.ts';
 import { runBuildAndroid } from '../application/build-android.ts';
+import { runBuildIos } from '../application/build-ios.ts';
 import { runVerifyBundle } from '../application/verify-bundle.ts';
 import { runServe } from '../application/serve.ts';
 import { runAndroidServe } from '../application/serve-android.ts';
 import { runDeployAndroid } from '../application/deploy-android.ts';
+import { runDeployIos } from '../application/deploy-ios.ts';
 import { runVerifyGpu } from '../application/verify-gpu.ts';
 import { TelemetryStore } from '../infrastructure/telemetry-store.ts';
 import { WindowsAdbPort } from '../infrastructure/windows-adb.ts';
@@ -35,12 +37,15 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build [webview|frontend|bundle [desktop|mobile]|android|win32|macos|all] [--release]
+  ops build [webview|frontend|bundle [desktop|mobile]|android|ios|win32|macos|all] [--release]
                               构建发布物到 dist/；默认 all，会先重建目录。bundle desktop/mobile 是
                               两个独立 Guest；android 先构建 mobile bundle，再构建 ARM64 Vulkan APK，固定使用 ADB reverse localhost index。
+                              ios 静态链接独立 mobile app，构建无签名 iPhone ARM64 UIKit/Metal App。
   ops android serve           仅监听 127.0.0.1:8000，供 USB adb reverse 的 Android mobile bundle 使用
   ops android deploy [--serial SERIAL]
                               调 Windows adb.exe 建立 reverse、安装并启动 ARM64 debug APK
+  ops ios deploy --device UDID
+                              使用 Xcode 配置的 Apple Development 签名，安装并启动 iPhone App
   ops verify [bundle [desktop|mobile]|gpu] [--build] [--port N]
                               验证（默认 bundle）：bundle = archive/ABI/guest 首帧校验
                               （--build 先生成 bundle）；gpu = 原生 JS WebGPU 环境自检（不经 wgpu，离屏三角形
@@ -73,6 +78,7 @@ async function main(): Promise<number> {
       build: { type: 'boolean', default: false },
       port: { type: 'string', default: '' },
       serial: { type: 'string', default: '' },
+      device: { type: 'string', default: '' },
       // 保留解析仅为对旧命令给出迁移提示，Android 构建不再接受可变网络 URL。
       'bundle-index': { type: 'string', default: '' },
     },
@@ -135,6 +141,26 @@ async function main(): Promise<number> {
             { cargo, process: processPort, fs, reporter, workspace },
           );
           if (!result.ok) return 1;
+        } else if (t === 'ios') {
+          if (values['bundle-index']) {
+            reporter.fail('iOS 静态链接 mobile app；不接受 --bundle-index。');
+            return 1;
+          }
+          if (values.serial || values.device) {
+            reporter.fail('--serial 与 --device 只适用于各自的 deploy 子命令。');
+            return 1;
+          }
+          if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+            reporter.fail('ios 目标必须在 Apple Silicon macOS 上构建（需要完整 Xcode 的 iPhoneOS SDK）。');
+            reporter.info('当前机器可继续验证 Rust 逻辑；在 Mac 上运行 nix develop .#ios --command ops build ios。');
+            return 1;
+          }
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildIos(
+            { cargo, process: processPort, fs, reporter, workspace },
+            values.release ? 'release' : 'dev',
+          );
+          if (!result.ok) return 1;
         } else if (t === 'win32') {
           const cargo = new CargoPort(processPort, workspace);
           const result = await runBuildWin32(
@@ -155,7 +181,7 @@ async function main(): Promise<number> {
           );
           if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（webview | frontend | bundle | android | win32 | macos | all）`);
+          reporter.fail(`未知构建目标: ${t}（webview | frontend | bundle | android | ios | win32 | macos | all）`);
           return 1;
         }
       }
@@ -194,6 +220,33 @@ async function main(): Promise<number> {
       }
       reporter.fail(`未知 Android 子命令: ${target ?? '(空)'}（serve | deploy）`);
       return 1;
+    }
+    case 'ios': {
+      if (variantArg) {
+        reporter.fail(`iOS 子命令 ${target ?? '(空)'} 不接受额外参数: ${variantArg}`);
+        return 1;
+      }
+      if (values['bundle-index'] || values.serial || values.release) {
+        reporter.fail('ops ios deploy 不接受 --bundle-index、--serial 或 --release。');
+        return 1;
+      }
+      if (target !== 'deploy') {
+        reporter.fail(`未知 iOS 子命令: ${target ?? '(空)'}（deploy）`);
+        return 1;
+      }
+      if (!values.device) {
+        reporter.fail('iOS 部署需要 --device <UDID>。');
+        return 1;
+      }
+      if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+        reporter.fail('iOS 真机部署必须在 Apple Silicon macOS 上执行。');
+        return 1;
+      }
+      const result = await runDeployIos(
+        { process: new NodeProcessPort(), fs: new NodeFsPort(), reporter, workspace },
+        { deviceId: values.device },
+      );
+      return result ? 0 : 1;
     }
     case 'verify': {
       if (!target) target = 'bundle';
@@ -273,7 +326,7 @@ function resolveBundleChannel(value: string | undefined, reporter: Reporter): Bu
 
 /** 未知命令的模糊提示（编辑距离 ≤ 2 的已知命令，防笔误如 obs → ops）。 */
 function suggestCommand(input: string): string | undefined {
-  const known = ['check', 'build', 'verify', 'serve', 'android', 'help'];
+  const known = ['check', 'build', 'verify', 'serve', 'android', 'ios', 'help'];
   const distance = (a: string, b: string): number => {
     const m = a.length;
     const n = b.length;

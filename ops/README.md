@@ -44,22 +44,41 @@ ops android serve
 TUNA 获取校验过的 Linux JDK，并直连校验固定 hash 的 Linux build-tools；它将 Windows SDK 的 platform、NDK、
 platform-tools 和已接受许可证以链接接入项目缓存，不修改 Windows SDK、全局 Nix 或代理配置。
 
-## 六条命令
+## iPhone 真机闭环
+
+iPhone 只在 Apple Silicon macOS 的完整 Xcode 中构建和部署。专用 `.#ios` shell 将 Rust target、Cargo
+缓存和 iPhoneOS linker 放在项目私有缓存中，并显式切换到完整 Xcode；它不使用默认 Darwin shell 的 Nix
+macOS SDK，也不写用户级 Rustup。
+
+```bash
+nix develop .#ios --command tela-ios-bootstrap # 首次；缓存 aarch64-apple-ios toolchain
+nix develop .#ios --command ops build ios       # 无签名静态 UIKit/Metal App
+# 在 Xcode 为 TelaMobile 配置 Apple Development Team 后：
+nix develop .#ios --command ops ios deploy --device <UDID>
+```
+
+`ops build ios` 直接静态链接 `tela-mobile-demo`，不会构建或下载 mobile WASM bundle。它将 Rust 静态库放到
+`ios/build/rust/`，再以 `CODE_SIGNING_ALLOWED=NO` 生成设备 App。`ops ios deploy` 要求明确 UDID，使用 Xcode
+当前 Team 的签名结果安装并启动；它不猜测 Team、不创建证书，也不处理设备信任。
+
+## 七条命令
 
 | 命令 | 做什么 | 对应旧方式 |
 |---|---|---|
 | `ops check` | 四道验证门：fmt / clippy / test / **依赖方向检查**（TS 版，cargo metadata 真实依赖树，替代 bash 正则） | flake `check` + check-architecture.sh |
-| `ops build [webview\|frontend\|bundle [desktop\|mobile]\|android\|win32\|macos\|all] [--release]` | `bundle` 可构建独立 desktop/mobile release Guest；`android` 先校验 mobile bundle，再构建 `arm64-v8a` Vulkan GameActivity APK，并固定写入 ADB-reverse localhost index；`webview`/`win32`/`macos` 保持各自壳职责，`all` 先重建目录 | 手工多步 |
+| `ops build [webview\|frontend\|bundle [desktop\|mobile]\|android\|ios\|win32\|macos\|all] [--release]` | `bundle` 可构建独立 desktop/mobile release Guest；`android` 先校验 mobile bundle，再构建 `arm64-v8a` Vulkan GameActivity APK；`ios` 静态链接移动应用并构建无签名 iPhone App；`webview`/`win32`/`macos` 保持各自壳职责，`all` 先重建目录 | 手工多步 |
 | `ops verify [bundle [desktop\|mobile]\|gpu] [--build]` | 默认 desktop `bundle`：验证 `.tela` 的 archive/ABI/guest 首帧；可显式验证 mobile；`gpu`：服务原生 JS WebGPU 回读诊断页，不经过 tela renderer | 外部 smoke 脚本 |
 | `ops serve [port]` | 开发静态服务器（默认 8000，端口占用自动递增，MIME/防穿越同旧脚本） | serve-demo.mjs |
 | `ops android serve` | 只监听 `127.0.0.1:8000`；端口被占用立即失败，不自动改端口 | Android USB bundle 服务 |
 | `ops android deploy [--serial SERIAL]` | 经 Windows `adb.exe` 验证单个 ARM64 设备、建立 reverse、安装并启动 APK | 手工 adb reverse/install/am start |
+| `ops ios deploy --device UDID` | 以 Xcode 配置的 Apple Development Team 签名，安装并启动明确的 iPhone | 手工 xcodebuild/devicectl |
 
 `ops build`（等同 `ops build all`）是默认 desktop/WebView 发布组合：它先重建 `dist/`，再生成 WebView
 WGPU shell、浏览器 bundle 和 `tela-dev` 应用开发包。`tela-mobile` 是独立 channel，只有 `ops build bundle mobile`
 或 `ops build android` 才会生成。Android command 不嵌入 guest archive，且通过 `tela-android-cargo` 使用 Rust
 `aarch64-linux-android` target、Windows NDK r27b linker、API 36、Linux JDK 17 与 Gradle；它不会让日常浏览器构建被平台工具链阻塞。`ops build win32`
-与 `ops build macos` 同样保持显式。单目标构建只更新自己拥有的工件，不清除其他输出。
+与 `ops build macos` 同样保持显式。`ops build ios` 是 Apple Silicon macOS 专用静态构建，输出在 `ios/build/` 而
+非 `dist/`，并不触碰动态 mobile channel。单目标构建只更新自己拥有的工件，不清除其他输出。
 
 ## DDD 分层
 

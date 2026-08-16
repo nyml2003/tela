@@ -1,4 +1,4 @@
-//! Mobile-specific Tela projection for the first Android application guest.
+//! Mobile-specific Tela projection for Tela's first native application.
 
 use tela_contract::{
     BindId, BorderRadius, Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy,
@@ -43,6 +43,8 @@ pub struct MobileViewProps<'a> {
     pub query: &'a str,
     /// Whether the platform text channel is attached to the search field.
     pub search_focused: bool,
+    /// Exclusion area reserved by the target's system bars and gesture affordances.
+    pub safe_area: Insets,
     /// Current browse results when not previewing.
     pub entries: Vec<&'a Entry>,
     /// Selected preview entry, if the screen is a preview route.
@@ -53,30 +55,52 @@ pub struct MobileViewProps<'a> {
 pub fn render(props: MobileViewProps<'_>) -> UiNode {
     let width = props.viewport.width.max(1.0);
     let height = props.viewport.height.max(1.0);
-    let content_height = (height - APP_BAR_H - SEARCH_H).max(1.0);
+    let safe_area = normalized_insets(props.safe_area);
+    let content_width = (width - safe_area.left - safe_area.right).max(1.0);
+    let content_height =
+        (height - safe_area.top - safe_area.bottom - APP_BAR_H - SEARCH_H).max(1.0);
     let content = match props.preview {
-        Some(entry) => preview(entry, width, content_height),
-        None => browse_list(&props.entries, width, content_height, props.query),
+        Some(entry) => preview(entry, content_width, content_height),
+        None => browse_list(&props.entries, content_width, content_height, props.query),
     };
-    LayoutContainer::column([
-        app_bar(props.title, props.can_go_back, width),
-        search_field(props.query, props.search_focused, width),
+    let screen: UiNode = LayoutContainer::column([
+        app_bar(props.title, props.can_go_back, content_width),
+        search_field(props.query, props.search_focused, content_width),
         content,
     ])
     .layout(LayoutConcern {
-        width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(height)),
+        width: Some(Size::fixed(content_width)),
+        height: Some(Size::fixed(
+            (height - safe_area.top - safe_area.bottom).max(1.0),
+        )),
         ..LayoutConcern::default()
     })
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(BACKGROUND)),
-        ..VisualConcern::default()
-    })
-    .identity(IdentityConcern {
-        update_mode: UpdateMode::Dirty,
-        ..IdentityConcern::default()
-    })
-    .into()
+    .into();
+    LayoutContainer::frame(screen)
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height)),
+            padding: safe_area,
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(BACKGROUND)),
+            ..VisualConcern::default()
+        })
+        .identity(IdentityConcern {
+            update_mode: UpdateMode::Dirty,
+            ..IdentityConcern::default()
+        })
+        .into()
+}
+
+fn normalized_insets(insets: Insets) -> Insets {
+    Insets {
+        top: insets.top.max(0.0),
+        right: insets.right.max(0.0),
+        bottom: insets.bottom.max(0.0),
+        left: insets.left.max(0.0),
+    }
 }
 
 fn app_bar(title: &str, can_go_back: bool, width: f32) -> UiNode {

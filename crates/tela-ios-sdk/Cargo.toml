@@ -1,0 +1,26 @@
+[package]
+name = "tela-ios-sdk"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela iPhone UIKit and Metal development SDK host"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tela-contract = { path = "../tela-contract" }
+tela-mobile-demo = { path = "../tela-mobile-demo", features = ["native-app"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+pollster = "0.4"
+raw-window-handle = "0.6"
+tela-render-wgpu = { path = "../tela-render-wgpu" }
+wgpu = "30"
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+
+# The UIKit safe-area helper is supplied by the thin Xcode target. Unsafe code is confined to the
+# one FFI call that obtains the UIView's system insets from winit's raw window handle.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"

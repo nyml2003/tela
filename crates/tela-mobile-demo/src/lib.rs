@@ -1,15 +1,30 @@
-//! Tela's first mobile-specific application guest.
+//! Tela's first mobile-specific application.
 //!
 //! It intentionally owns a separate file-browser model and mobile presentation. Only stable
-//! kernel, text, icon, and ABI behavior is reused from the desktop application.
+//! kernel, text, and icon behavior is reused from the desktop application. Platform targets may
+//! either compile its WASM guest ABI or drive its native mobile session directly.
 
-#[cfg(any(test, all(feature = "app-wasm", target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    feature = "native-app",
+    all(feature = "app-wasm", target_arch = "wasm32")
+))]
 mod application;
-#[cfg(any(test, all(feature = "app-wasm", target_arch = "wasm32")))]
+#[cfg(any(
+    test,
+    feature = "native-app",
+    all(feature = "app-wasm", target_arch = "wasm32")
+))]
 mod domain;
 #[cfg(all(feature = "app-wasm", target_arch = "wasm32"))]
 mod host;
-#[cfg(any(test, all(feature = "app-wasm", target_arch = "wasm32")))]
+#[cfg(any(test, feature = "native-app"))]
+mod native;
+#[cfg(any(
+    test,
+    feature = "native-app",
+    all(feature = "app-wasm", target_arch = "wasm32")
+))]
 mod presentation;
 
 #[cfg(all(feature = "app-wasm", target_arch = "wasm32"))]
@@ -19,6 +34,8 @@ use std::cell::RefCell;
 pub(crate) use application::App;
 #[cfg(all(feature = "app-wasm", target_arch = "wasm32"))]
 pub use application::DEFAULT_VIEWPORT as VIEWPORT;
+#[cfg(any(test, feature = "native-app"))]
+pub use native::{MobileApp, MobileAppStatus};
 
 #[cfg(all(feature = "app-wasm", target_arch = "wasm32"))]
 thread_local! {

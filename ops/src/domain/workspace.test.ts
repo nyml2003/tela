@@ -34,4 +34,9 @@ test('路径模型从仓库根派生', () => {
   assert.equal(w.androidNativeLibraryPath(), '/repo/android/app/src/main/jniLibs/arm64-v8a/libmain.so');
   assert.equal(w.androidDebugApkPath(), '/repo/android/app/build/outputs/apk/debug/app-debug.apk');
   assert.equal(w.androidDistPath(), '/repo/dist/android/tela-mobile-debug.apk');
+  assert.equal(w.iosProjectDir(), '/repo/ios');
+  assert.equal(w.iosXcodeProjectPath(), '/repo/ios/TelaMobile.xcodeproj');
+  assert.equal(w.iosRustStaticLibraryPath('release'), '/repo/target/aarch64-apple-ios/release/libtela_ios_sdk.a');
+  assert.equal(w.iosXcodeStaticLibraryPath(), '/repo/ios/build/rust/libtela_ios_sdk.a');
+  assert.equal(w.iosAppPath('dev'), '/repo/ios/build/DerivedData/Build/Products/Debug-iphoneos/TelaMobile.app');
 });

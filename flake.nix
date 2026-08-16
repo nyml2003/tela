@@ -254,6 +254,103 @@
             export JAVA_HOME="$java_home"
             exec "$gradle" "$@"
           '';
+          # iOS must use a complete local Xcode, not the Nix Apple SDK selected by the ordinary
+          # macOS shell. Rustup and Cargo remain project-private so this target does not mutate a
+          # developer's global Rust installation.
+          iosBootstrap = pkgs.writeShellScriptBin "tela-ios-bootstrap" ''
+            set -euo pipefail
+
+            toolchain_root="''${TELA_IOS_TOOLCHAIN_ROOT:-''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios}"
+            rustup_home="$toolchain_root/rustup"
+            cargo_home="$toolchain_root/cargo"
+            developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+            xcrun="$developer_dir/usr/bin/xcrun"
+
+            if [ ! -x "$developer_dir/usr/bin/xcodebuild" ] || [ ! -x "$xcrun" ]; then
+              printf '%s\n' 'Complete Xcode was not found. Install Xcode, launch it once, then set TELA_IOS_DEVELOPER_DIR if it is not /Applications/Xcode.app/Contents/Developer.' >&2
+              exit 1
+            fi
+            if ! "$xcrun" --sdk iphoneos --show-sdk-path >/dev/null; then
+              printf '%s\n' 'The selected Xcode has no iPhoneOS SDK. Complete Xcode (not Command Line Tools) is required.' >&2
+              exit 1
+            fi
+
+            mkdir -p "$toolchain_root"
+            if [ ! -x "$cargo_home/bin/rustup" ]; then
+              installer="$toolchain_root/rustup-init"
+              printf '%s\n' 'Downloading the project-local Apple Silicon Rust toolchain...'
+              curl --fail --location --retry 3 --retry-delay 2 \
+                --output "$installer" \
+                https://static.rust-lang.org/rustup/dist/aarch64-apple-darwin/rustup-init
+              chmod +x "$installer"
+              RUSTUP_HOME="$rustup_home" \
+                CARGO_HOME="$cargo_home" \
+                "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
+            fi
+            RUSTUP_HOME="$rustup_home" \
+              CARGO_HOME="$cargo_home" \
+              "$cargo_home/bin/rustup" target add aarch64-apple-ios
+
+            printf '%s\n' 'Tela iOS bootstrap complete.'
+          '';
+          iosCargo = pkgs.writeShellScriptBin "tela-ios-cargo" ''
+            set -euo pipefail
+
+            toolchain_root="''${TELA_IOS_TOOLCHAIN_ROOT:-''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios}"
+            cargo_home="''${TELA_IOS_CARGO_HOME:-$toolchain_root/cargo}"
+            developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+            xcrun="$developer_dir/usr/bin/xcrun"
+            if [ ! -x "$cargo_home/bin/cargo" ]; then
+              printf '%s\n' 'iOS Rust toolchain is absent. Run: nix develop .#ios --command tela-ios-bootstrap' >&2
+              exit 1
+            fi
+            if [ ! -x "$developer_dir/usr/bin/xcodebuild" ] || [ ! -x "$xcrun" ]; then
+              printf '%s\n' 'Complete Xcode is required. Set TELA_IOS_DEVELOPER_DIR when Xcode is installed elsewhere.' >&2
+              exit 1
+            fi
+
+            sdk_root="$("$xcrun" --sdk iphoneos --show-sdk-path)"
+            clang="$("$xcrun" --sdk iphoneos --find clang)"
+            ar="$("$xcrun" --sdk iphoneos --find ar)"
+            export DEVELOPER_DIR="$developer_dir"
+            export SDKROOT="$sdk_root"
+            export IPHONEOS_DEPLOYMENT_TARGET=16.0
+            unset MACOSX_DEPLOYMENT_TARGET
+            export CC_aarch64_apple_ios="$clang"
+            export CXX_aarch64_apple_ios="$clang++"
+            export AR_aarch64_apple_ios="$ar"
+            export CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$clang"
+            export PATH="$cargo_home/bin:$PATH"
+            exec "$cargo_home/bin/cargo" "$@"
+          '';
+          iosXcodebuild = pkgs.writeShellScriptBin "tela-ios-xcodebuild" ''
+            set -euo pipefail
+
+            developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+            xcodebuild="$developer_dir/usr/bin/xcodebuild"
+            if [ ! -x "$xcodebuild" ]; then
+              printf '%s\n' 'Complete Xcode is required. Set TELA_IOS_DEVELOPER_DIR when Xcode is installed elsewhere.' >&2
+              exit 1
+            fi
+            export DEVELOPER_DIR="$developer_dir"
+            unset SDKROOT
+            unset MACOSX_DEPLOYMENT_TARGET
+            exec "$xcodebuild" "$@"
+          '';
+          iosXcrun = pkgs.writeShellScriptBin "tela-ios-xcrun" ''
+            set -euo pipefail
+
+            developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+            xcrun="$developer_dir/usr/bin/xcrun"
+            if [ ! -x "$xcrun" ]; then
+              printf '%s\n' 'Complete Xcode is required. Set TELA_IOS_DEVELOPER_DIR when Xcode is installed elsewhere.' >&2
+              exit 1
+            fi
+            export DEVELOPER_DIR="$developer_dir"
+            unset SDKROOT
+            unset MACOSX_DEPLOYMENT_TARGET
+            exec "$xcrun" "$@"
+          '';
           commonShellHook = ''
             # nix-direnv 会保留宿主 PATH 的顺序；显式前置项目级 ops，避免命中其他仓库的同名命令。
             export PATH="${opsCommand}/bin:$PATH"
@@ -361,6 +458,36 @@
               echo "tela Android shell ready (arm64-v8a, API 29, Windows SDK / Linux build-tools 36)"
               if [ ! -x "$TELA_ANDROID_CARGO_HOME/bin/cargo" ] || [ ! -x "$TELA_ANDROID_TOOLCHAIN_ROOT/jdk/bin/java" ] || [ ! -x "$ANDROID_HOME/build-tools/36.0.0/aapt2" ]; then
                 echo "Run once: tela-android-bootstrap"
+              fi
+            '';
+
+            RUST_BACKTRACE = "1";
+          };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          ios = pkgs.mkShell {
+            packages = commonPackages ++ [
+              checkCommand
+              iosBootstrap
+              iosCargo
+              iosXcodebuild
+              iosXcrun
+            ];
+
+            shellHook = commonShellHook + ''
+              export TELA_IOS_TOOLCHAIN_ROOT="''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios"
+              export RUSTUP_HOME="$TELA_IOS_TOOLCHAIN_ROOT/rustup"
+              export TELA_IOS_CARGO_HOME="$TELA_IOS_TOOLCHAIN_ROOT/cargo"
+              export TELA_IOS_DEVELOPER_DIR="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              # The default Darwin shell points at Nix's macOS SDK. This shell intentionally
+              # delegates all device work to the wrappers above, which reset SDKROOT and select
+              # the full Xcode iPhoneOS SDK for each command.
+              export IPHONEOS_DEPLOYMENT_TARGET=16.0
+              echo "tela iOS shell ready (iPhone arm64, iOS 16.0)"
+              if [ ! -x "$TELA_IOS_CARGO_HOME/bin/cargo" ]; then
+                echo "Run once: tela-ios-bootstrap"
+              fi
+              if [ ! -x "$TELA_IOS_DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
+                echo "Complete Xcode was not found at $TELA_IOS_DEVELOPER_DIR"
               fi
             '';
 

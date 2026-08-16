@@ -52,6 +52,13 @@ export class CargoPort {
     return this.gate('build', args);
   }
 
+  /** 构建 iPhone ARM64 静态库；命令包装器隔离完整 Xcode iPhoneOS SDK 与项目 Rust 缓存。 */
+  async buildIos(crate: string, profile: BuildProfile): Promise<GateResult> {
+    const args = ['build', '--target', 'aarch64-apple-ios', '-p', crate];
+    if (profile === 'release') args.push('--release');
+    return this.gateWithCommand('tela-ios-cargo', 'build', args);
+  }
+
   /** 读取 workspace 各 crate 的声明依赖（--no-deps：只取成员声明，不解析外部树）。 */
   async metadata(): Promise<CrateInfo[]> {
     const res = await this.process.run(

@@ -172,11 +172,11 @@ Vulkan surface、resume/suspend、tap/scroll、中文 IME、Back、远程 bundle
 
 ## 8. 下一次抽取判据
 
-现在不创建 Android/iOS 共用 runtime、通用 mobile component crate 或动态插件 ABI。只有出现第二份真实实现
-后才判断：
+现在不创建 Android/iOS 共用 runtime、通用 mobile component crate 或动态插件 ABI。iOS 已作为第二份真实移动
+实现落地，但它的静态应用闭包反而证明 Android 的远程 bundle loader 不应共享。完成两端物理验收后，才判断：
 
-- Android 与 iOS 的 bundle 加载是否绝对一致，足以复用代码；
-- 两端 IME 或 Back 是否仅语义一致，值得定义窄协议；
+- 两端触控或 whole-value IME 是否仅语义一致，值得定义窄协议；
+- Android 的系统 Back 与 iPhone 的页面内返回是否存在足够稳定的共同动作，而不是复用生命周期代码；
 - TUI、游戏或另一个移动应用是否只是同一概念，因而只能共享 World Map 边界；
 - 新能力能否由 app + provider + target 加入，而不修改既有 Guest、Renderer 或 Kernel crate。
 

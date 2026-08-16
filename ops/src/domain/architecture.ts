@@ -39,6 +39,10 @@ const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
     'jni', 'pollster', 'tela-app-abi', 'tela-contract', 'tela-guest-runtime', 'tela-log',
     'tela-render-wgpu', 'ureq', 'wgpu', 'winit',
   ]],
+  ['tela-ios-sdk', [
+    'pollster', 'raw-window-handle', 'tela-contract', 'tela-mobile-demo', 'tela-render-wgpu',
+    'wgpu', 'winit',
+  ]],
   ['tela-webview-sdk', [
     'tela-app-abi', 'tela-bundle', 'tela-contract', 'tela-render-wgpu',
     'serde_json', 'wasm-bindgen', 'wasm-bindgen-futures', 'web-sys', 'wgpu',
@@ -118,9 +122,18 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
     violations.push({ crate: 'tela-android-sdk', message: 'Android SDK 必须通过 mobile bundle 加载 guest，禁止静态依赖业务应用' });
   }
 
-  // 7. The neutral guest runtime has no GUI loop, surface, or platform SDK dependency.
+  // 7. iPhone links the separate mobile application statically. It intentionally has no bundle
+  // delivery or desktop-runtime dependency: its App Store-compatible code closure is local.
+  const ios = byName.get('tela-ios-sdk');
+  if (ios && ios.deps.some((d) => [
+    'tela-demo', 'tela-app-abi', 'tela-bundle', 'tela-guest-runtime', 'tela-native-sdk-runtime',
+  ].includes(d.name))) {
+    violations.push({ crate: 'tela-ios-sdk', message: 'iOS SDK 静态链接 mobile app，禁止依赖 desktop guest、WASM ABI、bundle 或动态 guest runtime' });
+  }
+
+  // 8. The neutral guest runtime has no GUI loop, surface, or platform SDK dependency.
   const guestRuntime = byName.get('tela-guest-runtime');
-  if (guestRuntime && guestRuntime.deps.some((d) => d.name === 'tela-android-sdk' || d.name === 'tela-webview-sdk' || d.name === 'tela-win32-sdk' || d.name === 'tela-macos-sdk')) {
+  if (guestRuntime && guestRuntime.deps.some((d) => d.name === 'tela-android-sdk' || d.name === 'tela-ios-sdk' || d.name === 'tela-webview-sdk' || d.name === 'tela-win32-sdk' || d.name === 'tela-macos-sdk')) {
     violations.push({ crate: 'tela-guest-runtime', message: 'Guest Runtime 禁止依赖任一 Target SDK' });
   }
 

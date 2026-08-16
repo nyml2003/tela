@@ -18,6 +18,7 @@ node_modules/
 /android/app/build/
 /android/app/src/main/jniLibs/
 /android/local.properties
+/ios/build/
 
 # 编辑器 / 系统
 .vscode/

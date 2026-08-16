@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    FocusAppearance, InputEvent, NodeId, NodeKind, PhysicalKey, PointerEvent, ScrollState,
+    FocusAppearance, InputEvent, Insets, NodeId, NodeKind, PhysicalKey, PointerEvent, ScrollState,
     SemanticKey, UiAction, UiFrame, UiNode, Viewport,
 };
 use tela_core::{DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore};
@@ -14,7 +14,7 @@ use crate::{
     presentation::{MobileViewProps, render},
 };
 
-/// Initial mobile logical size before the Android host reports its real content area.
+/// Initial mobile logical size before a target host reports its real content area.
 pub const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 360.0,
     height: 720.0,
@@ -41,6 +41,7 @@ pub struct App {
     history: Vec<Route>,
     query: String,
     viewport: Viewport,
+    safe_area: Insets,
     frame: Option<UiFrame>,
     tree: Option<UiTree>,
     profile: DefaultApplicationProfile,
@@ -59,6 +60,7 @@ impl App {
             history: Vec::new(),
             query: String::new(),
             viewport: DEFAULT_VIEWPORT,
+            safe_area: Insets::all(0.0),
             frame: None,
             tree: None,
             profile: DefaultApplicationProfile::new(),
@@ -78,6 +80,23 @@ impl App {
             return false;
         }
         self.viewport = viewport;
+        self.invalidate_frame();
+        true
+    }
+
+    /// Updates the native system-bar exclusion area expressed in logical pixels.
+    #[cfg(any(test, feature = "native-app"))]
+    pub fn set_safe_area(&mut self, safe_area: Insets) -> bool {
+        let safe_area = Insets {
+            top: safe_area.top.max(0.0),
+            right: safe_area.right.max(0.0),
+            bottom: safe_area.bottom.max(0.0),
+            left: safe_area.left.max(0.0),
+        };
+        if self.safe_area == safe_area {
+            return false;
+        }
+        self.safe_area = safe_area;
         self.invalidate_frame();
         true
     }
@@ -124,7 +143,7 @@ impl App {
         self.frame.as_ref().expect("mobile frame must be ensured")
     }
 
-    /// Delivers a normalized pointer event from the Android target adapter.
+    /// Delivers a normalized pointer event from a mobile target adapter.
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
         self.ensure_frame();
         let frame = self.frame().clone();
@@ -142,7 +161,7 @@ impl App {
         actions.len() as u32
     }
 
-    /// Handles the small platform key vocabulary used by Android system Back.
+    /// Handles the small platform key vocabulary used by mobile target adapters.
     pub fn handle_key(&mut self, physical_key: u16) -> u32 {
         match PhysicalKey::from_code(physical_key) {
             Some(PhysicalKey::Escape) => u32::from(self.go_back()),
@@ -151,7 +170,7 @@ impl App {
         }
     }
 
-    /// Replaces the controlled query value supplied by GameActivity's text channel.
+    /// Replaces the controlled query value supplied by the native text channel.
     pub fn set_input_value(&mut self, value: String) -> u32 {
         if self.query == value {
             return 0;
@@ -162,12 +181,12 @@ impl App {
         1
     }
 
-    /// Android's text channel became focused. The core click already owns focus state.
+    /// The platform text channel became focused. The core click already owns focus state.
     pub fn input_focus(&mut self) -> u32 {
         u32::from(self.input_focused())
     }
 
-    /// Android's text channel lost focus.
+    /// The platform text channel lost focus.
     pub fn input_blur(&mut self) -> u32 {
         u32::from(self.blur_input())
     }
@@ -219,6 +238,7 @@ impl App {
             can_go_back: self.can_go_back(),
             query: &self.query,
             search_focused,
+            safe_area: self.safe_area,
             entries,
             preview,
         });
@@ -440,7 +460,7 @@ fn bind_id_at(tree: &UiTree, target: NodeId) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::PhysicalKey;
+    use tela_contract::{Insets, PhysicalKey};
 
     use super::{App, Route};
 
@@ -465,5 +485,28 @@ mod tests {
         let mut app = App::new();
         assert!(app.ensure_frame());
         assert!(!app.frame().commands.is_empty());
+    }
+
+    #[test]
+    fn safe_area_is_normalized_and_invalidates_the_projection() {
+        let mut app = App::new();
+        assert!(app.ensure_frame());
+        assert!(app.set_safe_area(Insets {
+            top: 47.0,
+            right: -2.0,
+            bottom: 34.0,
+            left: -1.0,
+        }));
+        assert_eq!(
+            app.safe_area,
+            Insets {
+                top: 47.0,
+                right: 0.0,
+                bottom: 34.0,
+                left: 0.0,
+            }
+        );
+        assert!(app.ensure_frame());
+        assert!(!app.set_safe_area(app.safe_area));
     }
 }

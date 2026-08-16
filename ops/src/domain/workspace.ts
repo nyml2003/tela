@@ -104,6 +104,20 @@ export interface WorkspacePaths {
   androidDistDir(): string;
   /** Published debug APK path. */
   androidDistPath(): string;
+  /** iPhone Xcode project root. */
+  iosProjectDir(): string;
+  /** iPhone Xcode project consumed by xcodebuild. */
+  iosXcodeProjectPath(): string;
+  /** Generated Rust static-library staging directory referenced by Xcode. */
+  iosStaticLibraryDir(): string;
+  /** Rust ARM64 iPhone static library before it is staged for Xcode. */
+  iosRustStaticLibraryPath(profile: BuildProfile): string;
+  /** Static library path referenced by the checked-in Xcode project. */
+  iosXcodeStaticLibraryPath(): string;
+  /** Per-project Xcode DerivedData location, never committed. */
+  iosDerivedDataDir(): string;
+  /** Device `.app` produced by the selected Xcode configuration. */
+  iosAppPath(profile: BuildProfile): string;
 }
 
 /** 根据仓库根构造路径模型（纯函数）。 */
@@ -238,6 +252,29 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     },
     androidDistPath() {
       return `${distDir}/android/tela-mobile-debug.apk`;
+    },
+    iosProjectDir() {
+      return `${root}/ios`;
+    },
+    iosXcodeProjectPath() {
+      return `${root}/ios/TelaMobile.xcodeproj`;
+    },
+    iosStaticLibraryDir() {
+      return `${root}/ios/build/rust`;
+    },
+    iosRustStaticLibraryPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/aarch64-apple-ios/${dir}/libtela_ios_sdk.a`;
+    },
+    iosXcodeStaticLibraryPath() {
+      return `${root}/ios/build/rust/libtela_ios_sdk.a`;
+    },
+    iosDerivedDataDir() {
+      return `${root}/ios/build/DerivedData`;
+    },
+    iosAppPath(profile) {
+      const configuration = profile === 'release' ? 'Release' : 'Debug';
+      return `${root}/ios/build/DerivedData/Build/Products/${configuration}-iphoneos/TelaMobile.app`;
     },
   };
 }

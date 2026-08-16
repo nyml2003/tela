@@ -1,10 +1,10 @@
 # 023-平台 SDK 与 WASM 开发包
 
-> **状态：🟡 Win32、macOS、WebView 开发态已落地；Android source、mobile bundle、ARM64 host build workflow 与 Windows ADB deploy workflow 已落地，实际 ARM64 真机图形验收仍待执行。** 本文定义平台 SDK 的最小边界、可验证 WASM 开发包和后续平台的扩展方式；它不承诺生产分发方案。
+> **状态：Win32、macOS、WebView 开发态已落地；Android source、mobile bundle、ARM64 host build workflow 与 Windows ADB deploy workflow 已落地，实际 ARM64 真机图形验收仍待执行；iOS 静态 mobile app、Xcode 工程和构建/部署流程已落地，Apple Silicon 真机验收尚待执行。** 本文定义平台 SDK 的最小边界、可验证 WASM 开发包和后续平台的扩展方式；它不承诺生产分发方案。
 
 ## 1. 结论
 
-平台不通过一个巨型 `Host` trait 接入，也不让 Win32 壳动态加载 Rust C ABI DLL。应用是可替换的 WASM guest，壳拥有窗口、渲染、输入和将来的系统桥；两者只交换版本化字节包，不交换 Rust 引用、trait object、native window handle 或业务 Store。
+平台不通过一个巨型 `Host` trait 接入，也不让 Win32 壳动态加载 Rust C ABI DLL。桌面、WebView 与 Android 的应用是可替换 WASM guest，壳拥有窗口、渲染、输入和将来的系统桥；两者只交换版本化字节包，不交换 Rust 引用、trait object、native window handle 或业务 Store。iPhone 是明确的首期例外：它静态链接独立移动应用，仍不共享桌面业务视图或 GUI lifecycle。
 
 ```text
 tela-demo 或 tela-mobile-demo 应用源码
@@ -45,6 +45,7 @@ Win32 壳加载 C ABI DLL 在生产安装器、插件 ABI 或第三方语言嵌�
 | `tela-win32-sdk` | HWND/WGPU、Win32 输入归一化和 Windows 启动 worker | `tela-core` 内部实现、业务逻辑 |
 | `tela-macos-sdk` | AppKit/NSView、Metal/WGPU、macOS 输入和缓存启动 worker | Win32 消息、业务逻辑 |
 | `tela-android-sdk` + `android/` | GameActivity、Winit、Vulkan/WGPU、触摸、JNI whole-value IME、system Back、APK 打包 | desktop cache/lifecycle、业务 guest、GLES fallback |
+| `tela-ios-sdk` + `ios/` | Winit/UIKit、Metal/WGPU、触摸、whole-value `UIKeyInput`、safe area、Xcode device App | desktop business view、WASM ABI/bundle、Wasmtime、网络下载、Android lifecycle |
 | `ops` | 构建、发布顺序、bundle 验证和静态服务 | runtime 协议解释、平台窗口 |
 
 `tela-render-wgpu` 仍只消费 `UiFrame`。浏览器、游戏与原生壳不各自复制布局或绘制命令生成逻辑。`web/src/webview-sdk/` 是 Rust crate 的 JavaScript 半边，不是第二个 renderer；它让未来 Android/iOS WebView 能复用通用 DOM 壳，而不提前发明 native bridge。
@@ -96,7 +97,23 @@ archive 内 `manifest.json` 声明 `app.wasm` 与每个资源条目的未压缩�
 Android 与桌面共享的只有 app ABI、bundle 校验和 `GuestRuntime`。GameActivity、surface 生命周期、触摸、
 IME 和 Back 都是 Android 专属实现，不能迁回 shared runtime。
 
-### 4.3 WebView 启动
+### 4.3 iPhone 启动
+
+1. Objective-C `main` 仅调用 `tela_ios_start()`；静态库直接创建 `tela-mobile-demo` 的 `MobileApp`，不请求
+   `latest.json`，不读取 `.tela`，也不实例化 Guest。
+2. `resumed` 时 iOS host 创建 Winit/UIKit 窗口、Metal-only WGPU instance/surface/device/renderer，并从
+   `UIView.safeAreaInsets` 读取逻辑 point 安全区后交给移动应用。
+3. 物理触点按 scale factor 换算为 point；首个 pointer 在 12pt slop 内延迟为 tap，越过 slop 后只派发
+   反向内容 scroll delta。多指和 cancel 不会留下待提交的 tap。
+4. 原生 `UIKeyInput` 将完整受控文本值和 Unicode 退格交给 `MobileApp`；Return 先 blur 输入并收起键盘，
+   再保留当前查询。
+5. `suspended` 先 blur 文本、取消触控并 drop Metal surface；移动应用状态留在 Rust 会话中，下一次
+   `resumed` 重新创建 surface 后继续渲染。
+
+iPhone 复用的是 `UiFrame`、`Insets`、`PointerEvent` 和已经独立实现的 `tela-mobile-demo`，不是 Android 的
+GameActivity lifecycle、`tela-guest-runtime`、WASM ABI 或 mobile bundle channel。详见 [028](028-iOS开发SDK实施.md)。
+
+### 4.4 WebView 启动
 
 1. `startTelaWebview({ canvas, bundleIndex })` 检查浏览器 WebGPU 能力并加载固定的 `tela_webview_sdk.js` / `_bg.wasm`。
 2. JavaScript 以 `no-store` fetch 索引和 archive；相对 archive URL 由浏览器 `URL` API 解析。
@@ -106,7 +123,7 @@ IME 和 Back 都是 Android 专属实现，不能迁回 shared runtime。
 
 默认 index 为相对当前页面解析的 `/tela-dev/latest.json`。开发服务器仅为 `/tela-dev/*` 添加 `Access-Control-Allow-Origin: *`，以支持明确的跨机器开发；其他静态资源不开放跨域读取。
 
-### 4.4 构建端发布门
+### 4.5 构建端发布门
 
 两个 bundle command 都先写 channel 内的 `.tmp` archive 与 `.tmp` index，随后执行中性的
 `tela-guest-verify <tmp>`。验证器检查 archive、以 Wasmtime 实例化 guest、读取首帧并派发一次 viewport；
@@ -172,6 +189,16 @@ whole-value 受控同步 `AppStatus.input_value` 和 `SetInputValue`，以 compo
 系统 Back 的次序固定：文本输入活动时先 blur/hide IME；否则向 Guest 派发 Escape。mobile Guest 依次处理
 预览返回、文件夹返回、清空查询和根目录未处理；只有最后一种情况 Kotlin 才 finish Activity。
 
+### 6.4 iPhone Target
+
+iPhone 使用 Winit/UIKit 与 Metal-only WGPU，目标为 `aarch64-apple-ios`、iOS 16.0+、仅 iPhone、仅竖屏。
+它不将 macOS `NSView`、Android `GameActivity` 或桌面 shell lifecycle 移植到 UIKit。UIKit safe area 在每次
+viewport 变化时传入移动业务视图，根 Frame 不可在刘海、状态栏、Home indicator 或横向避让区绘制业务内容。
+
+软件键盘通过 Winit 的 `UIKeyInput` 接入。首期是 whole-value 受控文本：插入和 Unicode scalar 退格更新完整
+查询，Return blur；选择范围、复制粘贴、候选框锚点、拖放和 accessibility tree 仍不在范围内。surface 的
+`Outdated`/`Lost` 重建配置，`Timeout`/`Occluded` 跳过当前帧，其他不可恢复错误记录诊断并退出 event loop。
+
 ## 7. 开发命令
 
 在 WSL 仓库根执行：
@@ -193,9 +220,12 @@ nix develop .#android --command tela-android-bootstrap
 nix develop .#android --command ops build android
 nix develop .#android --command ops android serve
 nix develop .#android --command ops android deploy --serial <serial>
+nix develop .#ios --command tela-ios-bootstrap
+nix develop .#ios --command ops build ios
+nix develop .#ios --command ops ios deploy --device <UDID>
 ```
 
-Windows 默认请求 `http://127.0.0.1:8000/tela-dev/latest.json`；`--port` 只替换本机端口，`--bundle-index` 允许完整 HTTP(S) 地址，两者互斥。Mac 或局域网开发应使用开发机可达地址和显式 `--bundle-index`。Android 不再接受可变 URL：其 APK 固定请求 `http://127.0.0.1:8000/tela-mobile/latest.json`，`ops android deploy` 以 Windows `adb.exe` 建立 USB `adb reverse tcp:8000 tcp:8000`，所以真机看到的是自己的 localhost。首次运行的 bootstrap 在项目缓存准备 Rust `aarch64-linux-android` target、Linux JDK 17 与 Linux build-tools，并只读链接 Windows API 36、NDK r27b、platform-tools 和许可证；`ops build android` 不依赖 `cargo-ndk`。`ops serve` 只服务 `dist/`，不会启动浏览器。
+Windows 默认请求 `http://127.0.0.1:8000/tela-dev/latest.json`；`--port` 只替换本机端口，`--bundle-index` 允许完整 HTTP(S) 地址，两者互斥。Mac 或局域网开发应使用开发机可达地址和显式 `--bundle-index`。Android 不再接受可变 URL：其 APK 固定请求 `http://127.0.0.1:8000/tela-mobile/latest.json`，`ops android deploy` 以 Windows `adb.exe` 建立 USB `adb reverse tcp:8000 tcp:8000`，所以真机看到的是自己的 localhost。首次运行的 bootstrap 在项目缓存准备 Rust `aarch64-linux-android` target、Linux JDK 17 与 Linux build-tools，并只读链接 Windows API 36、NDK r27b、platform-tools 和许可证；`ops build android` 不依赖 `cargo-ndk`。iPhone 必须在 Apple Silicon macOS 的完整 Xcode 中运行 `.#ios` shell；`ops build ios` 只生成无签名静态 App，`ops ios deploy --device` 使用已在 Xcode 配置的 Apple Development Team 签名、安装和启动。`ops serve` 只服务 `dist/`，不会启动浏览器。
 
 ## 8. 后续平台
 
@@ -205,9 +235,9 @@ Windows 默认请求 `http://127.0.0.1:8000/tela-dev/latest.json`；`--port` 只
 | macOS | AppKit/NSView、Metal WGPU surface、输入、缓存 | 同一 ABI/bundle | Apple Silicon 开发态已实现；真机图形验收见 024 |
 | WebView | DOM canvas、WGPU、DOM 输入/IME、一次性网络加载 | 同一 ABI/bundle；浏览器 WebAssembly 执行 guest | 通用开发态已实现；不含 Android/iOS native bridge |
 | Android | GameActivity、Vulkan/WGPU、触摸、IME、Back、surface 生命周期 | 同一 ABI/bundle；严格远程 Wasmtime guest | ARM64 cross-APK 与 Windows ADB deploy 已实现；真机图形验收待执行 |
-| iOS | UIKit/Metal layer、触摸、IME、生命周期 | 同一 ABI/bundle | 仅设计目标 |
+| iOS | Winit/UIKit、Metal/WGPU、safe area、触摸、whole-value IME、surface 生命周期 | 静态链接 `tela-mobile-demo` 的直接 Rust API；无 bundle/ABI/Wasmtime | iPhone ARM64 开发态已实现；Apple Silicon 真机验收待执行 |
 
-Android 已在真实窗口、输入、发布与 bridge 约束出现后增加薄 SDK；iOS 仍不预建空 crate。后续 Target 只在真实需求出现时复用 `tela-app-abi`、`tela-bundle`、`tela-guest-runtime` 或 renderer 的已验证部分；不要为了名义统一先创造共享大接口。
+Android 与 iOS 都在真实窗口、输入、发布与 bridge 约束出现后才增加薄 SDK：Android 选择严格远程 bundle，iPhone 选择静态移动应用。后续 Target 只在真实需求出现时复用已经验证的协议或 renderer；不要为了名义统一先创造共享大接口或跨端 mobile runtime。
 
 ## 9. 验收边界
 
@@ -218,3 +248,4 @@ Android 已在真实窗口、输入、发布与 bridge 约束出现后增加薄 
 - Windows 真机应显示完整 `UiFrame`，响应鼠标、键盘、Tab/方向焦点和失焦恢复，且 `--verbose` 不再出现缺少 display handle。macOS 真机应以显式 `--bundle-index` 验证 AppKit/Metal、resize、输入、cache fallback 和 display handle，详见 [024](024-macOS开发SDK实施目标.md)。
 - 浏览器人工验收由开发者在自己选择的 WebView/浏览器打开 `ops serve` 输出根 URL，验证 WGPU、DPR resize、树/列表输入、Tab/方向键焦点、IME composition 与 `window.telaReplaceKeymap`；本仓库命令不会自行启动 Chromium。
 - Android 自动化已覆盖独立 mobile bundle、strict verifier、触摸 slop、单指取消、whole-value IME、ARM64 构建、固定服务与 ADB deploy 失败闭环；完成项目 Android 工具链后，还必须执行 `ops build android`、`ops android serve`、`ops android deploy --serial ...` 并在 ARM64 真机验证 Activity resume/suspend、Vulkan surface、IME、Back 和远程 bundle 失败诊断。
+- iPhone 自动化已覆盖静态依赖闭包、直接移动应用 API、safe-area 传递、触控 slop/取消和 whole-value 文本逻辑；完成 macOS 工具链后，仍必须执行 `ops build ios`、配置 Team 后的 `ops ios deploy --device ...`，并在带刘海与 Home indicator 的 ARM64 iPhone 验证竖屏、安全区、触控、键盘和 Metal surface 重建，详见 [028](028-iOS开发SDK实施.md)。
