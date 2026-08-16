@@ -264,7 +264,15 @@
             rustup_home="$toolchain_root/rustup"
             cargo_home="$toolchain_root/cargo"
             developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-            xcrun="$developer_dir/usr/bin/xcrun"
+            # Xcode 26 removed the in-bundle xcrun; fall back to the system shim.
+            if [ -x "$developer_dir/usr/bin/xcrun" ]; then
+              xcrun="$developer_dir/usr/bin/xcrun"
+            else
+              xcrun=/usr/bin/xcrun
+            fi
+            # The nix dev shell points DEVELOPER_DIR/SDKROOT at Nix's macOS SDK; force Xcode.
+            export DEVELOPER_DIR="$developer_dir"
+            unset SDKROOT
 
             if [ ! -x "$developer_dir/usr/bin/xcodebuild" ] || [ ! -x "$xcrun" ]; then
               printf '%s\n' 'Complete Xcode was not found. Install Xcode, launch it once, then set TELA_IOS_DEVELOPER_DIR if it is not /Applications/Xcode.app/Contents/Developer.' >&2
@@ -276,19 +284,30 @@
             fi
 
             mkdir -p "$toolchain_root"
+            # Rustup distribution mirror. TELA_IOS_RUSTUP_MIRROR is the base serving BOTH the
+            # channel manifests at <base>/dist/ and the installer at <base>/rustup/dist/; TUNA
+            # only mirrors dated cargo tarballs, so it does not qualify. Verified mirrors:
+            #   USTC: TELA_IOS_RUSTUP_MIRROR=https://mirrors.ustc.edu.cn/rust-static
+            #   SJTU: TELA_IOS_RUSTUP_MIRROR=https://mirror.sjtu.edu.cn/rust-static
+            # Default is the official source. UPDATE_ROOT resolves to <base>/rustup, which the
+            # mirrors above also serve.
+            rustup_mirror="''${TELA_IOS_RUSTUP_MIRROR:-https://static.rust-lang.org}"
+            rustup_env=(RUSTUP_DIST_SERVER="$rustup_mirror" RUSTUP_UPDATE_ROOT="$rustup_mirror/rustup")
             if [ ! -x "$cargo_home/bin/rustup" ]; then
               installer="$toolchain_root/rustup-init"
-              printf '%s\n' 'Downloading the project-local Apple Silicon Rust toolchain...'
+              printf '%s\n' "Downloading the project-local Apple Silicon Rust toolchain (''${rustup_mirror})..."
               curl --fail --location --retry 3 --retry-delay 2 \
                 --output "$installer" \
-                https://static.rust-lang.org/rustup/dist/aarch64-apple-darwin/rustup-init
+                "$rustup_mirror/rustup/dist/aarch64-apple-darwin/rustup-init"
               chmod +x "$installer"
               RUSTUP_HOME="$rustup_home" \
                 CARGO_HOME="$cargo_home" \
+                env "''${rustup_env[@]}" \
                 "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
             fi
             RUSTUP_HOME="$rustup_home" \
               CARGO_HOME="$cargo_home" \
+              env "''${rustup_env[@]}" \
               "$cargo_home/bin/rustup" target add aarch64-apple-ios
 
             printf '%s\n' 'Tela iOS bootstrap complete.'
@@ -297,11 +316,25 @@
             set -euo pipefail
 
             toolchain_root="''${TELA_IOS_TOOLCHAIN_ROOT:-''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios}"
-            cargo_home="''${TELA_IOS_CARGO_HOME:-$toolchain_root/cargo}"
+            # Prefer the user's global rustup toolchain; the project-private one (installed by
+            # tela-ios-bootstrap) is used only when TELA_IOS_CARGO_HOME points at it explicitly.
+            if [ -n "''${TELA_IOS_CARGO_HOME:-}" ]; then
+              cargo_home="$TELA_IOS_CARGO_HOME"
+            elif global_cargo="$(command -v rustup >/dev/null 2>&1 && rustup which cargo 2>/dev/null)"; then
+              cargo_home="$(dirname "$(dirname "$global_cargo")")"
+            elif [ -x "$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo" ]; then
+              cargo_home="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin"
+            else
+              cargo_home="$toolchain_root/cargo"
+            fi
             developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-            xcrun="$developer_dir/usr/bin/xcrun"
+            if [ -x "$developer_dir/usr/bin/xcrun" ]; then
+              xcrun="$developer_dir/usr/bin/xcrun"
+            else
+              xcrun=/usr/bin/xcrun
+            fi
             if [ ! -x "$cargo_home/bin/cargo" ]; then
-              printf '%s\n' 'iOS Rust toolchain is absent. Run: nix develop .#ios --command tela-ios-bootstrap' >&2
+              printf '%s\n' 'iOS Rust toolchain is absent. Run: rustup target add aarch64-apple-ios (or nix develop .#ios --command tela-ios-bootstrap for a project-private one)' >&2
               exit 1
             fi
             if [ ! -x "$developer_dir/usr/bin/xcodebuild" ] || [ ! -x "$xcrun" ]; then
@@ -309,10 +342,13 @@
               exit 1
             fi
 
+            # The nix dev shell points DEVELOPER_DIR/SDKROOT at Nix's macOS SDK; force Xcode
+            # before resolving the iPhoneOS SDK and toolchain paths.
+            export DEVELOPER_DIR="$developer_dir"
+            unset SDKROOT
             sdk_root="$("$xcrun" --sdk iphoneos --show-sdk-path)"
             clang="$("$xcrun" --sdk iphoneos --find clang)"
             ar="$("$xcrun" --sdk iphoneos --find ar)"
-            export DEVELOPER_DIR="$developer_dir"
             export SDKROOT="$sdk_root"
             export IPHONEOS_DEPLOYMENT_TARGET=16.0
             unset MACOSX_DEPLOYMENT_TARGET
@@ -320,6 +356,9 @@
             export CXX_aarch64_apple_ios="$clang++"
             export AR_aarch64_apple_ios="$ar"
             export CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$clang"
+            # Rustup shims must resolve the toolchain through the global ~/.rustup; a leftover
+            # RUSTUP_HOME from the nix shell would redirect them to a stale project-private one.
+            unset RUSTUP_HOME
             export PATH="$cargo_home/bin:$PATH"
             exec "$cargo_home/bin/cargo" "$@"
           '';
@@ -335,13 +374,21 @@
             export DEVELOPER_DIR="$developer_dir"
             unset SDKROOT
             unset MACOSX_DEPLOYMENT_TARGET
+            # The nix shell exports LD/CC/LDFLAGS etc.; xcodebuild inherits them as build
+            # settings and would link through a bare `ld` instead of the clang driver (breaking
+            # its -Xlinker passthrough) and use the nix toolchain paths.
+            unset LD CC CXX AR CPP LDFLAGS CFLAGS CXXFLAGS NIX_LDFLAGS NIX_CFLAGS_COMPILE NIX_CFLAGS_LINK
             exec "$xcodebuild" "$@"
           '';
           iosXcrun = pkgs.writeShellScriptBin "tela-ios-xcrun" ''
             set -euo pipefail
 
             developer_dir="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-            xcrun="$developer_dir/usr/bin/xcrun"
+            if [ -x "$developer_dir/usr/bin/xcrun" ]; then
+              xcrun="$developer_dir/usr/bin/xcrun"
+            else
+              xcrun=/usr/bin/xcrun
+            fi
             if [ ! -x "$xcrun" ]; then
               printf '%s\n' 'Complete Xcode is required. Set TELA_IOS_DEVELOPER_DIR when Xcode is installed elsewhere.' >&2
               exit 1
@@ -349,6 +396,7 @@
             export DEVELOPER_DIR="$developer_dir"
             unset SDKROOT
             unset MACOSX_DEPLOYMENT_TARGET
+            unset LD CC CXX AR CPP LDFLAGS CFLAGS CXXFLAGS
             exec "$xcrun" "$@"
           '';
           commonShellHook = ''
@@ -475,16 +523,18 @@
 
             shellHook = commonShellHook + ''
               export TELA_IOS_TOOLCHAIN_ROOT="''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios"
-              export RUSTUP_HOME="$TELA_IOS_TOOLCHAIN_ROOT/rustup"
-              export TELA_IOS_CARGO_HOME="$TELA_IOS_TOOLCHAIN_ROOT/cargo"
+              # Global rustup by default; TELA_IOS_CARGO_HOME/RUSTUP_HOME may be overridden to
+              # point at the project-private toolchain installed by tela-ios-bootstrap.
+              export RUSTUP_HOME="''${RUSTUP_HOME:-$HOME/.rustup}"
+              export TELA_IOS_CARGO_HOME="''${TELA_IOS_CARGO_HOME:-}"
               export TELA_IOS_DEVELOPER_DIR="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
               # The default Darwin shell points at Nix's macOS SDK. This shell intentionally
               # delegates all device work to the wrappers above, which reset SDKROOT and select
               # the full Xcode iPhoneOS SDK for each command.
               export IPHONEOS_DEPLOYMENT_TARGET=16.0
               echo "tela iOS shell ready (iPhone arm64, iOS 16.0)"
-              if [ ! -x "$TELA_IOS_CARGO_HOME/bin/cargo" ]; then
-                echo "Run once: tela-ios-bootstrap"
+              if [ ! -x "$TELA_IOS_CARGO_HOME/bin/cargo" ] && ! command -v rustup >/dev/null 2>&1; then
+                echo "Run once: rustup target add aarch64-apple-ios (or tela-ios-bootstrap for a project-private toolchain)"
               fi
               if [ ! -x "$TELA_IOS_DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
                 echo "Complete Xcode was not found at $TELA_IOS_DEVELOPER_DIR"

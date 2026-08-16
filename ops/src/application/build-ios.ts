@@ -48,7 +48,7 @@ export async function runBuildIos(
     'tela-ios-xcodebuild',
     [
       '-project', workspace.iosXcodeProjectPath(),
-      '-target', IOS_XCODE_TARGET,
+      '-scheme', IOS_XCODE_TARGET,
       '-configuration', configuration,
       '-sdk', 'iphoneos',
       '-derivedDataPath', workspace.iosDerivedDataDir(),

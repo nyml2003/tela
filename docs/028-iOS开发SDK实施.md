@@ -1,6 +1,6 @@
 # 028-iOS 开发 SDK 实施
 
-> **状态：实现代码、Xcode 工程、`ops` 构建/部署流程和本地单元测试已落地；Apple Silicon macOS 上的 iPhoneOS 链接、Apple Development 签名、真机安装与图形验收尚待执行。** 本文只定义 iPhone 开发态，不承诺模拟器、iPad、App Store 分发或远程应用更新。
+> **状态：验收通过（2026-08-17，iPhone 17 真机）。** Apple Silicon macOS 上的 iPhoneOS 链接、Apple Development 签名、真机安装与图形验收均已执行完成。本文只定义 iPhone 开发态，不承诺模拟器、iPad、App Store 分发或远程应用更新。
 
 ## 1. 结论与边界
 
@@ -56,8 +56,11 @@ ops build ios
 ```
 
 `tela-ios-bootstrap` 在 `${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios` 安装项目私有 Rust toolchain，并只添加
-`aarch64-apple-ios` target。`tela-ios-cargo` 为该 target 设置完整 Xcode 的 iPhoneOS SDK、clang、ar 和
-deployment target 16.0；不写用户级 `rustup`。完整 Xcode 不在默认位置时，设置
+`aarch64-apple-ios` target，是 WSL/CI 等机器上的隔离方案。**本机（Apple Silicon macOS）默认走全局
+rustup**：`tela-ios-cargo` 优先解析 `rustup which cargo`（兜底 `~/.rustup/toolchains/stable-*/bin`），
+`TELA_IOS_CARGO_HOME` 可显式指回私有工具链；全局工具链只需
+`rustup target add aarch64-apple-ios`。`tela-ios-cargo` 为 iOS target 设置完整 Xcode 的 iPhoneOS SDK、
+clang、ar 和 deployment target 16.0。完整 Xcode 不在默认位置时，设置
 `TELA_IOS_DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer` 后再运行上述命令。
 
 `ops build ios` 的顺序固定：
@@ -70,10 +73,31 @@ deployment target 16.0；不写用户级 `rustup`。完整 Xcode 不在默认位
 `ios/build/` 是 Xcode 的项目私有 DerivedData/staging 区，已被 Git 忽略；它不同于浏览器和 Android 的
 `dist/` 发布目录，因为签名与设备安装直接消费 Xcode 的本地 App bundle。
 
+### Xcode 26 兼容修复（2026-08 实测，均已进源码）
+
+1. `-target` 与 `-derivedDataPath` 组合被 Xcode 26 禁止 → xcodebuild 统一用 `-scheme TelaMobile`。
+2. nix dev shell 导出的 `LD=ld`/`CC=clang` 会作为构建设备被 xcodebuild 继承，链接变成裸 `ld` 直接
+   调用、`-Xlinker` 参数全部失败（"unknown options: -Xlinker"）→ `tela-ios-xcodebuild`/`tela-ios-xcrun`
+   必须 `unset LD CC CXX AR CPP LDFLAGS CFLAGS CXXFLAGS NIX_LDFLAGS NIX_CFLAGS_*`。
+3. Xcode 26 把工程引用的静态库文件引用转成 `-l` 形式但不带搜索路径（`ld: library 'tela_ios_sdk'
+   not found`）→ pbxproj 增加 `LIBRARY_SEARCH_PATHS = $(SRCROOT)/build/rust`。
+4. Xcode 26 bundle 内不再提供 `xcrun` → wrapper 回退到 `/usr/bin/xcrun`。
+
 ## 4. 签名与真机部署
 
 首次部署前，在 macOS 用 Xcode 打开 `ios/TelaMobile.xcodeproj`，为 `TelaMobile` target 选择一个可用的
 Apple Development Team。工程不会提交任何 Team ID、provisioning profile 或私钥。
+
+新设备首次接入必须依次满足（全部缺一不可，2026-08 实测）：
+
+1. iPhone 开启 **Developer Mode**（设置→隐私与安全性→Developer Mode，开启后重启）。未开启时
+   Xcode 无法把设备 UDID 注册进 Team，签名构建报 "Your team has no devices"。
+2. 签名构建必须指定**具体设备 destination**：`-destination platform=iOS,id=<UDID>`。
+   `generic/platform=iOS` 不会绑定设备，provisioning profile 生成时报同样的 "no devices"。
+3. 首次安装后，在 iPhone 上手动信任开发者证书（设置→通用→VPN与设备管理→信任），否则
+   `devicectl device process launch` 报 Security/FBSOpenApplicationServiceError。
+4. 命令行自动注册设备不可靠时，Xcode GUI 中 ⌘R（scheme=TelaMobile，设备=手机）可一次性走完
+   「注册设备→生成 profile→构建→安装→启动」，之后 `ops ios deploy` 直接复用已生成的 profile。
 
 连接已在 Xcode 信任的 iPhone 后，以明确 UDID 运行：
 
@@ -94,7 +118,7 @@ Development certificate；CLI 不会尝试创建或修改这些账户级状态�
 
 ## 5. 真机验收
 
-下列项目是 macOS 收尾验收项，当前没有将它们声明为已通过：
+以下验收项已全部通过（2026-08-17，iPhone 17 / iOS 26，风唤长河 UDID `31D43215-027C-5D5E-8558-235CD7D7C352`）：
 
 1. `nix develop .#ios --command ops build ios` 成功生成无签名 ARM64 iPhone App，`plutil -lint ios/TelaMobile/Info.plist` 通过。
 2. 已配置 Team 后，`ops ios deploy --device <UDID>` 能安装并启动 `dev.tela.mobile`。

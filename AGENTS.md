@@ -98,3 +98,30 @@
   需 `objc2-core-foundation`（tela-macos-sdk/Cargo.toml 已开）。
 - `tela-render-wgpu` 离屏回读测试：适配器请求**不要** `force_fallback_adapter: true`
   （Metal 无 fallback → NotFound；去掉后 Linux lavapipe 仍会被枚举）。
+
+### iOS 真机打通（028 验收通过，2026-08 实测，Xcode 26.6）
+- **工具链走全局 rustup**（nix 提供的 rustup 1.29 + `~/.rustup` stable 1.97.1）：
+  `rustup target add aarch64-apple-ios`（用 USTC 镜像：`RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+  RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup`）。`tela-ios-cargo` 已改为全局优先
+  （`TELA_IOS_CARGO_HOME` 可覆盖；shellHook 不再硬编码私有目录）。私有 `tela-ios-bootstrap` 保留为可选。
+- **rustup 镜像布局**：变量指向 **base**（如 `mirrors.ustc.edu.cn/rust-static`）——channel manifest 在
+  `<base>/dist/`，rustup-init 在 `<base>/rustup/dist/<triple>/rustup-init`，UPDATE_ROOT 是 `<base>/rustup/`。
+  TUNA **不能**当 rustup 镜像（只有日期目录里的 cargo 包，无 rustup-init，实测 404）。
+- **Xcode 26 三坑**（均已修进源码）：
+  1. `-target` 与 `-derivedDataPath` 组合被禁 → xcodebuild 必须用 `-scheme TelaMobile`（ops 已改）。
+  2. nix dev shell 导出 `LD=ld`/`CC=clang` 会污染 xcodebuild：链接变裸 `ld` 直接调用，`-Xlinker`
+     参数解析失败（"unknown options: -Xlinker"）→ wrapper 必须 `unset LD CC CXX AR CPP LDFLAGS CFLAGS CXXFLAGS`。
+  3. 工程引用的静态库文件被转成 `-l` 但**不带搜索路径**（`ld: library 'tela_ios_sdk' not found`）→
+     pbxproj 需加 `LIBRARY_SEARCH_PATHS = $(SRCROOT)/build/rust`。
+  - 另：Xcode 26 的 bundle 内已无 `xcrun`（只剩 `/usr/bin/xcrun`），wrapper 需回退（已修）。
+- **真机部署前置（每个新设备都过一遍）**：
+  1. iPhone 必须开 **Developer Mode**（设置→隐私与安全性→Developer Mode，开启会重启）——
+     不开时 Xcode 无法把 UDID 注册进 Team，签名报 "Your team has no devices"。
+  2. 签名用**具体设备 destination**：`-destination platform=iOS,id=<UDID>`（`generic/platform=iOS`
+     报 "no devices"）；`-allowProvisioningUpdates` 让 Xcode 自动注册设备+生成 profile。
+  3. 首次安装后 iPhone 需手动信任开发者证书（设置→通用→VPN与设备管理→信任），否则
+     devicectl launch 报 Security/FBSOpenApplicationServiceError。
+  4. 命令行注册设备不可靠时，Xcode GUI 里 ⌘R（scheme=TelaMobile，设备=手机）会走完
+    「注册设备→生成 profile→安装启动」全链路，之后 `ops ios deploy` 可直接复用 profile。
+- 本机设备：`风唤长河`（iPhone 17, iPhone18,3），UDID `31D43215-027C-5D5E-8558-235CD7D7C352`。
+- 部署命令：`nix develop .#ios --command ops build ios` → `ops ios deploy --device <UDID>`。

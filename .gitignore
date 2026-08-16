@@ -39,3 +39,7 @@ node_modules/
 .env.*
 *.pem
 *.key
+
+# Xcode 用户状态（Team 选择等留在本机，不上库）
+/ios/TelaMobile.xcodeproj/xcuserdata/
+/ios/TelaMobile.xcodeproj/project.xcworkspace/

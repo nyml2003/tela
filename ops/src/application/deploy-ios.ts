@@ -39,10 +39,12 @@ export async function runDeployIos(
     'tela-ios-xcodebuild',
     [
       '-project', workspace.iosXcodeProjectPath(),
-      '-target', IOS_XCODE_TARGET,
+      '-scheme', IOS_XCODE_TARGET,
       '-configuration', 'Debug',
       '-sdk', 'iphoneos',
-      '-destination', 'generic/platform=iOS',
+      // A concrete device destination lets Xcode register this UDID in the Team before
+      // generating the provisioning profile; generic/platform=iOS yields "no devices".
+      '-destination', `platform=iOS,id=${deviceId}`,
       '-derivedDataPath', workspace.iosDerivedDataDir(),
       '-allowProvisioningUpdates',
       'build',
