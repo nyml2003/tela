@@ -6,9 +6,10 @@ use std::{
 };
 
 use jni::{
-    JNIEnv,
+    Env, EnvUnowned,
+    errors::LogErrorAndDefault,
     objects::{JObject, JString},
-    sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jstring},
+    sys::{jboolean, jint, jstring},
 };
 use tela_app_abi::{AppEvent, AppStatus};
 use tela_contract::{
@@ -348,24 +349,48 @@ impl AndroidHost {
             None => return,
         };
         match render_result {
-            Ok(()) => {}
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                self.fail("Vulkan surface ran out of memory".to_owned());
+            RenderOutcome::Presented { suboptimal } => {
+                if suboptimal {
+                    if let Err(error) = self
+                        .gpu
+                        .as_mut()
+                        .expect("GPU exists while rendering")
+                        .reconfigure()
+                    {
+                        self.fail(format!("reconfigure suboptimal Vulkan surface: {error}"));
+                    } else {
+                        self.request_redraw();
+                    }
+                }
             }
-            Err(error) => {
-                let reconfigure_result = self
+            RenderOutcome::Outdated => {
+                let result = self
                     .gpu
                     .as_mut()
                     .expect("GPU exists while rendering")
                     .reconfigure();
-                if let Err(reconfigure_error) = reconfigure_result {
-                    self.fail(format!(
-                        "{error}; reconfigure Vulkan surface: {reconfigure_error}"
-                    ));
+                if let Err(error) = result {
+                    self.fail(format!("reconfigure outdated Vulkan surface: {error}"));
                 } else {
-                    eprintln!("tela-android-sdk: acquire Vulkan surface: {error}");
                     self.request_redraw();
                 }
+            }
+            RenderOutcome::Lost => {
+                let Some(window) = self.window.as_ref().cloned() else {
+                    return;
+                };
+                match GpuSession::new(window) {
+                    Ok(gpu) => {
+                        self.gpu = Some(gpu);
+                        self.request_redraw();
+                    }
+                    Err(error) => self.fail(format!("recreate lost Vulkan surface: {error}")),
+                }
+            }
+            RenderOutcome::Timeout => self.request_redraw(),
+            RenderOutcome::Occluded => {}
+            RenderOutcome::Validation => {
+                self.fail("WGPU surface validation failed while acquiring a frame".to_owned());
             }
         }
     }
@@ -380,12 +405,12 @@ impl AndroidHost {
             ),
             None if self.bundle_index.trim().is_empty() => (
                 "Missing development bundle index",
-                "Run ops build android --bundle-index http://<host>:<port>/tela-mobile/latest.json",
+                "Run tela-android-bootstrap, build the Android package, then serve it".to_owned(),
                 Color::rgba(0.78, 0.45, 0.08, 1.0),
             ),
             None => (
                 "TELA Mobile",
-                "Loading the current development bundle...",
+                "Loading the current development bundle...".to_owned(),
                 Color::rgba(0.12, 0.38, 0.92, 1.0),
             ),
         };
@@ -587,6 +612,16 @@ struct GpuSession {
     _instance: wgpu::Instance,
 }
 
+#[derive(Clone, Copy)]
+enum RenderOutcome {
+    Presented { suboptimal: bool },
+    Outdated,
+    Lost,
+    Timeout,
+    Occluded,
+    Validation,
+}
+
 impl GpuSession {
     fn new(window: Arc<Window>) -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -648,15 +683,23 @@ impl GpuSession {
         Ok(())
     }
 
-    fn render(&mut self, frame: &UiFrame) -> Result<(), wgpu::SurfaceError> {
-        let texture = self.surface.get_current_texture()?;
+    fn render(&mut self, frame: &UiFrame) -> RenderOutcome {
+        let (texture, suboptimal) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            wgpu::CurrentSurfaceTexture::Outdated => return RenderOutcome::Outdated,
+            wgpu::CurrentSurfaceTexture::Lost => return RenderOutcome::Lost,
+            wgpu::CurrentSurfaceTexture::Timeout => return RenderOutcome::Timeout,
+            wgpu::CurrentSurfaceTexture::Occluded => return RenderOutcome::Occluded,
+            wgpu::CurrentSurfaceTexture::Validation => return RenderOutcome::Validation,
+        };
         let view = texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.renderer
             .render_frame(frame, &view, self.config.width, self.config.height);
         self.renderer.present(texture);
-        Ok(())
+        RenderOutcome::Presented { suboptimal }
     }
 }
 
@@ -677,7 +720,10 @@ fn fetch_http(url: &str) -> Result<Vec<u8>, String> {
     response
         .into_body()
         .into_with_config()
-        .limit(tela_guest_runtime::MAX_ARCHIVE_BYTES)
+        .limit(
+            u64::try_from(tela_guest_runtime::MAX_ARCHIVE_BYTES)
+                .expect("guest archive byte limit fits in u64"),
+        )
         .read_to_vec()
         .map_err(|error| format!("read {url}: {error}"))
 }
@@ -724,157 +770,148 @@ fn diagnostic_text(content: &str, font_size: f32, color: Color) -> TextContent {
     }
 }
 
-fn java_string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Option<String> {
-    env.get_string(&value).ok().map(Into::into)
+fn java_string<'local>(env: &Env<'local>, value: &JString<'local>) -> jni::errors::Result<String> {
+    value.try_to_string(env)
 }
 
 /// Receives the Gradle-injected bundle URL before GameActivity creates the native main loop.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeConfigureBundleIndex(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _activity: JObject<'_>,
     value: JString<'_>,
 ) {
-    if let Some(index) = java_string(&mut env, value) {
-        configure_bundle_index(index);
-    }
+    env.with_env(|env| -> jni::errors::Result<()> {
+        configure_bundle_index(java_string(env, &value)?);
+        Ok(())
+    })
+    .resolve::<LogErrorAndDefault>();
 }
 
 /// Returns whether Kotlin should attach its hidden controlled `EditText` to the IME.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeInputFocused(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    if text_snapshot().focused {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || jboolean::from(text_snapshot().focused))
 }
 
 /// Returns the complete controlled value Kotlin must mirror, with its cursor kept at the end.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeInputValue(
-    env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jstring {
-    env.new_string(text_snapshot().value)
-        .map(JString::into_raw)
-        .unwrap_or(std::ptr::null_mut())
+    env.with_env(|env| env.new_string(text_snapshot().value).map(JString::into_raw))
+        .resolve::<LogErrorAndDefault>()
 }
 
 /// Queues a complete native text value for the Guest ABI.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeSetInputValue(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _activity: JObject<'_>,
     value: JString<'_>,
 ) -> jboolean {
-    let Some(value) = java_string(&mut env, value) else {
-        return JNI_FALSE;
-    };
-    let changed = bridge_lock().text.accept_native_value(value.clone());
-    if changed && send_host_event(HostEvent::SetInputValue(value)) {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let value = java_string(env, &value)?;
+        let changed = bridge_lock().text.accept_native_value(value.clone());
+        Ok(jboolean::from(
+            changed && send_host_event(HostEvent::SetInputValue(value)),
+        ))
+    })
+    .resolve::<LogErrorAndDefault>()
 }
 
 /// Forwards native input focus without encoding any Android view details into the guest.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeInputFocus(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    if send_host_event(HostEvent::InputFocus) {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || {
+        jboolean::from(send_host_event(HostEvent::InputFocus))
+    })
 }
 
 /// Forwards native input blur without encoding any Android view details into the guest.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeInputBlur(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    if send_host_event(HostEvent::InputBlur) {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || {
+        jboolean::from(send_host_event(HostEvent::InputBlur))
+    })
 }
 
 /// Forwards the IME completion action as the guest's platform-neutral Enter event.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeInputEnter(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    if send_host_event(HostEvent::InputEnter) {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || {
+        jboolean::from(send_host_event(HostEvent::InputEnter))
+    })
 }
 
 /// Marks the start of a native IME composition segment.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeCompositionStart(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    let changed = bridge_lock().text.begin_composition();
-    if changed && send_host_event(HostEvent::CompositionStart) {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || {
+        jboolean::from(
+            bridge_lock().text.begin_composition() && send_host_event(HostEvent::CompositionStart),
+        )
+    })
 }
 
 /// Marks the end of a native IME composition segment.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeCompositionEnd(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    let changed = bridge_lock().text.end_composition();
-    if changed && send_host_event(HostEvent::CompositionEnd) {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || {
+        jboolean::from(
+            bridge_lock().text.end_composition() && send_host_event(HostEvent::CompositionEnd),
+        )
+    })
 }
 
 /// Handles Android system Back: blur the text channel first, otherwise ask the guest to escape.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeSystemBack(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jint {
-    let focused = text_snapshot().focused;
-    if !send_host_event(HostEvent::SystemBack) {
-        return 0;
-    }
-    if focused {
-        BACK_BLURRED_TEXT_INPUT
-    } else {
-        BACK_DISPATCHED_TO_GUEST
-    }
+    guarded_jni(env, || {
+        let focused = text_snapshot().focused;
+        if !send_host_event(HostEvent::SystemBack) {
+            return 0;
+        }
+        if focused {
+            BACK_BLURRED_TEXT_INPUT
+        } else {
+            BACK_DISPATCHED_TO_GUEST
+        }
+    })
 }
 
 /// Lets Kotlin finish the Activity only after root-level guest Escape was explicitly unhandled.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeConsumeFinishRequested(
-    _env: JNIEnv<'_>,
+    env: EnvUnowned<'_>,
     _activity: JObject<'_>,
 ) -> jboolean {
-    if consume_finish_request() {
-        JNI_TRUE
-    } else {
-        JNI_FALSE
-    }
+    guarded_jni(env, || jboolean::from(consume_finish_request()))
+}
+
+fn guarded_jni<T: Default>(mut env: EnvUnowned<'_>, operation: impl FnOnce() -> T) -> T {
+    env.with_env(|_| -> jni::errors::Result<T> { Ok(operation()) })
+        .resolve::<LogErrorAndDefault>()
 }

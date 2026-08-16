@@ -1,6 +1,6 @@
 # 027-Android 移动端实施
 
-> **状态：🟡 source、mobile bundle、ABI 和构建工作流已实现；Android x86_64 cross-APK/真机图形验收等待项目 Android 工具链。**
+> **状态：🟡 source、mobile bundle、ARM64 构建与 Windows ADB deploy 工作流已实现；Android ARM64 真机图形验收仍待执行。**
 > 本文是 Android 的具体实施记录，不把它外推成 iOS、WebView、TUI 或游戏的通用宿主设计。
 
 ## 1. 结论
@@ -36,7 +36,7 @@ tela-mobile-demo (独立移动应用)
 | `crates/tela-android-sdk` | `android_main`、Winit GameActivity event loop、Vulkan surface、触摸归一化、JNI text bridge、system Back | 缓存 fallback、desktop lifecycle、业务 Guest 静态链接 |
 | `crates/tela-guest-runtime` | `GuestRuntime`、strict index/archive 验证、Wasmtime、无窗口 verifier | window/surface/IME/cache/Target SDK |
 | `android/` | Kotlin `TelaActivity`、Manifest、Gradle、APK packaging | UI 业务布局、WASM ABI、渲染命令生成 |
-| `ops` | mobile channel 构建/校验、cargo-ndk/Gradle 调度、产物发布 | Android 生命周期或 bundle 运行时校验实现 |
+| `ops` | mobile channel 构建/校验、Android Cargo/Gradle 调度、产物发布 | Android 生命周期或 bundle 运行时校验实现 |
 
 `ops check` 已有两条强制规则：`tela-android-sdk` 不能静态依赖 `tela-demo` 或 `tela-mobile-demo`；
 `tela-guest-runtime` 不能反向依赖 Android、WebView、Win32 或 macOS SDK。未来新增游戏或 TUI Guest 时，
@@ -81,14 +81,14 @@ Wasmtime 或 frame 任一失败时都停在原生诊断页。桌面 cache 是桌
 
 ## 5. Activity、渲染和生命周期
 
-`TelaActivity` 继承 `androidx.games.activity.GameActivity`，Rust 端通过 Winit re-export 的 Android
+`TelaActivity` 继承 `com.google.androidgamesdk.GameActivity`，Rust 端通过 Winit re-export 的 Android
 GameActivity API 接收 `AndroidApp`。不使用 `NativeActivity`，也不在 Rust 里自己复制 GameActivity glue。
 Native library 的名称是 `main`，由 Kotlin `System.loadLibrary("main")` 加载。
 
 渲染只请求 `wgpu::Backends::VULKAN`：
 
 - `minSdk = 29`，`compileSdk = 36`，`targetSdk = 36`；
-- Manifest 要求 Vulkan feature；首期只构建 `x86_64`；
+- Manifest 要求 Vulkan feature；首期只构建 `arm64-v8a`；
 - 没有 GLES 回退，也不把 Vulkan 失败伪装成软件 renderer 成功；
 - `resumed` 创建 `Window`、surface、adapter、device、renderer；
 - `suspended` 在回调返回前 drop GPU surface 和 window，保留 portable Guest；
@@ -139,31 +139,36 @@ Back 由 Target 和 Guest 分工，顺序不能交换：
 
 ## 7. 构建、服务与验收
 
-项目 Android 工具链需要由项目环境提供：`cargo-ndk`、Rust `x86_64-linux-android` target、Android NDK、
-Android SDK API 36、JDK 17 和 Gradle。不要用用户级 rustup 临时安装 target 绕过项目环境隔离。
+项目 Android 工具链只在 `nix develop .#android` 中提供：项目私有 Rust `aarch64-linux-android` target、Linux JDK 17、
+Linux build-tools 36，以及只读复用 Windows Android Studio 的 API 36、NDK r27b、platform-tools 与许可证。不要用用户级
+rustup 临时安装 target 绕过项目环境隔离。
 
 ```bash
+nix develop .#android --command tela-android-bootstrap # 首次准备项目缓存
+nix develop .#android
 ops check
-ops build bundle mobile
-ops verify bundle mobile
-ops serve 8001
-ops build android --bundle-index http://<development-host>:8001/tela-mobile/latest.json
+ops build android
+ops android serve
+# 另一终端：nix develop .#android --command ops android deploy --serial <serial>
 ```
 
-连接真机或另一台 emulator 时，将 `<development-host>` 替换为设备可达的局域网地址，不能使用开发机的
-`127.0.0.1`。`ops build android` 先构建/校验 mobile bundle，再执行：
+Windows Android Studio 管理 USB 调试授权、真机连接和 Logcat；WSL 通过 Windows `adb.exe` 完成部署。
+`ops android serve` 只监听 WSL 的 `127.0.0.1:8000`，`ops android deploy` 建立
+`adb reverse tcp:8000 tcp:8000`，因此 APK 可安全固定请求真机自己的 `127.0.0.1`，不需要局域网地址。
+`TELA_WINDOWS_ADB` 可覆盖自动发现的 Windows Android Studio Platform Tools 路径。`ops build android` 先构建/校验 mobile bundle，再执行：
 
 ```text
-cargo ndk -t x86_64 -o android/app/src/main/jniLibs build --release -p tela-android-sdk
-gradle --no-daemon :app:assembleDebug -PtelaBundleIndex=<URL>
+tela-android-cargo build --target aarch64-linux-android --release -p tela-android-sdk
+tela-android-gradle --no-daemon :app:assembleDebug -PtelaBundleIndex=http://127.0.0.1:8000/tela-mobile/latest.json
 ```
 
-最终 APK 为 `dist/android/tela-mobile-debug.apk`。构建任一步失败即停止，不发布 APK。
+最终 APK 为 `dist/android/tela-mobile-debug.apk`。Debug APK 有意保留 native symbols，避免 WSL 要求 Linux NDK
+`llvm-strip`；构建任一步失败即停止，不发布 APK。
 
 自动化证据：`cargo test -p tela-android-sdk` 覆盖 whole-value IME 和触摸 adapter；`ops` tests 覆盖 mobile
-channel、strict verifier、invalid URL、native failure 不启动 Gradle 和不发布 APK。实际 x86_64 cross-target
-编译与设备验收仍需在有 Android 工具链的环境执行，验收包括 Vulkan surface、resume/suspend、tap/scroll、
-中文 IME、Back、远程 bundle 正常/失败两条路径。
+channel、strict verifier、ARM64 native failure 不启动 Gradle、不发布 APK、固定 loopback 服务与 ADB deploy
+失败闭环。当前 WSL 已完成实际 ARM64 cross-target 编译与 APK 打包；设备验收仍需要已授权 ARM64 真机，验收包括
+Vulkan surface、resume/suspend、tap/scroll、中文 IME、Back、远程 bundle 正常/失败两条路径。
 
 ## 8. 下一次抽取判据
 

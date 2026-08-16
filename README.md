@@ -55,8 +55,13 @@ ops build win32          # 在 WSL 交叉构建 Win32 开发壳到 dist/win32/
 ops build macos          # 在 Apple Silicon macOS 本机构建 Tela.app 到 dist/macos/
 ops build bundle mobile  # 构建独立的 tela-mobile guest bundle
 ops verify bundle mobile # 校验独立的 tela-mobile bundle
-ops build android --bundle-index http://<host>:8000/tela-mobile/latest.json
-                         # 构建 x86_64 Vulkan GameActivity APK；需要项目 Android 工具链
+nix develop .#android --command tela-android-bootstrap
+                         # 首次准备项目私有 Android 工具链缓存
+nix develop .#android    # 显式进入 Android 工具链；默认 shell 不安装 SDK/NDK
+ops build android        # 在 WSL 构建 arm64-v8a Vulkan GameActivity APK
+ops android serve        # 固定监听 WSL 127.0.0.1:8000，供 USB adb reverse 使用
+ops android deploy --serial <serial>
+                         # 调 Windows Android Studio 的 adb.exe 安装并启动真机 APK
 ops verify [bundle|gpu]  # 默认校验 desktop 应用包；bundle 可指定 desktop|mobile
 ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 ```

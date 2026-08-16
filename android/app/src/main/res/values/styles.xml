@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.TelaMobile" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="Theme.TelaMobile" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">#F7F9FD</item>
         <item name="android:colorAccent">#1E61EA</item>
         <item name="android:navigationBarColor">#F7F9FD</item>
         <item name="android:statusBarColor">#F7F9FD</item>

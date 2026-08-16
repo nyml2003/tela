@@ -40,7 +40,7 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
   }
   if (hasMobileSdkBundle) {
     reporter.info(`Android mobile bundle（本机）: http://127.0.0.1:${result.port}/tela-mobile/latest.json`);
-    reporter.info('跨机器请以开发机可达的局域网 IP 替换 127.0.0.1，并传给 SDK 的 --bundle-index。');
+    reporter.info('Android USB 真机请改用 ops android serve；它固定绑定 127.0.0.1:8000 并配合 adb reverse。');
   }
   reporter.info('Ctrl+C 停止');
   return result;

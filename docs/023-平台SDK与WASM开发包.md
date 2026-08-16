@@ -1,6 +1,6 @@
 # 023-平台 SDK 与 WASM 开发包
 
-> **状态：🟡 Win32、macOS、WebView 开发态已落地；Android source、mobile bundle 和 host build workflow 已落地，实际 x86_64 APK 仍等待 Android 工具链验收。** 本文定义平台 SDK 的最小边界、可验证 WASM 开发包和后续平台的扩展方式；它不承诺生产分发方案。
+> **状态：🟡 Win32、macOS、WebView 开发态已落地；Android source、mobile bundle、ARM64 host build workflow 与 Windows ADB deploy workflow 已落地，实际 ARM64 真机图形验收仍待执行。** 本文定义平台 SDK 的最小边界、可验证 WASM 开发包和后续平台的扩展方式；它不承诺生产分发方案。
 
 ## 1. 结论
 
@@ -162,7 +162,7 @@ WebView 产品路径不使用 raster 回退。surface 的 `Outdated`、`Lost`、
 
 Android 使用 `GameActivity`，而不是把现有 Win32/macOS 壳套进 `NativeActivity`。Winit 的 Android GameActivity
 API 与 Cargo 的 `android-game-activity` feature 必须来自同一版本；Vulkan-only `wgpu::Backends::VULKAN` 是
-首期硬约束，不存在 GLES 回退。构建只选 `x86_64`，`minSdk = 29`，`compileSdk/targetSdk = 36`。
+首期硬约束，不存在 GLES 回退。构建只选 `arm64-v8a`，`minSdk = 29`，`compileSdk/targetSdk = 36`。
 
 触摸适配器只捕获首个 pointer。触点在 touch slop 内直到 release 才发 `PointerDown` + `PointerUp`，越过
 slop 后只发反向内容 delta 的 `PointerScroll`；没有惯性、pinch 或多指语义。Kotlin 隐藏 `EditText` 以
@@ -189,10 +189,13 @@ ops serve
 ```bash
 ops build win32
 ops build macos # 仅 Apple Silicon macOS
-ops build android --bundle-index http://<development-host>:8000/tela-mobile/latest.json
+nix develop .#android --command tela-android-bootstrap
+nix develop .#android --command ops build android
+nix develop .#android --command ops android serve
+nix develop .#android --command ops android deploy --serial <serial>
 ```
 
-Windows 默认请求 `http://127.0.0.1:8000/tela-dev/latest.json`；`--port` 只替换本机端口，`--bundle-index` 允许完整 HTTP(S) 地址，两者互斥。Mac 或局域网开发应使用开发机可达地址和显式 `--bundle-index`。Android command 必须显式传完整 HTTP(S) URL；真机或 emulator 不得传开发机自己的 `127.0.0.1`。它还需要 `cargo-ndk`、Rust `x86_64-linux-android` target、Android NDK/SDK API 36、JDK 17 和 Gradle。`ops serve` 只服务 `dist/`，不会启动浏览器。
+Windows 默认请求 `http://127.0.0.1:8000/tela-dev/latest.json`；`--port` 只替换本机端口，`--bundle-index` 允许完整 HTTP(S) 地址，两者互斥。Mac 或局域网开发应使用开发机可达地址和显式 `--bundle-index`。Android 不再接受可变 URL：其 APK 固定请求 `http://127.0.0.1:8000/tela-mobile/latest.json`，`ops android deploy` 以 Windows `adb.exe` 建立 USB `adb reverse tcp:8000 tcp:8000`，所以真机看到的是自己的 localhost。首次运行的 bootstrap 在项目缓存准备 Rust `aarch64-linux-android` target、Linux JDK 17 与 Linux build-tools，并只读链接 Windows API 36、NDK r27b、platform-tools 和许可证；`ops build android` 不依赖 `cargo-ndk`。`ops serve` 只服务 `dist/`，不会启动浏览器。
 
 ## 8. 后续平台
 
@@ -201,7 +204,7 @@ Windows 默认请求 `http://127.0.0.1:8000/tela-dev/latest.json`；`--port` 只
 | Win32 | HWND、WGPU、Win32 输入、缓存 | `tela-app-abi` + `.tela` | 开发态已实现 |
 | macOS | AppKit/NSView、Metal WGPU surface、输入、缓存 | 同一 ABI/bundle | Apple Silicon 开发态已实现；真机图形验收见 024 |
 | WebView | DOM canvas、WGPU、DOM 输入/IME、一次性网络加载 | 同一 ABI/bundle；浏览器 WebAssembly 执行 guest | 通用开发态已实现；不含 Android/iOS native bridge |
-| Android | GameActivity、Vulkan/WGPU、触摸、IME、Back、surface 生命周期 | 同一 ABI/bundle；严格远程 Wasmtime guest | source/mobile bundle 已实现；x86_64 cross-APK 与真机验收待 Android 工具链 |
+| Android | GameActivity、Vulkan/WGPU、触摸、IME、Back、surface 生命周期 | 同一 ABI/bundle；严格远程 Wasmtime guest | ARM64 cross-APK 与 Windows ADB deploy 已实现；真机图形验收待执行 |
 | iOS | UIKit/Metal layer、触摸、IME、生命周期 | 同一 ABI/bundle | 仅设计目标 |
 
 Android 已在真实窗口、输入、发布与 bridge 约束出现后增加薄 SDK；iOS 仍不预建空 crate。后续 Target 只在真实需求出现时复用 `tela-app-abi`、`tela-bundle`、`tela-guest-runtime` 或 renderer 的已验证部分；不要为了名义统一先创造共享大接口。
@@ -214,4 +217,4 @@ Android 已在真实窗口、输入、发布与 bridge 约束出现后增加薄 
 - 自动化覆盖 ABI、SHA-256、路径、原生缓存回退、bundle guest 初始化、WebView bundle 验证和 WebView 构建用例；构建/验证不以启动浏览器代替测试。
 - Windows 真机应显示完整 `UiFrame`，响应鼠标、键盘、Tab/方向焦点和失焦恢复，且 `--verbose` 不再出现缺少 display handle。macOS 真机应以显式 `--bundle-index` 验证 AppKit/Metal、resize、输入、cache fallback 和 display handle，详见 [024](024-macOS开发SDK实施目标.md)。
 - 浏览器人工验收由开发者在自己选择的 WebView/浏览器打开 `ops serve` 输出根 URL，验证 WGPU、DPR resize、树/列表输入、Tab/方向键焦点、IME composition 与 `window.telaReplaceKeymap`；本仓库命令不会自行启动 Chromium。
-- Android 自动化已覆盖独立 mobile bundle、strict verifier、触摸 slop、单指取消、whole-value IME 和构建命令失败闭环；完成项目 Android 工具链后，还必须执行 `ops build android --bundle-index ...` 并在 x86_64 设备验证 Activity resume/suspend、Vulkan surface、IME、Back 和远程 bundle 失败诊断。
+- Android 自动化已覆盖独立 mobile bundle、strict verifier、触摸 slop、单指取消、whole-value IME、ARM64 构建、固定服务与 ADB deploy 失败闭环；完成项目 Android 工具链后，还必须执行 `ops build android`、`ops android serve`、`ops android deploy --serial ...` 并在 ARM64 真机验证 Activity resume/suspend、Vulkan surface、IME、Back 和远程 bundle 失败诊断。

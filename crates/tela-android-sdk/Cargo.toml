@@ -21,5 +21,7 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 wgpu = "30"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "android-game-activity"] }
 
-[lints]
-workspace = true
+# Android JNI and `android_main` exports require explicit Rust 2024 unsafe ABI attributes.
+# Keep that narrowly scoped to this FFI crate; all portable workspace crates inherit `forbid`.
+[lints.rust]
+unsafe_code = "allow"

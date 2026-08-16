@@ -50,11 +50,37 @@ export interface ServerPort {
     log: (msg: string) => void,
     telemetry?: import('../infrastructure/telemetry-store.ts').TelemetryStore,
   ): Promise<ServeResult>;
+  /**
+   * 精确绑定指定 host/port，不在端口冲突时自动换端口。
+   * Android ADB reverse 依赖确定的 device localhost 端口，因此不能复用通用 serve 的递增策略。
+   */
+  serveExact(
+    root: string,
+    host: string,
+    port: number,
+    log: (msg: string) => void,
+    telemetry?: import('../infrastructure/telemetry-store.ts').TelemetryStore,
+  ): Promise<ServeResult>;
 }
 
 export interface ServeResult {
   close: () => Promise<void>;
   port: number;
+}
+
+/** `adb devices -l` 中的一行已发现设备。state 保留 ADB 原始值以便诊断。 */
+export interface AndroidDevice {
+  serial: string;
+  state: string;
+}
+
+/** Android 真机控制端口；实现可使用 Windows ADB，但应用层不感知 Windows 路径或子进程细节。 */
+export interface AndroidDevicePort {
+  listDevices(): Promise<readonly AndroidDevice[]>;
+  abiList(serial: string): Promise<readonly string[]>;
+  reverse(serial: string, devicePort: number, hostPort: number): Promise<void>;
+  install(serial: string, apkPath: string): Promise<void>;
+  launch(serial: string, component: string): Promise<void>;
 }
 
 /** 遥测事件接收端口：页面上报（POST /api/telemetry）与 SSE 命令下发（/api/events）。 */

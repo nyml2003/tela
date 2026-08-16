@@ -65,6 +65,195 @@
               exec ${opsCommand}/bin/ops check
             '';
           };
+          # Android 开发不从当前 nixpkgs pin 拉 Android SDK/NDK：这些包会回退到
+          # dl.google.com，且该 pin 的交叉 Rust 不能命中二进制缓存。工具链保存在
+          # 项目专属缓存；Windows Android Studio 提供平台和 NDK，Linux build-tools 单独缓存。
+          androidBootstrap = pkgs.writeShellScriptBin "tela-android-bootstrap" ''
+            set -euo pipefail
+
+            toolchain_root="''${XDG_CACHE_HOME:-$HOME/.cache}/tela/android"
+            rustup_home="$toolchain_root/rustup"
+            cargo_home="$toolchain_root/cargo"
+            jdk_home="$toolchain_root/jdk"
+            gradle_home="$toolchain_root/gradle"
+            sdk_home="$toolchain_root/sdk"
+            windows_sdk_root="''${TELA_ANDROID_WINDOWS_SDK_ROOT:-}"
+
+            require_command() {
+              if ! command -v "$1" >/dev/null 2>&1; then
+                printf 'tela-android-bootstrap: missing required command: %s\n' "$1" >&2
+                exit 1
+              fi
+            }
+            require_command curl
+            require_command tar
+            require_command unzip
+            require_command sha256sum
+            require_command sha1sum
+            require_command mktemp
+
+            if [ -z "$windows_sdk_root" ]; then
+              printf '%s\n' 'Windows Android SDK was not found. Install Android Studio SDK API 36 and reopen nix develop .#android.' >&2
+              exit 1
+            fi
+            windows_platform="$windows_sdk_root/platforms/android-36"
+            windows_ndk="$windows_sdk_root/ndk/27.1.12297006"
+            windows_platform_tools="$windows_sdk_root/platform-tools"
+            if [ ! -f "$windows_platform/android.jar" ] || [ ! -f "$windows_ndk/source.properties" ] || [ ! -f "$windows_platform_tools/source.properties" ]; then
+              printf '%s\n' 'Windows Android SDK needs platform android-36, platform-tools, and NDK 27.1.12297006.' >&2
+              exit 1
+            fi
+
+            mkdir -p "$toolchain_root"
+            if [ ! -x "$cargo_home/bin/rustup" ]; then
+              installer="$toolchain_root/rustup-init"
+              printf '%s\n' 'Downloading the project-local Linux Rust toolchain from rsproxy...'
+              curl --fail --location --retry 3 --retry-delay 2 \
+                --output "$installer" \
+                https://rsproxy.cn/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+              chmod +x "$installer"
+              RUSTUP_HOME="$rustup_home" \
+                CARGO_HOME="$cargo_home" \
+                RUSTUP_DIST_SERVER="https://rsproxy.cn" \
+                RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup" \
+                "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
+            fi
+            RUSTUP_HOME="$rustup_home" \
+              CARGO_HOME="$cargo_home" \
+              RUSTUP_DIST_SERVER="https://rsproxy.cn" \
+              RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup" \
+              "$cargo_home/bin/rustup" target add aarch64-linux-android
+
+            if [ ! -x "$jdk_home/bin/java" ]; then
+              archive="$toolchain_root/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20_8.tar.gz"
+              expected_jdk_sha256="be7668bc030d578b83d6d5ef9221d6d6729bbbca8cf94a7d52e16ac68b5a5a35"
+              # TUNA 的镜像实测可用；hash 来自 Adoptium jdk-17.0.20+8 release API。
+              printf '%s\n' 'Downloading the project-local Linux JDK 17 from the TUNA mirror...'
+              curl --fail --location --retry 3 --retry-delay 2 \
+                --output "$archive" \
+                https://mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jdk/x64/linux/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20_8.tar.gz
+              read -r actual_jdk_sha256 _ < <(sha256sum "$archive")
+              if [ "$actual_jdk_sha256" != "$expected_jdk_sha256" ]; then
+                printf 'JDK checksum mismatch: expected %s, got %s\n' "$expected_jdk_sha256" "$actual_jdk_sha256" >&2
+                exit 1
+              fi
+              mkdir -p "$jdk_home"
+              tar --extract --gzip --file "$archive" --strip-components=1 --directory "$jdk_home"
+            fi
+
+            # Gradle runs in Linux and therefore cannot execute Android Studio's *.exe build tools.
+            # Keep the platform jar and NDK on the Windows SDK, but assemble a Linux SDK view for AGP.
+            mkdir -p "$sdk_home/platforms" "$sdk_home/ndk"
+            ln -sfn "$windows_platform" "$sdk_home/platforms/android-36"
+            ln -sfn "$windows_ndk" "$sdk_home/ndk/27.1.12297006"
+            ln -sfn "$windows_platform_tools" "$sdk_home/platform-tools"
+            if [ -d "$windows_sdk_root/licenses" ]; then
+              ln -sfn "$windows_sdk_root/licenses" "$sdk_home/licenses"
+            fi
+            build_tools_home="$sdk_home/build-tools/36.0.0"
+            if [ ! -x "$build_tools_home/aapt2" ]; then
+              archive="$toolchain_root/build-tools_r36_linux.zip"
+              expected_build_tools_sha1="b0b6376977657e8ad9b969bacf4093601da2c6fb"
+              actual_build_tools_sha1=""
+              if [ -f "$archive" ]; then
+                read -r actual_build_tools_sha1 _ < <(sha1sum "$archive")
+              fi
+              if [ "$actual_build_tools_sha1" != "$expected_build_tools_sha1" ]; then
+                printf '%s\n' 'Downloading Linux Android build-tools 36.0.0 directly from dl.google.com...'
+                # The local proxy has repeatedly stalled this artifact. Bypass it only for this
+                # checksum-pinned download; the setting is scoped to this curl invocation.
+                direct_no_proxy="''${NO_PROXY:+$NO_PROXY,}dl.google.com"
+                if [ -f "$archive" ]; then
+                  NO_PROXY="$direct_no_proxy" no_proxy="$direct_no_proxy" \
+                    curl --fail --location --retry 3 --retry-delay 2 --continue-at - \
+                    --output "$archive" \
+                    https://dl.google.com/android/repository/build-tools_r36_linux.zip
+                else
+                  NO_PROXY="$direct_no_proxy" no_proxy="$direct_no_proxy" \
+                    curl --fail --location --retry 3 --retry-delay 2 \
+                    --output "$archive" \
+                    https://dl.google.com/android/repository/build-tools_r36_linux.zip
+                fi
+                read -r actual_build_tools_sha1 _ < <(sha1sum "$archive")
+              fi
+              if [ "$actual_build_tools_sha1" != "$expected_build_tools_sha1" ]; then
+                printf 'Android build-tools checksum mismatch: expected %s, got %s\n' "$expected_build_tools_sha1" "$actual_build_tools_sha1" >&2
+                exit 1
+              fi
+              extract_root="$(mktemp -d "$toolchain_root/build-tools-r36-linux.XXXXXX")"
+              trap 'rm -rf "$extract_root"' EXIT
+              unzip -q "$archive" -d "$extract_root"
+              # Google's archive keeps a historical android-16 top-level name even for r36.
+              # Identify the extracted package by its Linux aapt2 rather than that unstable name.
+              extracted_build_tools="$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'test -x "$1/aapt2"' _ {} \; -print -quit)"
+              if [ -z "$extracted_build_tools" ]; then
+                printf 'Android build-tools archive has no Linux aapt2: %s\n' "$archive" >&2
+                exit 1
+              fi
+              mkdir -p "$(dirname "$build_tools_home")"
+              rm -rf "$build_tools_home"
+              mv "$extracted_build_tools" "$build_tools_home"
+              rm -rf "$extract_root"
+              trap - EXIT
+            fi
+
+            # Android Studio 通常已经缓存了 Gradle 9.1。没有时才下载一份项目私有副本。
+            if [ ! -x "''${TELA_ANDROID_GRADLE:-}" ] && [ ! -x "$gradle_home/gradle-9.1.0/bin/gradle" ]; then
+              archive="$toolchain_root/gradle-9.1.0-bin.zip"
+              printf '%s\n' 'Downloading the project-local Gradle 9.1 distribution...'
+              curl --fail --location --retry 3 --retry-delay 2 \
+                --output "$archive" \
+                https://services.gradle.org/distributions/gradle-9.1.0-bin.zip
+              mkdir -p "$gradle_home"
+              unzip -q "$archive" -d "$gradle_home"
+            fi
+
+            printf '%s\n' 'Tela Android bootstrap complete.'
+          '';
+          androidCargo = pkgs.writeShellScriptBin "tela-android-cargo" ''
+            set -euo pipefail
+
+            toolchain_root="''${TELA_ANDROID_TOOLCHAIN_ROOT:-''${XDG_CACHE_HOME:-$HOME/.cache}/tela/android}"
+            cargo_home="''${TELA_ANDROID_CARGO_HOME:-$toolchain_root/cargo}"
+            if [ ! -x "$cargo_home/bin/cargo" ]; then
+              printf '%s\n' 'Android Rust toolchain is absent. Run: nix develop .#android --command tela-android-bootstrap' >&2
+              exit 1
+            fi
+            if [ ! -x "''${CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER:-}" ]; then
+              printf '%s\n' 'Windows Android NDK r27b was not found. Open Android Studio and install NDK 27.1.12297006.' >&2
+              exit 1
+            fi
+            android_clang="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+            android_bin_dir="''${android_clang%/*}"
+            # cc-rs looks up target-specific variables before CXX. Nix's host shell exports CXX,
+            # so make the Android tool selection explicit for android-activity and other C/C++ deps.
+            export CC_aarch64_linux_android="$android_clang"
+            export CXX_aarch64_linux_android="$android_clang++"
+            export AR_aarch64_linux_android="$android_bin_dir/llvm-ar.exe"
+            export PATH="$cargo_home/bin:$PATH"
+            exec "$cargo_home/bin/cargo" "$@"
+          '';
+          androidGradle = pkgs.writeShellScriptBin "tela-android-gradle" ''
+            set -euo pipefail
+
+            toolchain_root="''${TELA_ANDROID_TOOLCHAIN_ROOT:-''${XDG_CACHE_HOME:-$HOME/.cache}/tela/android}"
+            gradle="''${TELA_ANDROID_GRADLE:-$toolchain_root/gradle/gradle-9.1.0/bin/gradle}"
+            java_home="''${JAVA_HOME:-$toolchain_root/jdk}"
+            if [ ! -x "$java_home/bin/java" ]; then
+              printf '%s\n' 'Linux JDK 17 is absent. Run: nix develop .#android --command tela-android-bootstrap' >&2
+              exit 1
+            fi
+            if [ ! -x "$gradle" ]; then
+              printf '%s\n' 'Gradle 9.1 is absent. Run: nix develop .#android --command tela-android-bootstrap' >&2
+              exit 1
+            fi
+            if [ ! -x "''${ANDROID_HOME:-}/build-tools/36.0.0/aapt2" ]; then
+              printf '%s\n' 'Linux Android build-tools 36.0.0 are absent. Run: nix develop .#android --command tela-android-bootstrap' >&2
+              exit 1
+            fi
+            export JAVA_HOME="$java_home"
+            exec "$gradle" "$@"
+          '';
           commonShellHook = ''
             # nix-direnv 会保留宿主 PATH 的顺序；显式前置项目级 ops，避免命中其他仓库的同名命令。
             export PATH="${opsCommand}/bin:$PATH"
@@ -126,6 +315,58 @@
             RUST_BACKTRACE = "1";
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           };
-        });
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          android = pkgs.mkShell {
+            packages = commonPackages ++ [
+              checkCommand
+              androidBootstrap
+              androidCargo
+              androidGradle
+            ];
+
+            shellHook = commonShellHook + ''
+              export TELA_ANDROID_TOOLCHAIN_ROOT="''${XDG_CACHE_HOME:-$HOME/.cache}/tela/android"
+              export RUSTUP_HOME="$TELA_ANDROID_TOOLCHAIN_ROOT/rustup"
+              export TELA_ANDROID_CARGO_HOME="$TELA_ANDROID_TOOLCHAIN_ROOT/cargo"
+              if [ -x "$TELA_ANDROID_TOOLCHAIN_ROOT/jdk/bin/java" ]; then
+                export JAVA_HOME="$TELA_ANDROID_TOOLCHAIN_ROOT/jdk"
+                export PATH="$JAVA_HOME/bin:$PATH"
+              fi
+
+              android_windows_cmd="''${TELA_WINDOWS_CMD:-/mnt/c/Windows/System32/cmd.exe}"
+              if [ -x "$android_windows_cmd" ]; then
+                android_local_appdata="$("$android_windows_cmd" /D /S /C 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r')"
+                if [ -z "''${TELA_ANDROID_WINDOWS_SDK_ROOT:-}" ] && [ -n "$android_local_appdata" ]; then
+                  export TELA_ANDROID_WINDOWS_SDK_ROOT="$(wslpath -u "$android_local_appdata")/Android/Sdk"
+                fi
+                android_user_profile="$("$android_windows_cmd" /D /S /C 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')"
+                if [ -z "''${TELA_ANDROID_GRADLE:-}" ] && [ -n "$android_user_profile" ]; then
+                  android_gradle_cache="$(wslpath -u "$android_user_profile")/.gradle/wrapper/dists/gradle-9.1.0-bin"
+                  if [ -d "$android_gradle_cache" ]; then
+                    android_gradle_candidate="$(find "$android_gradle_cache" -type f -path '*/gradle-9.1.0/bin/gradle' -print -quit)"
+                    if [ -n "$android_gradle_candidate" ]; then
+                      export TELA_ANDROID_GRADLE="$android_gradle_candidate"
+                    fi
+                  fi
+                fi
+              fi
+              export TELA_ANDROID_SDK_ROOT="$TELA_ANDROID_TOOLCHAIN_ROOT/sdk"
+              export ANDROID_HOME="$TELA_ANDROID_SDK_ROOT"
+              export ANDROID_SDK_ROOT="$ANDROID_HOME"
+              if [ -n "''${TELA_ANDROID_WINDOWS_SDK_ROOT:-}" ]; then
+                export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+                export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+                export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TELA_ANDROID_WINDOWS_SDK_ROOT/ndk/27.1.12297006/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang"
+              fi
+              echo "tela Android shell ready (arm64-v8a, API 29, Windows SDK / Linux build-tools 36)"
+              if [ ! -x "$TELA_ANDROID_CARGO_HOME/bin/cargo" ] || [ ! -x "$TELA_ANDROID_TOOLCHAIN_ROOT/jdk/bin/java" ] || [ ! -x "$ANDROID_HOME/build-tools/36.0.0/aapt2" ]; then
+                echo "Run once: tela-android-bootstrap"
+              fi
+            '';
+
+            RUST_BACKTRACE = "1";
+          };
+        }
+        );
     };
 }

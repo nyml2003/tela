@@ -1,6 +1,8 @@
 // 领域层：工作区模型（纯数据 + 路径推导，无 I/O）。
 // tela 仓库布局约定：源码位于 crates/、web/、ops/；dist/ 只存放可删除的构建产物。
 
+import { ANDROID_NDK_ABI, ANDROID_RUST_TARGET } from './android.ts';
+
 export type BuildProfile = 'dev' | 'release';
 
 /** A separately published guest channel. Channels do not imply a shared application UI. */
@@ -88,9 +90,13 @@ export interface WorkspacePaths {
   macosArtifactPath(profile: BuildProfile): string;
   /** Android Gradle project root. */
   androidProjectDir(): string;
-  /** cargo-ndk writes the x86_64 JNI library into this Gradle source set. */
+  /** ARM64 JNI library directory consumed by the Gradle source set. */
   androidJniLibsDir(): string;
-  /** Expected x86_64 native library emitted by cargo-ndk. */
+  /** ARM64 ABI subdirectory inside the Gradle JNI source set. */
+  androidJniAbiDir(): string;
+  /** Rust cross-compile output before it is copied into the Gradle source set. */
+  androidRustNativeLibraryPath(): string;
+  /** Expected ARM64 native library packaged by Gradle. */
   androidNativeLibraryPath(): string;
   /** Gradle debug APK output. */
   androidDebugApkPath(): string;
@@ -215,8 +221,14 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     androidJniLibsDir() {
       return `${root}/android/app/src/main/jniLibs`;
     },
+    androidJniAbiDir() {
+      return `${root}/android/app/src/main/jniLibs/${ANDROID_NDK_ABI}`;
+    },
+    androidRustNativeLibraryPath() {
+      return `${root}/target/${ANDROID_RUST_TARGET}/release/libmain.so`;
+    },
     androidNativeLibraryPath() {
-      return `${root}/android/app/src/main/jniLibs/x86_64/libmain.so`;
+      return `${root}/android/app/src/main/jniLibs/${ANDROID_NDK_ABI}/libmain.so`;
     },
     androidDebugApkPath() {
       return `${root}/android/app/build/outputs/apk/debug/app-debug.apk`;

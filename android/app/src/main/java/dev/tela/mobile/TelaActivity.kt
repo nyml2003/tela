@@ -5,12 +5,14 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
-import androidx.games.activity.GameActivity
+import androidx.core.view.WindowInsetsCompat
+import com.google.androidgamesdk.GameActivity
 
 /**
  * Android owns the Activity, IME, and system Back. The Rust GameActivity main loop owns the
@@ -29,6 +31,7 @@ class TelaActivity : GameActivity() {
 
     private lateinit var textInput: EditText
     private var applyingGuestValue = false
+    private var appliedTopSafeInset = -1
 
     private val textSynchronizer = object : Runnable {
         override fun run() {
@@ -58,6 +61,16 @@ class TelaActivity : GameActivity() {
         super.onDestroy()
     }
 
+    override fun onApplyWindowInsets(view: View, insets: WindowInsetsCompat): WindowInsetsCompat {
+        // Android 15+ lays target-SDK-35+ apps edge-to-edge. Keep the native SurfaceView below
+        // the status bar and any display cutout, while leaving GameActivity's IME bridge intact.
+        val topInset = insets.getInsets(
+            WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout(),
+        ).top
+        applyTopSafeInset(topInset)
+        return super.onApplyWindowInsets(view, insets)
+    }
+
     @Deprecated("Delegates to the target host until predictive Back is adopted by GameActivity.")
     override fun onBackPressed() {
         when (nativeSystemBack()) {
@@ -71,7 +84,7 @@ class TelaActivity : GameActivity() {
         textInput = EditText(this).apply {
             alpha = 0.01f
             background = null
-            cursorVisible = false
+            isCursorVisible = false
             gravity = Gravity.TOP or Gravity.START
             imeOptions = EditorInfo.IME_ACTION_DONE
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -149,6 +162,16 @@ class TelaActivity : GameActivity() {
         val imm = getSystemService(InputMethodManager::class.java)
         imm.hideSoftInputFromWindow(textInput.windowToken, 0)
         textInput.clearFocus()
+    }
+
+    private fun applyTopSafeInset(topInset: Int) {
+        if (topInset == appliedTopSafeInset) return
+        val layout = mSurfaceView.layoutParams as? ViewGroup.MarginLayoutParams ?: return
+        if (layout.topMargin != topInset) {
+            layout.topMargin = topInset
+            mSurfaceView.layoutParams = layout
+        }
+        appliedTopSafeInset = topInset
     }
 
     private external fun nativeConfigureBundleIndex(value: String)

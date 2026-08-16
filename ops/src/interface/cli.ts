@@ -10,7 +10,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { BundleChannel, WorkspacePaths } from '../domain/workspace.ts';
 import { resolveWorkspace } from '../domain/workspace.ts';
-import type { Reporter } from '../domain/ports.ts';
+import type { Reporter, ServeResult } from '../domain/ports.ts';
 import { TerminalReporter } from '../infrastructure/reporter.ts';
 import { NodeProcessPort } from '../infrastructure/process.ts';
 import { NodeFsPort } from '../infrastructure/fs.ts';
@@ -25,16 +25,22 @@ import { runBuildMacos } from '../application/build-macos.ts';
 import { runBuildAndroid } from '../application/build-android.ts';
 import { runVerifyBundle } from '../application/verify-bundle.ts';
 import { runServe } from '../application/serve.ts';
+import { runAndroidServe } from '../application/serve-android.ts';
+import { runDeployAndroid } from '../application/deploy-android.ts';
 import { runVerifyGpu } from '../application/verify-gpu.ts';
 import { TelemetryStore } from '../infrastructure/telemetry-store.ts';
+import { WindowsAdbPort } from '../infrastructure/windows-adb.ts';
 
 const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时零依赖）
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build [webview|frontend|bundle [desktop|mobile]|android|win32|macos|all] [--release] [--bundle-index URL]
+  ops build [webview|frontend|bundle [desktop|mobile]|android|win32|macos|all] [--release]
                               构建发布物到 dist/；默认 all，会先重建目录。bundle desktop/mobile 是
-                              两个独立 Guest；android 先构建 mobile bundle，再构建 x86_64 Vulkan APK，必须传 --bundle-index。
+                              两个独立 Guest；android 先构建 mobile bundle，再构建 ARM64 Vulkan APK，固定使用 ADB reverse localhost index。
+  ops android serve           仅监听 127.0.0.1:8000，供 USB adb reverse 的 Android mobile bundle 使用
+  ops android deploy [--serial SERIAL]
+                              调 Windows adb.exe 建立 reverse、安装并启动 ARM64 debug APK
   ops verify [bundle [desktop|mobile]|gpu] [--build] [--port N]
                               验证（默认 bundle）：bundle = archive/ABI/guest 首帧校验
                               （--build 先生成 bundle）；gpu = 原生 JS WebGPU 环境自检（不经 wgpu，离屏三角形
@@ -66,6 +72,8 @@ async function main(): Promise<number> {
       release: { type: 'boolean', default: false },
       build: { type: 'boolean', default: false },
       port: { type: 'string', default: '' },
+      serial: { type: 'string', default: '' },
+      // 保留解析仅为对旧命令给出迁移提示，Android 构建不再接受可变网络 URL。
       'bundle-index': { type: 'string', default: '' },
     },
   });
@@ -114,10 +122,17 @@ async function main(): Promise<number> {
           const result = await runBuildBundle({ cargo, process: processPort, fs, reporter, workspace }, channel);
           if (!result.ok) return 1;
         } else if (t === 'android') {
+          if (values['bundle-index']) {
+            reporter.fail('Android 构建固定使用 http://127.0.0.1:8000/tela-mobile/latest.json；请移除 --bundle-index。');
+            return 1;
+          }
+          if (values.serial) {
+            reporter.fail('--serial 只适用于 ops android deploy。');
+            return 1;
+          }
           const cargo = new CargoPort(processPort, workspace);
           const result = await runBuildAndroid(
             { cargo, process: processPort, fs, reporter, workspace },
-            { bundleIndex: values['bundle-index'] },
           );
           if (!result.ok) return 1;
         } else if (t === 'win32') {
@@ -145,6 +160,40 @@ async function main(): Promise<number> {
         }
       }
       return 0;
+    }
+    case 'android': {
+      if (variantArg) {
+        reporter.fail(`Android 子命令 ${target ?? '(空)'} 不接受额外参数: ${variantArg}`);
+        return 1;
+      }
+      if (values['bundle-index']) {
+        reporter.fail('Android 真机开发固定使用 ADB reverse localhost；不接受 --bundle-index。');
+        return 1;
+      }
+      if (target === 'serve') {
+        if (values.serial) {
+          reporter.fail('--serial 只适用于 ops android deploy。');
+          return 1;
+        }
+        const result = await runAndroidServe(
+          { fs: new NodeFsPort(), server: new HttpServerPort(), reporter, workspace },
+        );
+        return result ? serveUntilStopped(result) : 1;
+      }
+      if (target === 'deploy') {
+        const result = await runDeployAndroid(
+          {
+            adb: new WindowsAdbPort(new NodeProcessPort(), new NodeFsPort()),
+            fs: new NodeFsPort(),
+            reporter,
+            workspace,
+          },
+          values.serial ? { serial: values.serial } : {},
+        );
+        return result ? 0 : 1;
+      }
+      reporter.fail(`未知 Android 子命令: ${target ?? '(空)'}（serve | deploy）`);
+      return 1;
     }
     case 'verify': {
       if (!target) target = 'bundle';
@@ -187,18 +236,7 @@ async function main(): Promise<number> {
         { fs: new NodeFsPort(), server: new HttpServerPort(), reporter, workspace },
         port,
       );
-      if (!result) return 1;
-      // 常驻：SIGINT/SIGTERM 优雅关闭。
-      let shuttingDown = false;
-      const shutdown = async (): Promise<void> => {
-        if (shuttingDown) return;
-        shuttingDown = true;
-        await result.close();
-        process.exit(0);
-      };
-      process.on('SIGINT', () => void shutdown());
-      process.on('SIGTERM', () => void shutdown());
-      return 0; // 常驻进程，实际由信号退出
+      return result ? serveUntilStopped(result) : 1;
     }
     case 'help':
     case undefined: {
@@ -212,6 +250,20 @@ async function main(): Promise<number> {
   }
 }
 
+/** serve 与 android serve 都是常驻进程，统一处理终止信号以关闭底层 HTTP socket。 */
+function serveUntilStopped(result: ServeResult): number {
+  let shuttingDown = false;
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await result.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
+  return 0;
+}
+
 function resolveBundleChannel(value: string | undefined, reporter: Reporter): BundleChannel | undefined {
   if (value === undefined || value === 'desktop') return 'desktop';
   if (value === 'mobile') return 'mobile';
@@ -221,7 +273,7 @@ function resolveBundleChannel(value: string | undefined, reporter: Reporter): Bu
 
 /** 未知命令的模糊提示（编辑距离 ≤ 2 的已知命令，防笔误如 obs → ops）。 */
 function suggestCommand(input: string): string | undefined {
-  const known = ['check', 'build', 'verify', 'serve', 'help'];
+  const known = ['check', 'build', 'verify', 'serve', 'android', 'help'];
   const distance = (a: string, b: string): number => {
     const m = a.length;
     const n = b.length;

@@ -56,6 +56,33 @@ test('首选端口空闲时直接使用（不跳转）', async () => {
   }
 });
 
+test('精确监听固定回环端口，端口冲突时不递增', async () => {
+  const base = await freePort();
+  const root = await mkdtemp(join(tmpdir(), 'ops-serve-exact-'));
+  await writeFile(join(root, 'index.html'), 'ok');
+  const serverPort = new HttpServerPort();
+  try {
+    const result = await serverPort.serveExact(root, '127.0.0.1', base, () => {});
+    assert.equal(result.port, base);
+    const res = await fetch(`http://127.0.0.1:${base}/`);
+    assert.equal(res.status, 200);
+    await result.close();
+
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(base, '127.0.0.1', () => resolve()));
+    try {
+      await assert.rejects(
+        () => serverPort.serveExact(root, '127.0.0.1', base, () => {}),
+        /无法监听 127\.0\.0\.1:/,
+      );
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('desktop 与 mobile 开发 bundle 路径开放跨 origin 读取', async () => {
   const base = await freePort();
   const root = await mkdtemp(join(tmpdir(), 'ops-serve-cors-'));

@@ -32,7 +32,69 @@ export class HttpServerPort implements ServerPort {
     log: (msg: string) => void,
     telemetry?: TelemetryStore,
   ): Promise<ServeResult> {
-    const server: Server = createServer(async (req, res) => {
+    return this.start(root, preferredPort, '0.0.0.0', true, log, telemetry);
+  }
+
+  async serveExact(
+    root: string,
+    host: string,
+    port: number,
+    log: (msg: string) => void,
+    telemetry?: TelemetryStore,
+  ): Promise<ServeResult> {
+    return this.start(root, port, host, false, log, telemetry);
+  }
+
+  private async start(
+    root: string,
+    preferredPort: number,
+    host: string,
+    retryOnPortConflict: boolean,
+    log: (msg: string) => void,
+    telemetry?: TelemetryStore,
+  ): Promise<ServeResult> {
+    const server = this.createStaticServer(root, log, telemetry);
+
+    let port = preferredPort;
+    let error: unknown;
+    const attempts = retryOnPortConflict ? MAX_PORT_ATTEMPTS : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(port, host, () => resolve());
+        });
+        if (retryOnPortConflict && port !== preferredPort) {
+          log(`端口 ${preferredPort} 被占用，自动使用 ${port}`);
+        }
+        const displayedHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+        log(`tela development server: http://${displayedHost}:${port}/`);
+        log(`  root: ${root}`);
+        return {
+          port,
+          close: () =>
+            new Promise<void>((resolve, reject) => {
+              server.close((err) => (err ? reject(err) : resolve()));
+            }),
+        };
+      } catch (err) {
+        error = err;
+        if (retryOnPortConflict && (err as NodeJS.ErrnoException).code === 'EADDRINUSE' && port < 65535) {
+          port += 1;
+          continue;
+        }
+        throw new Error(`无法监听 ${host}:${port}（${String(err)}）`);
+      }
+    }
+    throw new Error(`端口 ${preferredPort}~${port} 均被占用（最后错误: ${String(error)}）`);
+  }
+
+  private createStaticServer(
+    root: string,
+    log: (msg: string) => void,
+    telemetry?: TelemetryStore,
+  ): Server {
+    return createServer(async (req, res) => {
       try {
         const urlPath = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
 
@@ -99,38 +161,6 @@ export class HttpServerPort implements ServerPort {
         }
       }
     });
-
-    // 端口占用自动递增：EADDRINUSE → +1 重试（listen 失败后可再次 listen）。
-    let port = preferredPort;
-    let error: unknown;
-    for (let attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt++) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          server.once('error', reject);
-          server.listen(port, '0.0.0.0', () => resolve());
-        });
-        if (port !== preferredPort) {
-          log(`端口 ${preferredPort} 被占用，自动使用 ${port}`);
-        }
-        log(`tela WebView: http://127.0.0.1:${port}/`);
-        log(`  root: ${root}`);
-        return {
-          port,
-          close: () =>
-            new Promise<void>((resolve, reject) => {
-              server.close((err) => (err ? reject(err) : resolve()));
-            }),
-        };
-      } catch (err) {
-        error = err;
-        if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE' && port < 65535) {
-          port += 1;
-          continue;
-        }
-        throw err;
-      }
-    }
-    throw new Error(`端口 ${preferredPort}~${port} 均被占用（最后错误: ${String(error)}）`);
   }
 
   private async isDir(p: string): Promise<boolean> {
