@@ -1,16 +1,21 @@
 //! tela 的主题无关分子组件层。
 //!
-//! 本 crate 在 [`tela_ui_foundation`] 原子控件之上组合表单、表格和工具栏等常见模式。组件只声明
-//! 结构与 [`UiIntent`]；业务 Store、异步副作用、tela key 和 renderer 仍在其边界之外。
+//! 本 crate 在 [`tela_ui_foundation`] 原子控件之上组合表单、表格、工具栏、分段选择、分页、对话框及
+//! 状态反馈等常见工作台模式。组件只声明结构与 [`UiIntent`]；业务 Store、异步副作用、tela key 和
+//! renderer 仍在其边界之外。
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod dialog;
 mod draft_input;
+mod feedback;
 mod form;
 mod icon_button;
 mod intent;
 mod local_state;
+mod pagination;
+mod segmented;
 mod select;
 mod shared;
 mod table;
@@ -18,13 +23,17 @@ mod text;
 mod toolbar;
 mod virtual_window;
 
+pub use dialog::{Dialog, DialogAction, DialogActionKind, DialogStyle};
 pub use draft_input::DraftInput;
+pub use feedback::{EmptyAction, EmptyState, StatusBadge, StatusTone};
 pub use form::{Form, FormItem};
 pub use icon_button::IconButton;
 pub use intent::{IntentTarget, UiIntent, intent_from_action};
 pub use local_state::{
     DraftInputEvent, DraftInputOutcome, DraftInputSnapshot, InstancePath, LocalStateRuntime,
 };
+pub use pagination::Pagination;
+pub use segmented::{Segmented, SegmentedItem, SegmentedSize, SegmentedStyle};
 pub use select::{CascadeOption, Cascader, OptionItem, Select};
 pub use table::{CellAlign, Table, TableStyle, Td, Tr};
 pub use text::{InlineSlot, Text};

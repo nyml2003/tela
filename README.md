@@ -43,6 +43,7 @@
 | [027-Android移动端实施](docs/027-Android移动端实施.md) | Android 为什么是独立移动 Guest + GameActivity Target？strict bundle、Vulkan、IME 和 Back 如何落地？ | 构建、验收或扩展 Android 移动端时 |
 | [028-iOS开发SDK实施](docs/028-iOS开发SDK实施.md) | iPhone 为什么静态链接独立移动应用？UIKit/Metal、安全区、签名与真机验收如何收口？ | 在 Apple Silicon Mac 构建或验收 iPhone 开发态时 |
 | [029-迁移记录](docs/029-迁移记录.md) | 026 的目录、产品根、资源协议与工具链闭包如何实际迁移？哪些目录没有机械创建？ | 对照当前 workspace、评审迁移边界时 |
+| [030-通用组件体系重构方案](docs/030-通用组件体系重构方案.md) | 如何以 Headless、Signal、双形态 Kit 和 Kernel 增量建立完整的通用组件目录？ | 启动或评审组件体系重构前 |
 
 ## 开发工作流（ops）
 

@@ -456,7 +456,7 @@ fn bind_id_at(tree: &UiTree, target: NodeId) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{IconProvider, Insets, PhysicalKey, UiResources};
+    use tela_contract::{IconProvider, Insets, NodeId, PhysicalKey, UiNode, UiResources};
     use tela_icon_resources::MaterialIconFontProvider;
     use tela_text_resources::ControlledTextMeasurer;
 
@@ -476,6 +476,25 @@ mod tests {
         fn icon_provider(&self) -> &dyn IconProvider {
             &TEST_ICON_PROVIDER
         }
+    }
+
+    fn node_id_for_binding(node: &UiNode, target: &str, index: &mut u32) -> Option<NodeId> {
+        let node_id = NodeId(*index);
+        if node
+            .interact
+            .as_ref()
+            .and_then(|interact| interact.bind_id.as_ref())
+            .is_some_and(|bind| bind.0 == target)
+        {
+            return Some(node_id);
+        }
+        *index += 1;
+        for child in &node.children {
+            if let Some(node_id) = node_id_for_binding(child, target, index) {
+                return Some(node_id);
+            }
+        }
+        None
     }
 
     #[test]
@@ -499,6 +518,21 @@ mod tests {
         let mut app = App::new(&TEST_RESOURCES);
         assert!(app.ensure_frame());
         assert!(!app.frame().commands.is_empty());
+    }
+
+    #[test]
+    fn mobile_cell_keeps_the_existing_entry_binding_and_navigation_behavior() {
+        let mut app = App::new(&TEST_RESOURCES);
+        assert!(app.ensure_frame());
+        let node_id = node_id_for_binding(
+            app.tree.as_ref().expect("tree").root(),
+            "mobile.entry.design",
+            &mut 0,
+        )
+        .expect("the first MobileCell must expose the existing entry target");
+
+        assert!(app.handle_click(node_id));
+        assert_eq!(app.route, Route::Browse(Some("design".to_owned())));
     }
 
     #[test]

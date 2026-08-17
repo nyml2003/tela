@@ -7,7 +7,8 @@ use tela_contract::{
 };
 use tela_core::builder::{LayoutContainer, Primitive};
 use tela_mobile_ui_kit::{
-    MobileIconButton, MobileLayout, MobileListRow, MobileScaffold, MobileScaffoldStyle,
+    MobileCell, MobileCellStyle, MobileEmptyState, MobileEmptyStateStyle, MobileIconButton,
+    MobileLayout, MobileNavBar, MobileNavBarStyle, MobileScaffold, MobileScaffoldStyle,
     MobileSearchField, MobileSurfaceStyle,
 };
 use tela_ui_foundation::Icon;
@@ -95,39 +96,30 @@ fn app_bar(title: &str, can_go_back: bool, width: f32, icons: &dyn IconProvider)
     } else {
         icon_badge(IconName::FolderOpen, FOLDER, FOLDER_SURFACE, icons)
     };
-    let title: UiNode = LayoutContainer::expanded(
-        LayoutContainer::column([text(title, 20.0, TEXT), text("本机文件", 12.0, SECONDARY)])
-            .layout(LayoutConcern {
-                gap: 2.0,
-                ..LayoutConcern::default()
-            }),
-    )
-    .into();
-    LayoutContainer::row([
-        leading,
-        title,
-        icon_badge(IconName::More, SECONDARY, MUTED_SURFACE, icons),
-    ])
-    .layout(LayoutConcern {
-        width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(APP_BAR_H)),
-        padding: Insets {
+    MobileNavBar::new(title)
+        .subtitle("本机文件")
+        .leading(leading)
+        .trailing(icon_badge(IconName::More, SECONDARY, MUTED_SURFACE, icons))
+        .width(width)
+        .height(APP_BAR_H)
+        .padding(Insets {
             top: 8.0,
             right: CONTENT_INSET,
             bottom: 8.0,
             left: CONTENT_INSET,
-        },
-        gap: TOUCH_GAP,
-        cross_align: tela_contract::CrossAlign::Center,
-        border_width: 1.0,
-        ..LayoutConcern::default()
-    })
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(SURFACE)),
-        border_color: Some(BORDER),
-        ..VisualConcern::default()
-    })
-    .into()
+        })
+        .style(MobileNavBarStyle {
+            surface: MobileSurfaceStyle {
+                fill: SURFACE,
+                border_color: Some(BORDER),
+                border_width: 1.0,
+                border_radius: BorderRadius::default(),
+            },
+            title: TEXT,
+            subtitle: SECONDARY,
+            gap: TOUCH_GAP,
+        })
+        .into_node()
 }
 
 fn search_field(query: &str, focused: bool, width: f32, icons: &dyn IconProvider) -> UiNode {
@@ -245,42 +237,30 @@ fn entry_row(entry: &Entry, width: f32, icons: &dyn IconProvider) -> UiNode {
         EntryKind::Asset => "资源",
     };
     let metadata = format!("{kind}  ·  {}", entry.metadata);
-    let details: UiNode = LayoutContainer::expanded(
-        LayoutContainer::column([
-            text(entry.name, 16.0, TEXT),
-            text(&metadata, 13.0, SECONDARY),
-        ])
-        .layout(LayoutConcern {
-            gap: 4.0,
-            ..LayoutConcern::default()
-        }),
-    )
-    .into();
-    let content: UiNode = LayoutContainer::row([
-        icon_badge(icon_name, icon_color, icon_surface, icons),
-        details,
-        icon(IconName::ChevronRight, SECONDARY, icons),
-    ])
-    .layout(LayoutConcern {
-        gap: 12.0,
-        cross_align: tela_contract::CrossAlign::Center,
-        ..LayoutConcern::default()
-    })
-    .into();
-    MobileListRow::new(content, format!("mobile.entry.{}", entry.id))
+    MobileCell::new(entry.name)
+        .label(metadata)
+        .leading(icon_badge(icon_name, icon_color, icon_surface, icons))
+        .trailing(icon(IconName::ChevronRight, SECONDARY, icons))
+        .target(format!("mobile.entry.{}", entry.id))
         .width(width)
-        .height(ROW_H)
+        .min_height(ROW_H)
         .padding(Insets {
             top: 8.0,
             right: 12.0,
             bottom: 8.0,
             left: 12.0,
         })
-        .surface(MobileSurfaceStyle {
-            fill: SURFACE,
-            border_color: Some(BORDER),
-            border_width: 1.0,
-            border_radius: BorderRadius::all(8.0),
+        .style(MobileCellStyle {
+            surface: MobileSurfaceStyle {
+                fill: SURFACE,
+                border_color: Some(BORDER),
+                border_width: 1.0,
+                border_radius: BorderRadius::all(8.0),
+            },
+            title: TEXT,
+            label: SECONDARY,
+            value: SECONDARY,
+            ..MobileCellStyle::default()
         })
         .into_node()
 }
@@ -399,17 +379,13 @@ fn empty_state(query: &str) -> UiNode {
     } else {
         "没有匹配的文件或文件夹"
     };
-    LayoutContainer::frame(text(message, 15.0, SECONDARY))
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(280.0)),
-            height: Some(Size::fixed(96.0)),
-            padding: Insets::all(16.0),
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(MUTED_SURFACE)),
+    MobileEmptyState::new(message)
+        .size(280.0, 96.0)
+        .style(MobileEmptyStateStyle {
+            surface: MUTED_SURFACE,
             border_radius: BorderRadius::all(8.0),
-            ..VisualConcern::default()
+            title: SECONDARY,
+            ..MobileEmptyStateStyle::default()
         })
         .into()
 }
