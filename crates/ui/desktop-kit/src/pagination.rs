@@ -4,8 +4,8 @@
 //! 缓存和数据载入都属于 Application。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy,
-    LayoutConcern, SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern,
+    SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::LayoutContainer;
 
@@ -214,7 +214,6 @@ fn control(
             clickable: true,
             hoverable: true,
             focusable: true,
-            bind_id: Some(BindId(target)),
             ..InteractConcern::default()
         });
     }
@@ -259,9 +258,9 @@ mod tests {
         );
         assert_eq!(
             node.children[5]
-                .interact
+                .identity
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|target| target.0.as_str()),
             Some("files.page.9")
         );
@@ -274,8 +273,8 @@ mod tests {
         assert_eq!(
             node.children
                 .last()
-                .and_then(|node| node.interact.as_ref())
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|node| node.identity.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|target| target.0.as_str()),
             Some("files.next")
         );

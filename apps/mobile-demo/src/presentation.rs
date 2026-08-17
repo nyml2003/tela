@@ -241,7 +241,7 @@ fn entry_row(entry: &Entry, width: f32, icons: &dyn IconProvider) -> UiNode {
         .label(metadata)
         .leading(icon_badge(icon_name, icon_color, icon_surface, icons))
         .trailing(icon(IconName::ChevronRight, SECONDARY, icons))
-        .target(format!("mobile.entry.{}", entry.id))
+        .action_key(format!("mobile.entry.{}", entry.id))
         .width(width)
         .min_height(ROW_H)
         .padding(Insets {
@@ -390,8 +390,8 @@ fn empty_state(query: &str) -> UiNode {
         .into()
 }
 
-fn icon_button(icon_name: IconName, bind_id: &str, icons: &dyn IconProvider) -> UiNode {
-    MobileIconButton::new(icon(icon_name, PRIMARY, icons), bind_id)
+fn icon_button(icon_name: IconName, action_key: &str, icons: &dyn IconProvider) -> UiNode {
+    MobileIconButton::new(icon(icon_name, PRIMARY, icons), action_key)
         .size(48.0, 48.0)
         .surface(MobileSurfaceStyle {
             fill: MUTED_SURFACE,

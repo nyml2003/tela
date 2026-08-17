@@ -3,9 +3,9 @@
 use crate::domain::{
     EntryFilter, EntryId, FileCommand, FileManagerModel, FileManagerSession, OperationKind,
 };
+use tela_ui_headless::ComponentPartPath;
 
 pub mod keymap;
-pub mod reactive;
 pub mod runtime;
 
 /// View 可发出的语义意图；不暴露 tela `NodeId` 或 `SemanticKey`。
@@ -23,9 +23,13 @@ pub enum Intent {
     CancelOperation,
 }
 
-/// 由组件声明的业务绑定路由意图。绑定值不是节点 key；普通组件不需要管理 tela identity。
-pub fn intent_from_bind_id(bind_id: &str) -> Option<Intent> {
-    let command = match bind_id {
+/// 将一个显式组件分部路径翻译为业务意图。
+///
+/// 路径不是字段绑定，也不是临时 `NodeId`。Application 在接到 headless `Activate` 后才调用
+/// 本函数，因此不会回退为不透明的字符串命令编解码。
+pub fn intent_from_component_part(part: &ComponentPartPath) -> Option<Intent> {
+    let path = part.item_key().unwrap_or_else(|| part.as_str());
+    let command = match path {
         "command.new-folder" => return Some(Intent::BeginOperation(OperationKind::NewFolder)),
         "command.rename" => return Some(Intent::BeginOperation(OperationKind::Rename)),
         "command.copy" => Some(FileCommand::CopySelected),
@@ -43,10 +47,10 @@ pub fn intent_from_bind_id(bind_id: &str) -> Option<Intent> {
     if let Some(command) = command {
         return Some(Intent::Command(command));
     }
-    if bind_id == "navigation.toggle" {
+    if path == "navigation.toggle" {
         return Some(Intent::ToggleNavigation);
     }
-    let filter = match bind_id {
+    let filter = match path {
         "filter.all" => Some(EntryFilter::All),
         "filter.favorites" => Some(EntryFilter::Favorites),
         "filter.tagged" => Some(EntryFilter::Tagged),
@@ -56,17 +60,17 @@ pub fn intent_from_bind_id(bind_id: &str) -> Option<Intent> {
     if let Some(filter) = filter {
         return Some(Intent::SetFilter(filter));
     }
-    if bind_id == "operation.confirm" {
+    if path == "operation.confirm" {
         return Some(Intent::ConfirmOperation);
     }
-    if bind_id == "operation.cancel" {
+    if path == "operation.cancel" {
         return Some(Intent::CancelOperation);
     }
-    if let Some(id) = bind_id.strip_prefix("folder.open.") {
+    if let Some(id) = path.strip_prefix("folder.open.") {
         return id.parse().ok().map(Intent::OpenFolder);
     }
-    bind_id
-        .strip_prefix("entry.select.")?
+    path.strip_prefix("entry.select.")
+        .or_else(|| path.strip_prefix("entry-"))?
         .parse()
         .ok()
         .map(Intent::Select)

@@ -20,8 +20,6 @@ use crate::{
     touch::{TouchAdapter, TouchPhase, logical_coordinate},
 };
 
-const TOUCH_SLOP_PT: f32 = 12.0;
-
 /// Starts the UIKit-owned event loop for a product-supplied direct mobile session.
 pub(super) fn run<A: IosMobileSession + 'static>(app: A) -> Result<(), String> {
     let event_loop =
@@ -47,7 +45,7 @@ impl<A: IosMobileSession> IosHost<A> {
             gpu: None,
             app,
             text: ControlledTextInput::default(),
-            touch: TouchAdapter::new(TOUCH_SLOP_PT),
+            touch: TouchAdapter::new(),
         }
     }
 
@@ -121,9 +119,8 @@ impl<A: IosMobileSession> IosHost<A> {
             .unwrap_or(1.0);
         let x = logical_coordinate(touch.location.x, scale);
         let y = logical_coordinate(touch.location.y, scale);
-        for event in self.touch.handle(touch.id, phase, x, y) {
-            self.app.dispatch_pointer(event);
-        }
+        self.app
+            .dispatch_pointer(self.touch.handle(touch.id, phase, x, y));
         self.sync_text_channel();
         self.request_redraw();
     }
@@ -217,12 +214,14 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        for event in self.touch.cancel_all() {
+            self.app.dispatch_pointer(event);
+        }
         self.app.input_blur();
         self.sync_text_channel();
         // UIKit may invalidate its Metal drawable in the background. The next `resumed` callback
         // retains the business session but creates a fresh surface and device.
         self.gpu = None;
-        self.touch.reset();
     }
 
     fn window_event(

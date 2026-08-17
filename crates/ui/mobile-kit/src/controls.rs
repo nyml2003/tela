@@ -2,7 +2,8 @@
 
 use tela_contract::{
     BindId, BorderRadius, Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy,
-    LayoutConcern, SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
+    LayoutConcern, SemanticKey, Size, TextInputKind, TextInputSpec, UiNode, UpdateMode,
+    VisualConcern,
 };
 use tela_core::LayoutContainer;
 
@@ -118,7 +119,7 @@ impl MobileSearchField {
         field.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
-            text_input: true,
+            input: Some(TextInputSpec::new(TextInputKind::Search)),
             bind_id: Some(BindId(self.bind_id)),
             ..InteractConcern::default()
         });
@@ -132,18 +133,18 @@ pub struct MobileIconButton {
     width: f32,
     height: f32,
     surface: MobileSurfaceStyle,
-    bind_id: String,
+    action_key: SemanticKey,
 }
 
 impl MobileIconButton {
     /// 创建一个最小触控按钮。
-    pub fn new(content: UiNode, bind_id: impl Into<String>) -> Self {
+    pub fn new(content: UiNode, action_key: impl Into<String>) -> Self {
         Self {
             content,
             width: MIN_TOUCH_TARGET,
             height: MIN_TOUCH_TARGET,
             surface: MobileSurfaceStyle::solid(Color::WHITE),
-            bind_id: bind_id.into(),
+            action_key: SemanticKey(action_key.into()),
         }
     }
 
@@ -175,12 +176,11 @@ impl MobileIconButton {
                 border_radius: self.surface.border_radius,
                 ..VisualConcern::default()
             })
-            .identity(semantic_identity(&self.bind_id))
+            .identity(semantic_identity(&self.action_key.0))
             .into();
         node.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
-            bind_id: Some(BindId(self.bind_id)),
             ..InteractConcern::default()
         });
         node
@@ -194,19 +194,19 @@ pub struct MobileListRow {
     height: f32,
     padding: Insets,
     surface: MobileSurfaceStyle,
-    bind_id: String,
+    action_key: SemanticKey,
 }
 
 impl MobileListRow {
     /// 创建一个具有 56 点最小高度的可点击列表行。
-    pub fn new(content: UiNode, bind_id: impl Into<String>) -> Self {
+    pub fn new(content: UiNode, action_key: impl Into<String>) -> Self {
         Self {
             content,
             width: 1.0,
             height: 56.0,
             padding: Insets::all(12.0),
             surface: MobileSurfaceStyle::solid(Color::WHITE),
-            bind_id: bind_id.into(),
+            action_key: SemanticKey(action_key.into()),
         }
     }
 
@@ -250,12 +250,11 @@ impl MobileListRow {
                 border_radius: self.surface.border_radius,
                 ..VisualConcern::default()
             })
-            .identity(semantic_identity(&self.bind_id))
+            .identity(semantic_identity(&self.action_key.0))
             .into();
         node.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
-            bind_id: Some(BindId(self.bind_id)),
             ..InteractConcern::default()
         });
         node
@@ -269,19 +268,19 @@ pub struct MobileBottomAction {
     height: f32,
     padding: Insets,
     surface: MobileSurfaceStyle,
-    bind_id: String,
+    action_key: SemanticKey,
 }
 
 impl MobileBottomAction {
     /// 创建底部动作，默认提供 48 点可触达高度。
-    pub fn new(content: UiNode, bind_id: impl Into<String>) -> Self {
+    pub fn new(content: UiNode, action_key: impl Into<String>) -> Self {
         Self {
             content,
             width: 1.0,
             height: 48.0,
             padding: Insets::all(12.0),
             surface: MobileSurfaceStyle::solid(Color::WHITE),
-            bind_id: bind_id.into(),
+            action_key: SemanticKey(action_key.into()),
         }
     }
 
@@ -299,7 +298,7 @@ impl MobileBottomAction {
 
     /// 生成固定动作节点。
     pub fn into_node(self) -> UiNode {
-        MobileListRow::new(self.content, self.bind_id)
+        MobileListRow::new(self.content, self.action_key.0)
             .width(self.width)
             .height(self.height)
             .padding(self.padding)
@@ -400,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_button_enforces_a_minimum_touch_box_and_keeps_the_binding() {
+    fn icon_button_enforces_a_minimum_touch_box_and_keeps_its_action_key() {
         let node = MobileIconButton::new(content(), "mobile.action")
             .size(10.0, 12.0)
             .into_node();
@@ -409,9 +408,9 @@ mod tests {
             Some(tela_contract::Size::fixed(MIN_TOUCH_TARGET))
         );
         assert_eq!(
-            node.interact
-                .and_then(|interact| interact.bind_id)
-                .map(|id| id.0),
+            node.identity
+                .and_then(|identity| identity.semantic_key)
+                .map(|key| key.0),
             Some("mobile.action".to_owned())
         );
     }
@@ -433,7 +432,7 @@ mod tests {
             search
                 .interact
                 .as_ref()
-                .is_some_and(|interact| interact.text_input)
+                .is_some_and(|interact| interact.input.is_some())
         );
 
         let row = MobileListRow::new(content(), "mobile.entry.1")

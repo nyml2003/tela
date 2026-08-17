@@ -1,7 +1,8 @@
 //! `Checkbox` / `Radio` 组件（AntD 简化）：方框/圆点 + 标签，受控选中态。
 
 use tela_contract::{
-    BindId, Color, Fill, InteractConcern, LayoutConcern, Size, UiNode, VisualConcern,
+    Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, SemanticKey, Size,
+    UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::LayoutContainer;
 
@@ -15,7 +16,7 @@ pub struct Checkbox {
     label: String,
     checked: bool,
     disabled: bool,
-    bind_id: Option<BindId>,
+    action_key: Option<SemanticKey>,
 }
 
 impl Default for Checkbox {
@@ -31,7 +32,7 @@ impl Checkbox {
             label: String::new(),
             checked: false,
             disabled: false,
-            bind_id: None,
+            action_key: None,
         }
     }
 
@@ -53,9 +54,9 @@ impl Checkbox {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置由 Application 路由的稳定动作键。
+    pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
+        self.action_key = Some(SemanticKey(action_key.into()));
         self
     }
 
@@ -98,12 +99,18 @@ impl Checkbox {
                 ..LayoutConcern::default()
             })
             .into();
+        if let Some(action_key) = self.action_key {
+            node.identity = Some(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(action_key),
+                update_mode: UpdateMode::Dirty,
+            });
+        }
         if !self.disabled {
             node.interact = Some(InteractConcern {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -122,7 +129,7 @@ pub struct Radio {
     label: String,
     checked: bool,
     disabled: bool,
-    bind_id: Option<BindId>,
+    action_key: Option<SemanticKey>,
 }
 
 impl Default for Radio {
@@ -138,7 +145,7 @@ impl Radio {
             label: String::new(),
             checked: false,
             disabled: false,
-            bind_id: None,
+            action_key: None,
         }
     }
 
@@ -160,9 +167,9 @@ impl Radio {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置由 Application 路由的稳定动作键。
+    pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
+        self.action_key = Some(SemanticKey(action_key.into()));
         self
     }
 
@@ -190,12 +197,18 @@ impl Radio {
                 ..LayoutConcern::default()
             })
             .into();
+        if let Some(action_key) = self.action_key {
+            node.identity = Some(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(action_key),
+                update_mode: UpdateMode::Dirty,
+            });
+        }
         if !self.disabled {
             node.interact = Some(InteractConcern {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }

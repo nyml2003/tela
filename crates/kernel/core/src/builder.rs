@@ -122,6 +122,16 @@ impl LayoutContainer {
         Self::with_children(NodeKind::Wrap, children)
     }
 
+    /// Grid 容器：轨道由 `GridSpec` 声明，直接子项可在 `LayoutConcern.grid_item`
+    /// 中指定位置与跨度，未指定的项按行优先自动放置。
+    pub fn grid<C>(spec: tela_contract::GridSpec, children: C) -> Self
+    where
+        C: IntoIterator,
+        C::Item: Into<UiNode>,
+    {
+        Self::with_children(NodeKind::Grid(spec), children)
+    }
+
     /// 单子节点尺寸边界容器。
     pub fn frame(child: impl Into<UiNode>) -> Self {
         Self::with_children(NodeKind::Frame, [child.into()])

@@ -136,9 +136,7 @@ mod tests {
             bottom: 34.0,
             left: 0.0,
         }));
-        let _ = app.dispatch_pointer(PointerEvent::Move {
-            position: Point { x: 20.0, y: 60.0 },
-        });
+        let _ = app.dispatch_pointer(PointerEvent::mouse_move(Point { x: 20.0, y: 60.0 }));
         assert!(!app.frame().commands.is_empty());
     }
 }

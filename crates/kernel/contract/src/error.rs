@@ -29,6 +29,12 @@ pub enum UiBuildError {
     InvalidLayoutShape,
     /// Wrap 中出现 Expanded 或 Spacer。
     AllocationInWrap,
+    /// Grid 轨道、间距、显式位置、跨度、重叠或自动放置容量不合法。
+    InvalidGrid,
+    /// 非 Grid 直接子项声明了 `grid_item` 位置。
+    GridItemOutsideGrid,
+    /// 文本约束用于非文本节点、max_lines 为零，或省略号没有有限行数边界。
+    InvalidTextConstraint,
     /// 非法尺寸搭配：`MinMax` 包裹 `Fixed`、`min > max`、嵌套 `MinMax`（见 006-布局引擎 5）。
     InvalidMinMax,
     /// 虚拟列表容器子项缺少显式 `semantic-id`（见 006-布局引擎 6）。
@@ -41,8 +47,14 @@ pub enum UiBuildError {
     InvalidFocusPortBinding,
     /// Teleport 嵌套（禁止嵌套 Teleport）。
     NestedTeleport,
-    /// Teleport 绑定了自身内部之外的 source 锚点。
-    TeleportSourceOutside,
+    /// Teleport 的稳定锚点 key 不存在于当前树。
+    MissingTeleportAnchor(SemanticKey),
+    /// Teleport 不能把自身或自身子树内节点作为锚点。
+    TeleportAnchorInsidePortal,
+    /// Teleport 不能以另一个 Teleport 作为锚点，因为其几何只在提升后才可得。
+    TeleportAnchorIsPortal,
+    /// 锚定浮层的边距或偏移含有非有限值，或边距为负数。
+    InvalidTeleportPlacement,
     /// 自动 id 分配耗尽。
     IdExhausted,
 }
@@ -52,6 +64,10 @@ pub enum UiBuildError {
 pub enum UiLayoutError {
     /// 盒子尺寸无法满足最小约束（节点自身区间与父约束区间无交集）。
     MinConstraintViolation,
+    /// Grid 的轨道、位置或跨度在绕过 `UiTree::new` 直接测量时不合法。
+    InvalidGrid,
+    /// 文本约束在绕过 `UiTree::new` 直接测量时不合法。
+    InvalidTextConstraint,
     /// resolve 输入的逻辑画布尺寸必须使用非零基数（见 003-场景树与节点模型 5）。
     InvalidViewport {
         /// 非法宽度。

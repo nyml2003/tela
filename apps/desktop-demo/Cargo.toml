@@ -16,11 +16,13 @@ tela-core = { path = "../../crates/kernel/core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
+tela-ui-headless = { path = "../../crates/ui/headless" }
 tela-desktop-ui-kit = { path = "../../crates/ui/desktop-kit" }
 
 [dev-dependencies]
 # 回归测试使用真实的受控资源核对 frame；运行时依赖仍由产品根注入。
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-render-raster = { path = "../../crates/presentation/renderers/raster" }
 tela-text-resources = { path = "../../crates/presentation/resources/text" }
 
 [lints.rust]

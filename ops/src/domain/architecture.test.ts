@@ -1,4 +1,4 @@
-// domain/architecture 纯函数单测：026 目标依赖方向。
+// domain/architecture 纯函数单测：026 产品依赖方向与 030 UI 组件边界。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { checkArchitecture, type CrateInfo } from './architecture.ts';
@@ -75,6 +75,29 @@ test('UI Capability 不可直接认识具体资源或 renderer', () => {
   assert.ok(violations.some((violation) => /tela-icon-resources/.test(violation.message)));
 });
 
+test('Headless 是 UI Capability 的独立语义层，不能越过 Kernel 认识视觉实现', () => {
+  const allowed = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-ui-headless', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+    ]),
+  ]);
+  assert.deepEqual(allowed, []);
+
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-ui-headless', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-render-raster', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /tela-render-raster/.test(violation.message)));
+  assert.ok(violations.some((violation) => /tela-ui-foundation/.test(violation.message)));
+});
+
 test('Presentation 通过 Contract 协议提供资源，不能反向依赖 UI kit', () => {
   const violations = checkArchitecture([
     ...zeroDependencies(),
@@ -97,6 +120,7 @@ test('Application 可在测试中注入资源，但生产闭包不能静态耦�
       ['tela-mobile-ui-kit', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
+      ['tela-render-raster', 'dev'],
       ['tela-text-resources', 'dev'],
     ]),
   ]);
@@ -183,7 +207,7 @@ test('动态 Product 不能被 Target 或错误应用污染', () => {
   assert.ok(violations.some((violation) => /移动动态 Product/.test(violation.message)));
 });
 
-test('完整的 026 workspace 依赖闭包通过', () => {
+test('完整的 026/030 workspace 依赖闭包通过', () => {
   const crates: CrateInfo[] = [
     crate('tela-contract'),
     crate('tela-font-resources'),
@@ -208,8 +232,10 @@ test('完整的 026 workspace 依赖闭包通过', () => {
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
       ['tela-desktop-ui-kit', 'normal'],
+      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
+      ['tela-render-raster', 'dev'],
       ['tela-text-resources', 'dev'],
     ]),
     crate('tela-desktop-runtime', [
@@ -221,6 +247,7 @@ test('完整的 026 workspace 依赖闭包通过', () => {
     crate('tela-desktop-ui-kit', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
+      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
     ]),
     crate('tela-guest-runtime', [
@@ -238,13 +265,16 @@ test('完整的 026 workspace 依赖闭包通过', () => {
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
       ['tela-mobile-ui-kit', 'normal'],
+      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
+      ['tela-render-raster', 'dev'],
       ['tela-text-resources', 'dev'],
     ]),
     crate('tela-mobile-ui-kit', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
+      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
     ]),
     crate('tela-product-desktop-guest', [
@@ -345,6 +375,10 @@ test('完整的 026 workspace 依赖闭包通过', () => {
       ['ab_glyph', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-font-resources', 'normal'],
+    ]),
+    crate('tela-ui-headless', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
     ]),
     crate('tela-ui-foundation', [
       ['tela-contract', 'normal'],

@@ -1,4 +1,4 @@
-//! 轻量、单线程的上层响应式状态容器。
+//! 轻量、单线程的 Application 状态容器。
 
 use std::{
     cell::{Cell, RefCell},
@@ -16,9 +16,9 @@ struct SignalInner<T> {
 
 /// 可克隆的单线程响应式值。
 ///
-/// `Signal` 适用于 `tela-ui-foundation` 和宿主的 UI 状态。它不会自动驱动 `UiTree` 重建；
-/// 宿主应在订阅回调中请求下一帧，并在构建组件时通过 [`Signal::get`] 或
-/// [`Signal::with`] 读取当前快照。
+/// Signal 属于 Application 的状态模型。它不会隐式追踪 render 读取，也不会自行重建
+/// UiTree；Application 必须通过 ComponentRuntime::watch 显式登记哪一个组件路径
+/// 依赖该值。
 pub struct Signal<T> {
     inner: Rc<SignalInner<T>>,
 }
@@ -44,31 +44,31 @@ impl<T> Signal<T> {
         }
     }
 
-    /// 在不克隆内部值的情况下读取快照。
+    /// 在不克隆内部值的情况下读取当前快照。
     pub fn with<R>(&self, read: impl FnOnce(&T) -> R) -> R {
         let value = self.inner.value.borrow();
         read(&value)
     }
 
-    /// 返回变更版本号；每次 [`set`](Self::set) 或 [`update`](Self::update) 后递增。
+    /// 返回写入版本；每次 set 或 update 后递增。
     pub fn version(&self) -> u64 {
         self.inner.version.get()
     }
 
-    /// 写入新值并通知订阅者。
+    /// 写入新值并通知显式订阅者。
     pub fn set(&self, value: T) {
         *self.inner.value.borrow_mut() = value;
         self.notify();
     }
 
-    /// 原地更新值并通知订阅者，返回更新闭包的结果。
+    /// 原地更新值并通知显式订阅者，返回更新闭包的结果。
     pub fn update<R>(&self, update: impl FnOnce(&mut T) -> R) -> R {
         let result = update(&mut self.inner.value.borrow_mut());
         self.notify();
         result
     }
 
-    /// 订阅变更。返回的订阅句柄 drop 后自动取消订阅。
+    /// 注册一个变更监听器；令牌 drop 后自动取消监听。
     pub fn subscribe(&self, listener: impl Fn() + 'static) -> SignalSubscription<T> {
         let id = self.inner.next_listener_id.get();
         self.inner.next_listener_id.set(id.wrapping_add(1));
@@ -106,7 +106,7 @@ impl<T: Clone> Signal<T> {
     }
 }
 
-/// [`Signal::subscribe`] 返回的订阅生命周期令牌。
+/// Signal::subscribe 返回的监听生命周期令牌。
 pub struct SignalSubscription<T> {
     inner: Weak<SignalInner<T>>,
     id: u64,

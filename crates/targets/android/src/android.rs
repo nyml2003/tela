@@ -28,10 +28,9 @@ use winit::{
 
 use crate::{
     ime::{ControlledTextSync, TextInputState},
-    touch::{GuestPointerEvent, TouchAdapter, TouchPhase, logical_coordinate},
+    touch::{TouchAdapter, TouchPhase, logical_coordinate},
 };
 
-const TOUCH_SLOP_DP: f32 = 12.0;
 const BACK_BLURRED_TEXT_INPUT: jint = 1;
 const BACK_DISPATCHED_TO_GUEST: jint = 2;
 
@@ -166,7 +165,7 @@ impl AndroidHost {
             gpu: None,
             runtime: None,
             frame: None,
-            touch: TouchAdapter::new(TOUCH_SLOP_DP),
+            touch: TouchAdapter::new(),
             failure: None,
         }
     }
@@ -293,32 +292,12 @@ impl AndroidHost {
             .map(|window| window.scale_factor())
             .unwrap_or(1.0);
         // Winit touch locations are physical pixels while Guest layout/input uses logical units.
-        // Once converted, the Android 12dp slop is likewise expressed as 12 logical units.
-        self.touch.set_touch_slop(TOUCH_SLOP_DP);
+        // Gesture thresholds are deliberately not interpreted here; the Kernel owns them.
         let x = logical_coordinate(touch.location.x, scale);
         let y = logical_coordinate(touch.location.y, scale);
-        for event in self.touch.handle(touch.id, phase, x, y) {
-            let result = match event {
-                GuestPointerEvent::Down { x, y } => {
-                    self.dispatch_guest(AppEvent::PointerDown { x, y })
-                }
-                GuestPointerEvent::Up { x, y } => self.dispatch_guest(AppEvent::PointerUp { x, y }),
-                GuestPointerEvent::Scroll {
-                    x,
-                    y,
-                    delta_x,
-                    delta_y,
-                } => self.dispatch_guest(AppEvent::PointerScroll {
-                    x,
-                    y,
-                    delta_x,
-                    delta_y,
-                }),
-            };
-            if let Err(error) = result {
-                self.fail(error);
-                return;
-            }
+        let event = self.touch.handle(touch.id, phase, x, y);
+        if let Err(error) = self.dispatch_guest(AppEvent::Pointer(event)) {
+            self.fail(error);
         }
     }
 
@@ -504,9 +483,14 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         // Android invalidates the SurfaceView here; surface and every resource borrowing it must
         // disappear before this callback returns. The portable guest intentionally survives.
+        for event in self.touch.cancel_all() {
+            if let Err(error) = self.dispatch_guest(AppEvent::Pointer(event)) {
+                self.fail(error);
+                break;
+            }
+        }
         self.gpu = None;
         self.window = None;
-        self.touch = TouchAdapter::new(TOUCH_SLOP_DP);
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: HostEvent) {

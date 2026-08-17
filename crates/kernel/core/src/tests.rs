@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 use tela_contract::{
     BaseSize, ClipRect, Color, Constraints, ContentConcern, CrossAlign, Fill, FocusAppearance,
-    IdentityConcern, Insets, InteractConcern, KeyStrategy, KeymapScopeId, LayoutBox, LayoutConcern,
-    MinMax, OverlaySpec, PixelOffset, Rect, ScrollState, SemanticKey, ShortcutScopeSpec, Size,
-    StackAlign, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, TextStyleRef,
-    UiBuildError, UiLayoutError, UiNode, Viewport, VirtualListSpec, VisualConcern,
+    GridAlign, GridItemPlacement, GridSpec, GridTrack, IdentityConcern, Insets, InteractConcern,
+    KeyStrategy, KeymapScopeId, LayoutBox, LayoutConcern, MinMax, OverlaySpec, PixelOffset, Rect,
+    ScrollState, SemanticKey, ShortcutScopeSpec, Size, StackAlign, TextConstraint, TextContent,
+    TextMeasureRequest, TextMeasurer, TextMetrics, TextStyleRef, UiBuildError, UiLayoutError,
+    UiNode, Viewport, VirtualListSpec, VisualConcern,
 };
 
 use crate::builder::{LayoutContainer, LogicalContainer, Primitive};
@@ -103,6 +104,21 @@ fn wrap(width: f32, children: Vec<UiNode>) -> UiNode {
         .layout(LayoutConcern {
             width: Some(Size::fixed(width)),
             ..LayoutConcern::default()
+        })
+        .into()
+}
+
+fn grid_item(width: f32, height: f32, placement: Option<GridItemPlacement>) -> UiNode {
+    Primitive::rect()
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height)),
+            grid_item: placement,
+            ..LayoutConcern::default()
+        })
+        .visual(VisualConcern {
+            fill: Some(Fill::Solid(Color::BLACK)),
+            ..VisualConcern::default()
         })
         .into()
 }
@@ -391,7 +407,8 @@ fn teleported_focus_uses_the_modal_host_keymap_chain_not_its_source_chain() {
     .children([teleported_leaf])
     .into();
     let teleported: UiNode = LogicalContainer::teleport(tela_contract::TeleportSpec {
-        source: tela_contract::TeleportSource::Node(tela_contract::NodeId(0)),
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("modal-host".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
     })
     .children([overlay_scope])
     .into();
@@ -401,6 +418,10 @@ fn teleported_focus_uses_the_modal_host_keymap_chain_not_its_source_chain() {
     .children([teleported])
     .into();
     let modal_host: UiNode = LogicalContainer::modal_host()
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("modal-host".to_owned())),
+            ..IdentityConcern::default()
+        })
         .children([page_leaf, source_scope])
         .into();
     let tree = UiTree::new(
@@ -423,6 +444,137 @@ fn teleported_focus_uses_the_modal_host_keymap_chain_not_its_source_chain() {
         ],
         "Teleport 焦点链不得泄漏来源位置的 source 作用域"
     );
+}
+
+// ---------- Anchored Teleport：稳定锚点、翻转、移位与滚动重定位 ----------
+
+#[test]
+fn anchored_teleport_flips_and_shifts_inside_the_viewport() {
+    let anchor: UiNode = LayoutContainer::frame(rect(20.0, 10.0))
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(20.0)),
+            height: Some(Size::fixed(10.0)),
+            margin: Insets {
+                top: 70.0,
+                ..Insets::default()
+            },
+            ..LayoutConcern::default()
+        })
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("anchor".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into();
+    let portal: UiNode = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("anchor".to_owned())),
+        placement: tela_contract::AnchoredPlacement {
+            side: tela_contract::AnchorSide::Bottom,
+            align: tela_contract::AnchorAlign::Center,
+            offset: PixelOffset::default(),
+            flip: true,
+            shift: true,
+            clamp: true,
+            viewport_padding: 0.0,
+        },
+    })
+    .children([rect(60.0, 30.0)])
+    .into();
+    let tree = UiTree::new(
+        LayoutContainer::column([anchor, portal]).layout(LayoutConcern {
+            width: Some(Size::fixed(200.0)),
+            height: Some(Size::fixed(100.0)),
+            ..LayoutConcern::default()
+        }),
+    )
+    .unwrap();
+
+    let frame = resolve(&tree);
+    let overlay = &frame.commands[1].geometry;
+    // 首选 Bottom 会落到 y=80 并越界；Flip 后走 Top，Shift 把 center 对齐产生的负 x 收回。
+    assert_eq!(
+        (overlay.x, overlay.y, overlay.w, overlay.h),
+        (0.0, 40.0, 60.0, 30.0)
+    );
+}
+
+#[test]
+fn anchored_teleport_recomputes_from_the_scrolled_anchor_box() {
+    let anchor: UiNode = LayoutContainer::frame(rect(20.0, 10.0))
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(20.0)),
+            height: Some(Size::fixed(10.0)),
+            margin: Insets {
+                top: 40.0,
+                ..Insets::default()
+            },
+            ..LayoutConcern::default()
+        })
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("scroll-anchor".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into();
+    let scroll: UiNode = LayoutContainer::scroll_view([anchor])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            height: Some(Size::fixed(100.0)),
+            ..LayoutConcern::default()
+        })
+        .into();
+    let portal: UiNode = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("scroll-anchor".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
+    })
+    .children([rect(20.0, 10.0)])
+    .into();
+    let tree = UiTree::new(LogicalContainer::group().children([scroll, portal])).unwrap();
+    let scrolls = HashMap::from([(
+        SemanticKey("/0/".to_owned()),
+        ScrollState {
+            offset_x: 0.0,
+            offset_y: 10.0,
+        },
+    )]);
+
+    let frame = resolve_with_scrolls(&tree, scrolls);
+    let overlay = &frame.commands[1].geometry;
+    // 锚点原始 y=40，滚动后为 y=30；Bottom placement 因而重算为 y=40。
+    assert_eq!((overlay.x, overlay.y), (0.0, 40.0));
+}
+
+#[test]
+fn teleport_requires_an_external_stable_anchor_and_cannot_nest() {
+    let missing = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("missing".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
+    })
+    .children([rect(1.0, 1.0)]);
+    assert!(matches!(
+        UiTree::new(missing),
+        Err(UiBuildError::MissingTeleportAnchor(SemanticKey(key))) if key == "missing"
+    ));
+
+    let anchor: UiNode = LayoutContainer::frame(rect(1.0, 1.0))
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("anchor".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into();
+    let inner: UiNode = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("anchor".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
+    })
+    .children([rect(1.0, 1.0)])
+    .into();
+    let outer = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("anchor".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
+    })
+    .children([inner]);
+    assert!(matches!(
+        UiTree::new(LogicalContainer::group().children([anchor, outer.into()])),
+        Err(UiBuildError::NestedTeleport)
+    ));
 }
 
 // ---------- 非法树返回结构化错误 ----------
@@ -468,6 +620,102 @@ fn zero_font_size_rejected() {
         color: Color::WHITE,
     });
     assert!(matches!(UiTree::new(root), Err(UiBuildError::InvalidRatio)));
+}
+
+#[test]
+fn text_constraint_ellipsizes_at_a_measured_utf8_boundary() {
+    // Mock 字宽 = 5；25 宽只能放两个中文字符和三个 ASCII 省略号。
+    let node = Primitive::text(TextContent {
+        text: "你好吗世界啊".to_owned(),
+        font: TextStyleRef::new("mock"),
+        font_size: 10.0,
+        line_height: 12.0,
+        color: Color::WHITE,
+    })
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(25.0)),
+        text_constraint: Some(TextConstraint::single_line_ellipsis()),
+        ..LayoutConcern::default()
+    });
+    let tree = UiTree::new(node).unwrap();
+    let frame = resolve(&tree);
+    let command = frame.commands.first().expect("文本必须产生绘制命令");
+    assert!(matches!(
+        &command.payload,
+        tela_contract::DrawPayload::Text { text, .. } if text.text == "你好..."
+    ));
+    let clip = command.clip.expect("行约束必须在命令级裁剪");
+    assert_eq!(clip.rect.h, 12.0);
+}
+
+#[test]
+fn text_constraint_clip_preserves_source_text_but_limits_fixed_height_draw() {
+    let node = Primitive::text(TextContent {
+        text: "abcdef".to_owned(),
+        font: TextStyleRef::new("mock"),
+        font_size: 10.0,
+        line_height: 12.0,
+        color: Color::WHITE,
+    })
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(20.0)),
+        height: Some(Size::fixed(40.0)),
+        text_constraint: Some(TextConstraint::clip(1)),
+        ..LayoutConcern::default()
+    });
+    let tree = UiTree::new(node).unwrap();
+    let frame = resolve(&tree);
+    let command = frame.commands.first().expect("文本必须产生绘制命令");
+    assert!(matches!(
+        &command.payload,
+        tela_contract::DrawPayload::Text { text, .. } if text.text == "abcdef"
+    ));
+    let clip = command.clip.expect("固定高度也必须裁到声明行数");
+    assert_eq!(clip.rect.w, 20.0);
+    assert_eq!(clip.rect.h, 12.0);
+}
+
+#[test]
+fn invalid_text_constraint_is_rejected_by_tree_and_direct_measurement() {
+    let invalid_text: UiNode = Primitive::text(TextContent {
+        text: "invalid".to_owned(),
+        font: TextStyleRef::new("mock"),
+        font_size: 10.0,
+        line_height: 12.0,
+        color: Color::WHITE,
+    })
+    .layout(LayoutConcern {
+        text_constraint: Some(TextConstraint::ellipsis(0)),
+        ..LayoutConcern::default()
+    })
+    .into();
+    assert!(matches!(
+        UiTree::new(invalid_text.clone()),
+        Err(UiBuildError::InvalidTextConstraint)
+    ));
+    assert!(matches!(
+        measure(
+            invalid_text,
+            Constraints {
+                min_w: 0.0,
+                max_w: 100.0,
+                min_h: 0.0,
+                max_h: 100.0,
+            }
+        ),
+        Err(UiLayoutError::InvalidTextConstraint)
+    ));
+
+    let invalid_rect: UiNode = Primitive::rect()
+        .layout(LayoutConcern {
+            text_constraint: Some(TextConstraint::clip(1)),
+            ..LayoutConcern::default()
+        })
+        .into();
+    assert!(matches!(
+        UiTree::new(invalid_rect),
+        Err(UiBuildError::InvalidTextConstraint)
+    ));
 }
 
 #[test]
@@ -1536,6 +1784,126 @@ fn measure_cache_clear_does_not_change_result() {
     let after = engine.measure(&node, constraints).unwrap();
     assert_eq!(before, after);
     assert_eq!(engine.cache_stats(), (0, 1));
+}
+
+// ---------- Grid：固定/弹性轨道、span、对齐与构建期校验 ----------
+
+#[test]
+fn grid_resolves_fixed_and_flex_tracks_with_span_and_alignment() {
+    let spec = GridSpec {
+        columns: vec![GridTrack::Fixed(40.0), GridTrack::Flex(1.0)],
+        rows: vec![GridTrack::Fixed(20.0), GridTrack::Flex(1.0)],
+        column_gap: 10.0,
+        row_gap: 5.0,
+    };
+    let root: UiNode = LayoutContainer::grid(
+        spec,
+        [
+            grid_item(
+                20.0,
+                10.0,
+                Some(GridItemPlacement::at(0, 0).align(GridAlign::End, GridAlign::End)),
+            ),
+            grid_item(10.0, 10.0, Some(GridItemPlacement::at(0, 1).span(2, 1))),
+            grid_item(10.0, 10.0, None),
+        ],
+    )
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(120.0)),
+        height: Some(Size::fixed(100.0)),
+        ..LayoutConcern::default()
+    })
+    .into();
+
+    let box_ = measure(
+        root,
+        Constraints {
+            min_w: 0.0,
+            max_w: 120.0,
+            min_h: 0.0,
+            max_h: 100.0,
+        },
+    )
+    .expect("Grid 应在最终轨道约束下测量");
+
+    assert_eq!((box_.w, box_.h), (120.0, 100.0));
+    // 第一项固定 40 × 20 的单元格内右下对齐。
+    assert_eq!((box_.children[0].x, box_.children[0].y), (20.0, 10.0));
+    assert_eq!((box_.children[0].w, box_.children[0].h), (20.0, 10.0));
+    // 第二项跨两列，Stretch 使用 40 + 10 + 70 的完整宽度与第二行 75 高度。
+    assert_eq!((box_.children[1].x, box_.children[1].y), (0.0, 25.0));
+    assert_eq!((box_.children[1].w, box_.children[1].h), (120.0, 75.0));
+    // 自动项跳过已由显式 span 占用的下行，在首行第二列填充。
+    assert_eq!((box_.children[2].x, box_.children[2].y), (50.0, 0.0));
+    assert_eq!((box_.children[2].w, box_.children[2].h), (70.0, 20.0));
+}
+
+#[test]
+fn grid_measures_nested_children_once_after_track_allocation() {
+    let inner: UiNode = LayoutContainer::grid(
+        GridSpec::new([GridTrack::Flex(1.0)], [GridTrack::Flex(1.0)]),
+        [rect(10.0, 10.0)],
+    )
+    .into();
+    let root: UiNode = LayoutContainer::grid(
+        GridSpec::new([GridTrack::Flex(1.0)], [GridTrack::Flex(1.0)]),
+        [inner],
+    )
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(100.0)),
+        height: Some(Size::fixed(60.0)),
+        ..LayoutConcern::default()
+    })
+    .into();
+    let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
+    let box_ = engine
+        .measure(
+            &root,
+            Constraints {
+                min_w: 0.0,
+                max_w: 100.0,
+                min_h: 0.0,
+                max_h: 60.0,
+            },
+        )
+        .expect("嵌套 Grid 应可测量");
+
+    assert_eq!((box_.children[0].w, box_.children[0].h), (100.0, 60.0));
+    assert_eq!(engine.max_measure_count(), 1);
+}
+
+#[test]
+fn grid_rejects_overlapping_explicit_items_and_auto_capacity_overflow() {
+    let one_cell = GridSpec::new([GridTrack::Fixed(10.0)], [GridTrack::Fixed(10.0)]);
+    let overlap = LayoutContainer::grid(
+        one_cell.clone(),
+        [
+            grid_item(1.0, 1.0, Some(GridItemPlacement::at(0, 0))),
+            grid_item(1.0, 1.0, Some(GridItemPlacement::at(0, 0))),
+        ],
+    );
+    assert!(matches!(
+        UiTree::new(overlap),
+        Err(UiBuildError::InvalidGrid)
+    ));
+
+    let overflow = LayoutContainer::grid(
+        one_cell,
+        [grid_item(1.0, 1.0, None), grid_item(1.0, 1.0, None)],
+    );
+    assert!(matches!(
+        UiTree::new(overflow),
+        Err(UiBuildError::InvalidGrid)
+    ));
+}
+
+#[test]
+fn grid_item_placement_is_rejected_outside_a_grid() {
+    let root = LayoutContainer::row([grid_item(1.0, 1.0, Some(GridItemPlacement::at(0, 0)))]);
+    assert!(matches!(
+        UiTree::new(root),
+        Err(UiBuildError::GridItemOutsideGrid)
+    ));
 }
 
 #[test]

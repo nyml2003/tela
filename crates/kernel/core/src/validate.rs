@@ -10,10 +10,10 @@
 //! - `Overlay` 仅在 Stack 容器内合法；Stack 必须存在 Content；
 //! - Frame / Expanded / Overlay / Spacer 的形状和 Wrap 的分配规则在构建期检查。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use tela_contract::{
-    BaseSize, ContentConcern, KeyStrategy, MinMax, NodeId, NodeKind, SemanticKey, Size,
-    UiBuildError, UiNode,
+    BaseSize, ContentConcern, GridItemPlacement, GridSpec, GridTrack, KeyStrategy, MinMax, NodeId,
+    NodeKind, SemanticKey, Size, TeleportSource, UiBuildError, UiNode,
 };
 
 use crate::identity::{IdentityAllocator, is_stable_scope};
@@ -46,6 +46,74 @@ pub(crate) fn validate(
     )?;
     allocator.end_frame();
     Ok(result)
+}
+
+/// 第二阶段的 Teleport 验证。
+///
+/// Anchor 使用的是构建完成后才能确定的稳定 key，因此它不能混在递归分配 key 的首阶段。
+/// 此处按同一 DFS 序建立父链，再验证嵌套、锚点存在性和 Portal 自引用。
+pub(crate) fn validate_teleport_references(
+    root: &UiNode,
+    keys: &[SemanticKey],
+) -> Result<(), UiBuildError> {
+    let mut nodes = Vec::with_capacity(keys.len());
+    let mut parents = Vec::with_capacity(keys.len());
+    collect_nodes_with_parents(root, None, &mut nodes, &mut parents);
+    let key_to_index: HashMap<&SemanticKey, usize> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect();
+
+    for (index, node) in nodes.iter().enumerate() {
+        let NodeKind::Teleport(spec) = &node.kind else {
+            continue;
+        };
+        if parents[index]
+            .iter()
+            .any(|ancestor| matches!(nodes[*ancestor].kind, NodeKind::Teleport(_)))
+        {
+            return Err(UiBuildError::NestedTeleport);
+        }
+        if !spec.placement.viewport_padding.is_finite()
+            || spec.placement.viewport_padding < 0.0
+            || !spec.placement.offset.x.is_finite()
+            || !spec.placement.offset.y.is_finite()
+        {
+            return Err(UiBuildError::InvalidTeleportPlacement);
+        }
+        let TeleportSource::Anchor(anchor_key) = &spec.source;
+        let Some(&anchor_index) = key_to_index.get(anchor_key) else {
+            return Err(UiBuildError::MissingTeleportAnchor(anchor_key.clone()));
+        };
+        if anchor_index == index || parents[anchor_index].contains(&index) {
+            return Err(UiBuildError::TeleportAnchorInsidePortal);
+        }
+        if matches!(nodes[anchor_index].kind, NodeKind::Teleport(_)) {
+            return Err(UiBuildError::TeleportAnchorIsPortal);
+        }
+    }
+    Ok(())
+}
+
+fn collect_nodes_with_parents<'a>(
+    node: &'a UiNode,
+    parent: Option<usize>,
+    nodes: &mut Vec<&'a UiNode>,
+    parents: &mut Vec<Vec<usize>>,
+) {
+    let index = nodes.len();
+    nodes.push(node);
+    let mut ancestors = parent
+        .map(|parent| parents[parent].clone())
+        .unwrap_or_default();
+    if let Some(parent) = parent {
+        ancestors.push(parent);
+    }
+    parents.push(ancestors);
+    for child in &node.children {
+        collect_nodes_with_parents(child, Some(index), nodes, parents);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -149,6 +217,18 @@ fn validate_node(
         {
             return Err(UiBuildError::InvalidLayoutShape);
         }
+        if layout.grid_item.is_some() && !matches!(parent_kind, Some(NodeKind::Grid(_))) {
+            return Err(UiBuildError::GridItemOutsideGrid);
+        }
+        if layout.text_constraint.is_some_and(|constraint| {
+            !matches!(node.kind, NodeKind::Text) || !constraint.is_valid()
+        }) {
+            return Err(UiBuildError::InvalidTextConstraint);
+        }
+    }
+
+    if let NodeKind::Grid(spec) = &node.kind {
+        validate_grid(node, spec)?;
     }
 
     validate_layout_shape(node, parent_kind)?;
@@ -163,17 +243,19 @@ fn validate_node(
         return Err(UiBuildError::InvalidStackContent);
     }
 
-    // key：业务 semantic_key 优先（空 key 视为未提供，保证 ids/keys 数组对齐）；
-    // auto-stable 作用域内走稳定分配；否则 auto-path。
-    let key = if let Some(scope) = stable_scope {
-        allocator.assign(scope, relative_path, node)
-    } else {
-        node.identity
-            .as_ref()
-            .and_then(|i| i.semantic_key.clone())
-            .filter(|k| !k.0.is_empty())
+    // 显式 semantic_key 总是优先，即使节点位于 AutoStableIdentity 作用域内。
+    // 这样 Application 可以为可交互 Part 声明跨帧稳定路由；自动分配只服务未命名的
+    // 动态子项，不能吞掉组件自身的语义身份。
+    let explicit_key = node
+        .identity
+        .as_ref()
+        .and_then(|identity| identity.semantic_key.clone())
+        .filter(|key| !key.0.is_empty());
+    let key = explicit_key.unwrap_or_else(|| {
+        stable_scope
+            .map(|scope| allocator.assign(scope, relative_path, node))
             .unwrap_or_else(|| SemanticKey(path.to_string()))
-    };
+    });
     if !key.0.is_empty() {
         if !seen_keys.insert(key.clone()) {
             return Err(UiBuildError::DuplicateKey(key));
@@ -292,6 +374,89 @@ fn validate_layout_shape(
         }
         _ => Ok(()),
     }
+}
+
+/// Grid 的轨道和直接子项位置在构建期一次性验证。自动项先让所有显式位置占位，
+/// 再按行优先填充，因此声明顺序不会让自动项意外覆盖后续的显式项。
+fn validate_grid(node: &UiNode, spec: &GridSpec) -> Result<(), UiBuildError> {
+    if spec.columns.is_empty()
+        || spec.rows.is_empty()
+        || !spec.column_gap.is_finite()
+        || !spec.row_gap.is_finite()
+        || spec.column_gap < 0.0
+        || spec.row_gap < 0.0
+        || spec.columns.iter().any(|track| !valid_grid_track(*track))
+        || spec.rows.iter().any(|track| !valid_grid_track(*track))
+    {
+        return Err(UiBuildError::InvalidGrid);
+    }
+
+    let columns = spec.columns.len();
+    let rows = spec.rows.len();
+    // Keep allocation explicit rather than deriving capacity from child counts: manual spans
+    // may consume multiple cells and manual entries can be interleaved with automatic entries.
+    let mut occupied = vec![false; columns * rows];
+    for child in &node.children {
+        if let Some(placement) = child.layout.as_ref().and_then(|layout| layout.grid_item) {
+            occupy_grid_cells(&mut occupied, columns, rows, placement)?;
+        }
+    }
+    for child in &node.children {
+        if child
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.grid_item)
+            .is_none()
+        {
+            let Some(index) = first_free_grid_cell(&occupied) else {
+                return Err(UiBuildError::InvalidGrid);
+            };
+            occupied[index] = true;
+        }
+    }
+    Ok(())
+}
+
+fn valid_grid_track(track: GridTrack) -> bool {
+    match track {
+        GridTrack::Fixed(value) => value.is_finite() && value >= 0.0,
+        GridTrack::Flex(weight) => weight.is_finite() && weight > 0.0,
+    }
+}
+
+fn occupy_grid_cells(
+    occupied: &mut [bool],
+    columns: usize,
+    rows: usize,
+    placement: GridItemPlacement,
+) -> Result<(), UiBuildError> {
+    let column = usize::from(placement.column);
+    let row = usize::from(placement.row);
+    let column_span = usize::from(placement.column_span);
+    let row_span = usize::from(placement.row_span);
+    if column_span == 0
+        || row_span == 0
+        || column >= columns
+        || row >= rows
+        || column.saturating_add(column_span) > columns
+        || row.saturating_add(row_span) > rows
+    {
+        return Err(UiBuildError::InvalidGrid);
+    }
+    for y in row..row + row_span {
+        for x in column..column + column_span {
+            let cell = &mut occupied[y * columns + x];
+            if *cell {
+                return Err(UiBuildError::InvalidGrid);
+            }
+            *cell = true;
+        }
+    }
+    Ok(())
+}
+
+fn first_free_grid_cell(occupied: &[bool]) -> Option<usize> {
+    occupied.iter().position(|occupied| !occupied)
 }
 
 /// 原语内容形状匹配（见 003-场景树与节点模型 5）。

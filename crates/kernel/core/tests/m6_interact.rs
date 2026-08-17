@@ -2,14 +2,18 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    Color, Fill, FocusDirection, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec,
-    IdentityConcern, InputEvent, InteractConcern, KeyStrategy, KeyboardIntent, KeyboardIntentEvent,
-    LayoutConcern, Point, SemanticKey, ShortcutId, Size, TextMeasureRequest, TextMeasurer,
-    TextMetrics, UiAction, Viewport, VirtualListSpec, VisualConcern,
+    BindId, Color, Fill, FocusDirection, FocusEdge, FocusGraph, FocusPort, FocusRef,
+    FocusScopeSpec, GestureAxis, GestureConfig, GestureKind, GesturePhase, IdentityConcern,
+    InputEvent, InteractConcern, KeyStrategy, KeyboardIntent, KeyboardIntentEvent, LayoutConcern,
+    Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase, SemanticKey,
+    ShortcutId, Size, TextInputEvent, TextInputKind, TextInputSpec, TextMeasureRequest,
+    TextMeasurer, TextMetrics, TextSelection, UiAction, Value, Viewport, VirtualListSpec,
+    VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{
-    UiTree, ViewStateStore, ensure_modal_focus, handle_input, restore_focus, save_focus,
+    DefaultApplicationProfile, UiTree, ViewStateStore, ensure_modal_focus, handle_input,
+    restore_focus, save_focus,
 };
 
 const VIEWPORT: Viewport = Viewport {
@@ -82,6 +86,42 @@ fn clickable_rect(width: f32, height: f32) -> tela_contract::UiNode {
     node
 }
 
+fn keyed_interactive_rect(
+    key: &str,
+    width: f32,
+    height: f32,
+    interact: InteractConcern,
+) -> tela_contract::UiNode {
+    LayoutContainer::frame(rect(width, height))
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey(key.to_owned())),
+            ..IdentityConcern::default()
+        })
+        .interact(interact)
+        .into_node()
+}
+
+fn touch(
+    pointer_id: u64,
+    phase: PointerPhase,
+    position: Point,
+    timestamp_micros: u64,
+) -> PointerEvent {
+    PointerEvent::new(
+        PointerId(pointer_id),
+        PointerKind::Touch,
+        phase,
+        position,
+        if phase == PointerPhase::Up || phase == PointerPhase::Cancel {
+            PointerButtons::NONE
+        } else {
+            PointerButtons::PRIMARY
+        },
+        timestamp_micros,
+        Point { x: 0.0, y: 0.0 },
+    )
+}
+
 fn key(intent: KeyboardIntent) -> InputEvent {
     InputEvent::Keyboard(KeyboardIntentEvent {
         intent,
@@ -117,38 +157,115 @@ impl<T: Into<tela_contract::UiNode>> IntoNode for T {}
 // ---------- 验收：命中测试 → UiAction 序列 ----------
 
 #[test]
-fn pointer_down_hits_clickable_and_focusable() {
+fn pointer_sequence_defers_click_until_release_and_focuses_on_down() {
     // Row 排布避免叠放（Group 为叠放容器）。
     let tree = UiTree::new(LayoutContainer::row([
         clickable_rect(50.0, 20.0),
         focusable_rect(60.0, 20.0, 0),
     ]))
     .unwrap();
-    let frame = frame(&tree);
+    let scroll_frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    // 点击第一个按钮（可点击）：命中测试 → Click 动作。
-    let actions = handle_input(
+    // 按下只交付原始帧；Click 必须由同一稳定命中目标的 Up 生成。
+    let down = handle_input(
         &tree,
-        &frame,
+        &scroll_frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
-            position: Point { x: 10.0, y: 10.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 10.0, y: 10.0 })),
     );
-    assert!(actions.iter().any(|a| matches!(a, UiAction::Click { .. })));
-    // 点击第二个（可聚焦）：焦点转移。
+    assert!(
+        down.iter()
+            .any(|action| matches!(action, UiAction::Pointer { .. }))
+    );
+    assert!(
+        !down
+            .iter()
+            .any(|action| matches!(action, UiAction::Click { .. })),
+        "Down 不能被预判成 Click"
+    );
+    let up = handle_input(
+        &tree,
+        &scroll_frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 10.0, y: 10.0 })),
+    );
+    assert!(
+        up.iter()
+            .any(|action| matches!(action, UiAction::Click { .. }))
+    );
+
+    // 按下第二个（可聚焦）：焦点在 Down 时转移。
     let actions = handle_input(
         &tree,
-        &frame,
+        &scroll_frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
-            position: Point { x: 60.0, y: 10.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 60.0, y: 10.0 })),
     );
     assert!(
         actions
             .iter()
             .any(|a| matches!(a, UiAction::FocusChanged { .. }))
+    );
+}
+
+#[test]
+fn focused_text_input_emits_lifecycle_and_only_edits_write_the_bound_field() {
+    let tree = UiTree::new(keyed_interactive_rect(
+        "filter.input",
+        120.0,
+        28.0,
+        InteractConcern {
+            focusable: true,
+            input: Some(
+                TextInputSpec::new(TextInputKind::Search).selection(TextSelection::collapsed(2)),
+            ),
+            bind_id: Some(BindId("filter.query".to_owned())),
+            ..InteractConcern::default()
+        },
+    ))
+    .unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 8.0, y: 8.0 })),
+    );
+
+    let edit = TextInputEvent::Edit {
+        value: "te".to_owned(),
+        selection: TextSelection::collapsed(2),
+        composing: true,
+    };
+    let actions = handle_input(&tree, &frame, &mut state, &InputEvent::Text(edit.clone()));
+    let node_id = tree
+        .node_id_for_key(&SemanticKey("filter.input".to_owned()))
+        .expect("focused input key");
+    assert_eq!(
+        actions,
+        vec![
+            UiAction::TextInput {
+                node_id,
+                event: edit,
+            },
+            UiAction::ValueChange {
+                bind_id: BindId("filter.query".to_owned()),
+                value: Value::String("te".to_owned()),
+            },
+        ]
+    );
+
+    let cancel = TextInputEvent::Cancel {
+        selection: TextSelection::collapsed(2),
+    };
+    assert_eq!(
+        handle_input(&tree, &frame, &mut state, &InputEvent::Text(cancel.clone())),
+        vec![UiAction::TextInput {
+            node_id,
+            event: cancel,
+        }],
+        "取消保留组件编辑生命周期，但不得写入 BindId"
     );
 }
 
@@ -174,9 +291,7 @@ fn hit_test_respects_clip() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
-            position: Point { x: 10.0, y: 10.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 10.0, y: 10.0 })),
     );
     assert!(!actions.is_empty());
 }
@@ -218,10 +333,10 @@ fn scroll_bubbles_from_child_button_to_virtual_list() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Scroll {
-            position: Point { x: 10.0, y: 10.0 },
-            delta: Point { x: 0.0, y: 12.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_scroll(
+            Point { x: 10.0, y: 10.0 },
+            Point { x: 0.0, y: 12.0 },
+        )),
     );
     assert!(actions.iter().any(
         |action| matches!(action, UiAction::Scroll { node_id, .. } if *node_id == tree.node_ids()[0])
@@ -482,23 +597,34 @@ fn modal_blocks_lower_layer_input() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
-            position: Point { x: 90.0, y: 90.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 90.0, y: 90.0 })),
+    );
+    let blocked_up = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 90.0, y: 90.0 })),
     );
     assert!(
-        !actions.iter().any(|a| matches!(a, UiAction::Click { .. })),
+        !actions.iter().any(|a| matches!(a, UiAction::Click { .. }))
+            && !blocked_up
+                .iter()
+                .any(|a| matches!(a, UiAction::Click { .. })),
         "下层输入被模态拦截"
     );
     // 关闭模态后 → 下层可点击。
     state.pop_modal();
+    let _ = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 90.0, y: 90.0 })),
+    );
     let actions = handle_input(
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
-            position: Point { x: 90.0, y: 90.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 90.0, y: 90.0 })),
     );
     assert!(
         actions.iter().any(|a| matches!(a, UiAction::Click { .. })),
@@ -622,11 +748,16 @@ fn focus_graph_cross_scope_rejected_at_build() {
 fn teleport_focus_chain_mounts_to_modal_host_scope() {
     // Teleport 内可聚焦节点：焦点链重挂载到 ModalHost 作用域（Tab 可进入，见 008-2.10）。
     let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {
-        source: tela_contract::TeleportSource::Node(tela_contract::NodeId(0)),
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("modal-host".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
     })
     .children([focusable_item("menu-item", 50.0, 20.0)])
     .into_node();
     let host = LogicalContainer::modal_host()
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("modal-host".to_owned())),
+            ..IdentityConcern::default()
+        })
         .children([focusable_item("page-btn", 50.0, 20.0), teleported]);
     let tree = UiTree::new(host).unwrap();
     let frame = frame(&tree);
@@ -760,9 +891,7 @@ fn hover_emits_enter_and_leave() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Move {
-            position: Point { x: 10.0, y: 10.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_move(Point { x: 10.0, y: 10.0 })),
     );
     assert!(
         a.iter()
@@ -773,9 +902,7 @@ fn hover_emits_enter_and_leave() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Move {
-            position: Point { x: 60.0, y: 10.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_move(Point { x: 60.0, y: 10.0 })),
     );
     assert!(
         b.iter()
@@ -792,9 +919,7 @@ fn hover_emits_enter_and_leave() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Move {
-            position: Point { x: 190.0, y: 90.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_move(Point { x: 190.0, y: 90.0 })),
     );
     assert!(
         c.iter()
@@ -812,17 +937,357 @@ fn hoverable_rect(width: f32, height: f32) -> tela_contract::UiNode {
     node
 }
 
+// ---------- 原始指针、捕获与手势仲裁 ----------
+
+#[test]
+fn pointer_capture_routes_raw_events_and_releases_on_terminal_or_unmount() {
+    let capture_key = SemanticKey("capture".to_owned());
+    let tree = UiTree::new(LayoutContainer::row([
+        keyed_interactive_rect(
+            "capture",
+            50.0,
+            20.0,
+            InteractConcern {
+                clickable: true,
+                pointer_capture: true,
+                ..InteractConcern::default()
+            },
+        ),
+        clickable_rect(50.0, 20.0),
+    ]))
+    .unwrap();
+    let frame = frame(&tree);
+    let captured_id = tree.node_id_for_key(&capture_key).unwrap();
+    let mut state = ViewStateStore::new();
+
+    let _ = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 10.0, y: 10.0 })),
+    );
+    assert_eq!(state.captured_pointer_key(PointerId(0)), Some(&capture_key));
+
+    let moved = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Move,
+            Point { x: 90.0, y: 10.0 },
+            PointerButtons::PRIMARY,
+            10,
+            Point { x: 0.0, y: 0.0 },
+        )),
+    );
+    assert!(moved.iter().any(
+        |action| matches!(action, UiAction::Pointer { node_id, event }
+            if *node_id == captured_id && event.phase == PointerPhase::Move)
+    ));
+
+    let released = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 90.0, y: 10.0 })),
+    );
+    assert!(released.iter().any(
+        |action| matches!(action, UiAction::Pointer { node_id, event }
+            if *node_id == captured_id && event.phase == PointerPhase::Up)
+    ));
+    assert!(
+        !released
+            .iter()
+            .any(|action| matches!(action, UiAction::Click { .. })),
+        "释放位置不再命中原目标时不得产生 Click"
+    );
+    assert_eq!(state.captured_pointer_key(PointerId(0)), None);
+
+    let _ = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 10.0, y: 10.0 })),
+    );
+    let _ = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Cancel,
+            Point { x: 10.0, y: 10.0 },
+            PointerButtons::NONE,
+            20,
+            Point { x: 0.0, y: 0.0 },
+        )),
+    );
+    assert_eq!(state.captured_pointer_key(PointerId(0)), None);
+
+    let _ = handle_input(
+        &tree,
+        &frame,
+        &mut state,
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 10.0, y: 10.0 })),
+    );
+    let unmounted = UiTree::new(clickable_rect(50.0, 20.0)).unwrap();
+    DefaultApplicationProfile::new().reconcile_tree(&unmounted, &mut state);
+    assert_eq!(
+        state.captured_pointer_key(PointerId(0)),
+        None,
+        "节点卸载必须释放已经捕获的指针"
+    );
+}
+
+#[test]
+fn nested_scroll_prefers_inner_pan_and_explicit_swipe_wins_conflict() {
+    let inner_key = SemanticKey("inner-scroll".to_owned());
+    let inner = LayoutContainer::scroll_view([keyed_interactive_rect(
+        "scroll-leaf",
+        80.0,
+        80.0,
+        InteractConcern {
+            clickable: true,
+            ..InteractConcern::default()
+        },
+    )])
+    .identity(IdentityConcern {
+        semantic_key: Some(inner_key.clone()),
+        ..IdentityConcern::default()
+    })
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(80.0)),
+        height: Some(Size::fixed(40.0)),
+        ..LayoutConcern::default()
+    })
+    .into_node();
+    let tree = UiTree::new(
+        LayoutContainer::scroll_view([inner])
+            .identity(IdentityConcern {
+                semantic_key: Some(SemanticKey("outer-scroll".to_owned())),
+                ..IdentityConcern::default()
+            })
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(100.0)),
+                height: Some(Size::fixed(60.0)),
+                ..LayoutConcern::default()
+            }),
+    )
+    .unwrap();
+    let scroll_frame = frame(&tree);
+    let inner_id = tree.node_id_for_key(&inner_key).unwrap();
+    let mut state = ViewStateStore::new();
+    let _ = handle_input(
+        &tree,
+        &scroll_frame,
+        &mut state,
+        &InputEvent::Pointer(touch(1, PointerPhase::Down, Point { x: 10.0, y: 10.0 }, 10)),
+    );
+    let pan = handle_input(
+        &tree,
+        &scroll_frame,
+        &mut state,
+        &InputEvent::Pointer(touch(1, PointerPhase::Move, Point { x: 10.0, y: 30.0 }, 20)),
+    );
+    assert!(pan.iter().any(
+        |action| matches!(action, UiAction::Gesture { node_id, event }
+            if *node_id == inner_id && event.kind == GestureKind::Pan && event.phase == GesturePhase::Start)
+    ));
+    assert!(pan.iter().any(
+        |action| matches!(action, UiAction::Scroll { node_id, delta }
+            if *node_id == inner_id && *delta == Point { x: 0.0, y: -20.0 })
+    ));
+
+    let swipe_key = SemanticKey("swipe-leaf".to_owned());
+    let explicit = UiTree::new(
+        LayoutContainer::scroll_view([keyed_interactive_rect(
+            "swipe-leaf",
+            80.0,
+            80.0,
+            InteractConcern {
+                clickable: true,
+                gestures: GestureConfig {
+                    swipe: true,
+                    axis: GestureAxis::Horizontal,
+                    priority: 1,
+                    ..GestureConfig::default()
+                },
+                ..InteractConcern::default()
+            },
+        )])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(80.0)),
+            height: Some(Size::fixed(40.0)),
+            ..LayoutConcern::default()
+        }),
+    )
+    .unwrap();
+    let explicit_frame = frame(&explicit);
+    let swipe_id = explicit.node_id_for_key(&swipe_key).unwrap();
+    let mut explicit_state = ViewStateStore::new();
+    let _ = handle_input(
+        &explicit,
+        &explicit_frame,
+        &mut explicit_state,
+        &InputEvent::Pointer(touch(2, PointerPhase::Down, Point { x: 10.0, y: 10.0 }, 10)),
+    );
+    let swipe = handle_input(
+        &explicit,
+        &explicit_frame,
+        &mut explicit_state,
+        &InputEvent::Pointer(touch(2, PointerPhase::Move, Point { x: 32.0, y: 10.0 }, 20)),
+    );
+    assert!(swipe.iter().any(
+        |action| matches!(action, UiAction::Gesture { node_id, event }
+            if *node_id == swipe_id && event.kind == GestureKind::Swipe && event.phase == GesturePhase::Start)
+    ));
+    assert!(
+        !swipe
+            .iter()
+            .any(|action| matches!(action, UiAction::Scroll { .. })),
+        "显式水平 Swipe 不能被低优先级滚动 Pan 抢走"
+    );
+}
+
+#[test]
+fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
+    let long_press_key = SemanticKey("long-press".to_owned());
+    let long_press_tree = UiTree::new(keyed_interactive_rect(
+        "long-press",
+        80.0,
+        40.0,
+        InteractConcern {
+            gestures: GestureConfig {
+                long_press: true,
+                ..GestureConfig::default()
+            },
+            ..InteractConcern::default()
+        },
+    ))
+    .unwrap();
+    let long_press_frame = frame(&long_press_tree);
+    let long_press_id = long_press_tree.node_id_for_key(&long_press_key).unwrap();
+    let mut long_press_state = ViewStateStore::new();
+    let _ = handle_input(
+        &long_press_tree,
+        &long_press_frame,
+        &mut long_press_state,
+        &InputEvent::Pointer(touch(7, PointerPhase::Down, Point { x: 10.0, y: 10.0 }, 10)),
+    );
+    let held = handle_input(
+        &long_press_tree,
+        &long_press_frame,
+        &mut long_press_state,
+        &InputEvent::Pointer(touch(
+            7,
+            PointerPhase::Move,
+            Point { x: 10.0, y: 10.0 },
+            500_010,
+        )),
+    );
+    assert!(held.iter().any(
+        |action| matches!(action, UiAction::Gesture { node_id, event }
+            if *node_id == long_press_id && event.kind == GestureKind::LongPress && event.phase == GesturePhase::Start)
+    ));
+    let ended = handle_input(
+        &long_press_tree,
+        &long_press_frame,
+        &mut long_press_state,
+        &InputEvent::Pointer(touch(
+            7,
+            PointerPhase::Up,
+            Point { x: 10.0, y: 10.0 },
+            500_011,
+        )),
+    );
+    assert!(ended.iter().any(
+        |action| matches!(action, UiAction::Gesture { node_id, event }
+            if *node_id == long_press_id && event.kind == GestureKind::LongPress && event.phase == GesturePhase::End)
+    ));
+
+    let pinch_key = SemanticKey("pinch".to_owned());
+    let pinch_tree = UiTree::new(keyed_interactive_rect(
+        "pinch",
+        100.0,
+        60.0,
+        InteractConcern {
+            gestures: GestureConfig {
+                pinch: true,
+                ..GestureConfig::default()
+            },
+            ..InteractConcern::default()
+        },
+    ))
+    .unwrap();
+    let pinch_frame = frame(&pinch_tree);
+    let pinch_id = pinch_tree.node_id_for_key(&pinch_key).unwrap();
+    let mut pinch_state = ViewStateStore::new();
+    let _ = handle_input(
+        &pinch_tree,
+        &pinch_frame,
+        &mut pinch_state,
+        &InputEvent::Pointer(touch(
+            11,
+            PointerPhase::Down,
+            Point { x: 20.0, y: 20.0 },
+            10,
+        )),
+    );
+    let began = handle_input(
+        &pinch_tree,
+        &pinch_frame,
+        &mut pinch_state,
+        &InputEvent::Pointer(touch(
+            12,
+            PointerPhase::Down,
+            Point { x: 40.0, y: 20.0 },
+            20,
+        )),
+    );
+    assert!(began.iter().any(
+        |action| matches!(action, UiAction::Gesture { node_id, event }
+            if *node_id == pinch_id && event.kind == GestureKind::Pinch && event.phase == GesturePhase::Start)
+    ));
+    let updated = handle_input(
+        &pinch_tree,
+        &pinch_frame,
+        &mut pinch_state,
+        &InputEvent::Pointer(touch(
+            12,
+            PointerPhase::Move,
+            Point { x: 60.0, y: 20.0 },
+            30,
+        )),
+    );
+    assert!(updated.iter().any(
+        |action| matches!(action, UiAction::Gesture { node_id, event }
+            if *node_id == pinch_id
+                && event.kind == GestureKind::Pinch
+                && event.phase == GesturePhase::Update
+                && (event.scale - 2.0).abs() < f32::EPSILON)
+    ));
+}
+
 // ---------- Code review 回归：Teleport 渲染提升 / 点击外部 ----------
 
 #[test]
 fn teleport_renders_on_top_layer() {
     // Teleport 子树绘制在普通内容之后（提升至顶层，见 008-3）。
     let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {
-        source: tela_contract::TeleportSource::Node(tela_contract::NodeId(0)),
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("modal-host".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
     })
     .children([clickable_rect(50.0, 20.0)])
     .into_node();
-    let host = LogicalContainer::modal_host().children([clickable_rect(100.0, 40.0), teleported]);
+    let host = LogicalContainer::modal_host()
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("modal-host".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .children([clickable_rect(100.0, 40.0), teleported]);
     let tree = UiTree::new(host).unwrap();
     let frame = frame(&tree);
     // Teleport 内按钮命令在普通内容之后（后绘制者在上）。
@@ -836,11 +1301,17 @@ fn teleport_renders_on_top_layer() {
 #[test]
 fn teleport_click_outside_emits_action() {
     let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {
-        source: tela_contract::TeleportSource::MouseFollow,
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("modal-host".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
     })
     .children([clickable_rect(50.0, 20.0)])
     .into_node();
-    let host = LogicalContainer::modal_host().children([clickable_rect(100.0, 40.0), teleported]);
+    let host = LogicalContainer::modal_host()
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("modal-host".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .children([clickable_rect(100.0, 40.0), teleported]);
     let tree = UiTree::new(host).unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
@@ -849,9 +1320,7 @@ fn teleport_click_outside_emits_action() {
         &tree,
         &frame,
         &mut state,
-        &InputEvent::Pointer(tela_contract::PointerEvent::Down {
-            position: Point { x: 190.0, y: 90.0 },
-        }),
+        &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 190.0, y: 90.0 })),
     );
     assert!(
         actions

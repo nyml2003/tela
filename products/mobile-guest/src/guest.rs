@@ -33,37 +33,8 @@ fn reset_app() {
 fn apply_event(app: &mut App, event: AppEvent) -> bool {
     match event {
         AppEvent::Viewport { width, height } => app.set_viewport(width, height),
-        AppEvent::PointerDown { x, y } => {
-            app.handle_pointer(tela_contract::PointerEvent::Down {
-                position: tela_contract::Point { x, y },
-            });
-            true
-        }
-        AppEvent::PointerUp { x, y } => {
-            app.handle_pointer(tela_contract::PointerEvent::Up {
-                position: tela_contract::Point { x, y },
-            });
-            true
-        }
-        AppEvent::PointerMove { x, y } => {
-            app.handle_pointer(tela_contract::PointerEvent::Move {
-                position: tela_contract::Point { x, y },
-            });
-            true
-        }
-        AppEvent::PointerScroll {
-            x,
-            y,
-            delta_x,
-            delta_y,
-        } => {
-            app.handle_pointer(tela_contract::PointerEvent::Scroll {
-                position: tela_contract::Point { x, y },
-                delta: tela_contract::Point {
-                    x: delta_x,
-                    y: delta_y,
-                },
-            });
+        AppEvent::Pointer(pointer) => {
+            app.handle_pointer(pointer.into());
             true
         }
         AppEvent::KeyDown { physical_key, .. } => app.handle_key(physical_key) != 0,

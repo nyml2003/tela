@@ -1,8 +1,8 @@
 //! View 组件共用的设计令牌与小型构件。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, IconName, IconProvider, InteractConcern, LayoutConcern, Size,
-    TextContent, UiNode,
+    BorderRadius, Color, IconName, IconProvider, IdentityConcern, InteractConcern, KeyStrategy,
+    LayoutConcern, SemanticKey, Size, TextContent, UiNode, UpdateMode,
 };
 use tela_core::builder::{LayoutContainer, Primitive};
 use tela_desktop_ui_kit::Text;
@@ -108,7 +108,7 @@ pub fn spacer() -> UiNode {
 pub fn command_button(
     label: &str,
     width: f32,
-    bind_id: &str,
+    action_key: &str,
     disabled: bool,
     destructive: bool,
 ) -> UiNode {
@@ -126,9 +126,11 @@ pub fn command_button(
         .border_radius(CONTROL_RADIUS)
         .text_metrics(12.0, 15.0)
         .into_node();
-    if let Some(interact) = &mut node.interact {
-        interact.bind_id = Some(BindId(bind_id.to_owned()));
-    }
+    node.identity = Some(IdentityConcern {
+        key_strategy: KeyStrategy::SemanticId,
+        semantic_key: Some(SemanticKey(action_key.to_owned())),
+        update_mode: UpdateMode::Dirty,
+    });
     node
 }
 
@@ -159,12 +161,24 @@ pub fn command_button_palette(destructive: bool) -> ButtonPalette {
     }
 }
 
-pub fn clickable(mut node: UiNode, bind_id: String) -> UiNode {
+pub fn clickable(mut node: UiNode, action_key: impl Into<String>) -> UiNode {
+    let action_key = SemanticKey(action_key.into());
+    if node
+        .identity
+        .as_ref()
+        .and_then(|identity| identity.semantic_key.as_ref())
+        .is_none()
+    {
+        node.identity = Some(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            semantic_key: Some(action_key),
+            update_mode: UpdateMode::Dirty,
+        });
+    }
     node.interact = Some(InteractConcern {
         clickable: true,
         hoverable: true,
         focusable: true,
-        bind_id: Some(BindId(bind_id)),
         ..InteractConcern::default()
     });
     node

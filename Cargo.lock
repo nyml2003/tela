@@ -2342,8 +2342,10 @@ dependencies = [
  "tela-core",
  "tela-desktop-ui-kit",
  "tela-icon-resources",
+ "tela-render-raster",
  "tela-text-resources",
  "tela-ui-foundation",
+ "tela-ui-headless",
 ]
 
 [[package]]
@@ -2363,6 +2365,7 @@ dependencies = [
  "tela-contract",
  "tela-core",
  "tela-ui-foundation",
+ "tela-ui-headless",
 ]
 
 [[package]]
@@ -2400,8 +2403,10 @@ dependencies = [
  "tela-core",
  "tela-icon-resources",
  "tela-mobile-ui-kit",
+ "tela-render-raster",
  "tela-text-resources",
  "tela-ui-foundation",
+ "tela-ui-headless",
 ]
 
 [[package]]
@@ -2411,6 +2416,7 @@ dependencies = [
  "tela-contract",
  "tela-core",
  "tela-ui-foundation",
+ "tela-ui-headless",
 ]
 
 [[package]]
@@ -2570,6 +2576,14 @@ dependencies = [
 
 [[package]]
 name = "tela-ui-foundation"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
+]
+
+[[package]]
+name = "tela-ui-headless"
 version = "0.1.0"
 dependencies = [
  "tela-contract",

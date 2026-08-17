@@ -27,6 +27,8 @@ pub enum NodeKind {
     Column,
     /// 布局容器：水平自然尺寸换行；不参与剩余空间分配。
     Wrap,
+    /// 布局容器：固定/弹性轨道、单元格跨度与项目对齐。
+    Grid(crate::GridSpec),
     /// 布局容器：单子节点盒，负责显式尺寸与盒模型边界。
     Frame,
     /// 布局包装器：在 Row/Column 已知主轴时分配剩余空间。
@@ -80,6 +82,7 @@ impl NodeKind {
             NodeKind::Row
                 | NodeKind::Column
                 | NodeKind::Wrap
+                | NodeKind::Grid(_)
                 | NodeKind::Frame
                 | NodeKind::Expanded
                 | NodeKind::Spacer
@@ -230,20 +233,85 @@ impl Default for ShortcutScopeSpec {
     }
 }
 
-/// Teleport source 锚点（见 008-交互焦点与宿主接口 2.10）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Teleport 的位置来源。
+///
+/// 锚点使用跨帧稳定的 `SemanticKey`，而非仅在本帧有效的 `NodeId`。这使 Portal
+/// 在列表重排、滚动和树重建后仍能在当前帧解析到正确的位置。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TeleportSource {
-    /// 绑定自身内部源锚点节点。
-    Node(NodeId),
-    /// 鼠标跟随浮层（锚点偏移为纯视觉偏移）。
-    MouseFollow,
+    /// 绑定当前树中一个稳定语义锚点。
+    Anchor(crate::SemanticKey),
+}
+
+/// 浮层相对锚点的主方向。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnchorSide {
+    /// 浮层位于锚点上方。
+    Top,
+    /// 浮层位于锚点右侧。
+    Right,
+    /// 浮层位于锚点下方。
+    #[default]
+    Bottom,
+    /// 浮层位于锚点左侧。
+    Left,
+}
+
+/// 浮层在锚点边缘上的交叉轴对齐方式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnchorAlign {
+    /// 与锚点交叉轴起点对齐。
+    Start,
+    /// 与锚点交叉轴中心对齐。
+    #[default]
+    Center,
+    /// 与锚点交叉轴终点对齐。
+    End,
+}
+
+/// 锚定浮层的位置策略。
+///
+/// 解析顺序固定为：按 `side`/`align` 生成首选位置，必要时 `flip`，随后在交叉轴
+/// `shift`，最后用 `clamp` 限制到带内边距的视口。这样行为不依赖某个 Kit 或 Target。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnchoredPlacement {
+    /// 首选主方向。
+    pub side: AnchorSide,
+    /// 交叉轴对齐。
+    pub align: AnchorAlign,
+    /// 在计算出的首选位置上附加的逻辑像素位移。
+    pub offset: PixelOffset,
+    /// 主方向发生溢出时是否尝试对侧。
+    pub flip: bool,
+    /// 是否仅沿交叉轴移动，以减少视口溢出。
+    pub shift: bool,
+    /// 是否在最后将两个轴都限制在视口范围内。
+    pub clamp: bool,
+    /// `shift`/`clamp` 与视口边缘之间保留的最小逻辑像素。
+    pub viewport_padding: f32,
+}
+
+impl Default for AnchoredPlacement {
+    fn default() -> Self {
+        Self {
+            side: AnchorSide::Bottom,
+            align: AnchorAlign::Center,
+            offset: PixelOffset::default(),
+            flip: true,
+            shift: true,
+            clamp: true,
+            viewport_padding: 0.0,
+        }
+    }
 }
 
 /// `Teleport` 配置。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TeleportSpec {
     /// 源锚点。
     pub source: TeleportSource,
+    /// 相对锚点的浮层位置策略。
+    pub placement: AnchoredPlacement,
 }
 
 /// 虚拟列表容器配置（见 006-布局引擎 6）。
@@ -354,6 +422,15 @@ pub struct LayoutConcern {
     pub gap: f32,
     /// Row/Column 的交叉轴对齐。其他节点必须保持默认值。
     pub cross_align: crate::CrossAlign,
+    /// Grid 直接子项的显式单元格位置；`None` = 按行优先自动放置。
+    ///
+    /// 该字段只允许挂在 Grid 的直接子项上。Grid 自身的轨道属于 `NodeKind::Grid`，
+    /// 因此位置声明不会把多种布局算法混入同一个容器配置。
+    pub grid_item: Option<crate::GridItemPlacement>,
+    /// 文本节点的行数/省略约束；其他节点必须为 `None`。
+    ///
+    /// 行数、可测量截断与裁剪都由 Kernel 统一投影，Renderer 不需要自行猜测文字边界。
+    pub text_constraint: Option<crate::TextConstraint>,
     /// 裁剪容器开关（滚动/裁剪容器，命令级预合并 clip rect 表达）。
     pub clip: bool,
     /// 内容溢出控制。
@@ -370,6 +447,8 @@ impl Default for LayoutConcern {
             border_width: 0.0,
             gap: 0.0,
             cross_align: crate::CrossAlign::Start,
+            grid_item: None,
+            text_constraint: None,
             clip: false,
             overflow: crate::Overflow::Visible,
         }
@@ -443,8 +522,14 @@ pub struct InteractConcern {
     pub focusable: bool,
     /// 焦点序：独立调 Tab 顺序，`-1` 移出 Tab 序列（见 008 2.10）。
     pub tab_index: i16,
-    /// 文本输入节点（IME/文本走宿主端口）。
-    pub text_input: bool,
+    /// 文本输入语义（IME、selection 与取消通过宿主/Kernel 文本通道传递）。
+    ///
+    /// `None` 表示该节点不是文本输入；输入类型不能再退化为一个无法指导 Host 的 bool。
+    pub input: Option<crate::TextInputSpec>,
+    /// 按下后是否请求 Kernel 将该 `PointerId` 捕获到本节点，直到 Up/Cancel/卸载。
+    pub pointer_capture: bool,
+    /// 节点申请的通用手势能力；默认不参与手势仲裁。
+    pub gestures: crate::GestureConfig,
     /// 模态节点：模态栈拦截下层输入。
     pub modal: bool,
     /// 业务绑定标识：唯一业务变更通道（见 012-业务数据绑定）。

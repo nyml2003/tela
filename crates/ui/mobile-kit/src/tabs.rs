@@ -1,7 +1,8 @@
 //! Vant 风格的移动标签栏。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, InteractConcern, LayoutConcern, Size, UiNode, VisualConcern,
+    BorderRadius, Color, Fill, InteractConcern, LayoutConcern, SemanticKey, Size, UiNode,
+    VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
@@ -44,17 +45,17 @@ impl Default for MobileTabStyle {
 /// 一个受控的移动标签。
 pub struct MobileTab {
     label: String,
-    target: String,
+    action_key: SemanticKey,
     selected: bool,
     disabled: bool,
 }
 
 impl MobileTab {
-    /// 创建标签；`target` 是 Application 收到点击时处理的稳定动作标识。
-    pub fn new(label: impl Into<String>, target: impl Into<String>) -> Self {
+    /// 创建标签；`action_key` 是 Application 收到点击时处理的稳定动作键。
+    pub fn new(label: impl Into<String>, action_key: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            target: target.into(),
+            action_key: SemanticKey(action_key.into()),
             selected: false,
             disabled: false,
         }
@@ -178,13 +179,12 @@ impl MobileTabs {
                         height: Some(Size::fixed(height)),
                         ..LayoutConcern::default()
                     })
-                    .identity(semantic_identity(tab.target.clone()))
+                    .identity(semantic_identity(tab.action_key.0))
                     .into();
                 if !tab.selected && !tab.disabled {
                     node.interact = Some(InteractConcern {
                         clickable: true,
                         focusable: true,
-                        bind_id: Some(BindId(tab.target)),
                         ..InteractConcern::default()
                     });
                 }
@@ -232,9 +232,9 @@ mod tests {
         assert!(node.children[0].interact.is_none());
         assert_eq!(
             node.children[1]
-                .interact
+                .identity
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|id| id.0.as_str()),
             Some("mobile.tab.activity")
         );

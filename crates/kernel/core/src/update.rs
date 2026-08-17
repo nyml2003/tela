@@ -103,6 +103,24 @@ fn subtree_fingerprint(node: &UiNode, hasher: &mut FnvHasher) -> bool {
         hasher.write_u64(layout.border_width.to_bits() as u64);
         hasher.write_u64(layout.gap.to_bits() as u64);
         hasher.write_u64(layout.cross_align as u64);
+        if let Some(grid_item) = layout.grid_item {
+            hasher.write(1);
+            hasher.write_u64(grid_item.column as u64);
+            hasher.write_u64(grid_item.row as u64);
+            hasher.write_u64(grid_item.column_span as u64);
+            hasher.write_u64(grid_item.row_span as u64);
+            hasher.write_u64(grid_item.justify_self as u64);
+            hasher.write_u64(grid_item.align_self as u64);
+        } else {
+            hasher.write(0);
+        }
+        if let Some(text_constraint) = layout.text_constraint {
+            hasher.write(1);
+            hasher.write_u64(text_constraint.max_lines.unwrap_or(0) as u64);
+            hasher.write_u64(text_constraint.overflow as u64);
+        } else {
+            hasher.write(0);
+        }
         hasher.write_u64(layout.clip as u64);
         hasher.write_u64(layout.overflow as u64);
     } else {
@@ -152,39 +170,85 @@ fn hash_kind(kind: &NodeKind, hasher: &mut FnvHasher) {
         NodeKind::FocusScope(_) => hasher.write(3),
         NodeKind::ShortcutScope(_) => hasher.write(4),
         NodeKind::ModalHost => hasher.write(5),
-        NodeKind::Teleport(_) => hasher.write(6),
+        NodeKind::Teleport(spec) => {
+            hasher.write(6);
+            match &spec.source {
+                tela_contract::TeleportSource::Anchor(key) => {
+                    hasher.write(1);
+                    hasher.write_str(&key.0);
+                }
+            }
+            hasher.write_u64(spec.placement.side as u64);
+            hasher.write_u64(spec.placement.align as u64);
+            hasher.write_u64(spec.placement.offset.x.to_bits() as u64);
+            hasher.write_u64(spec.placement.offset.y.to_bits() as u64);
+            hasher.write_u64(spec.placement.flip as u64);
+            hasher.write_u64(spec.placement.shift as u64);
+            hasher.write_u64(spec.placement.clamp as u64);
+            hasher.write_u64(spec.placement.viewport_padding.to_bits() as u64);
+        }
         NodeKind::Row => hasher.write(7),
         NodeKind::Column => hasher.write(8),
         NodeKind::Wrap => hasher.write(9),
-        NodeKind::Frame => hasher.write(10),
-        NodeKind::Expanded => hasher.write(11),
-        NodeKind::Spacer => hasher.write(12),
-        NodeKind::BaselineRow => hasher.write(13),
-        NodeKind::Stack => hasher.write(14),
+        NodeKind::Grid(spec) => {
+            hasher.write(10);
+            hash_grid_spec(spec, hasher);
+        }
+        NodeKind::Frame => hasher.write(11),
+        NodeKind::Expanded => hasher.write(12),
+        NodeKind::Spacer => hasher.write(13),
+        NodeKind::BaselineRow => hasher.write(14),
+        NodeKind::Stack => hasher.write(15),
         NodeKind::Overlay(spec) => {
-            hasher.write(15);
+            hasher.write(16);
             hasher.write_u64(spec.align as u64);
             hasher.write_u64(spec.offset.x.to_bits() as u64);
             hasher.write_u64(spec.offset.y.to_bits() as u64);
             hasher.write_u64(spec.fill_width as u64);
             hasher.write_u64(spec.fill_height as u64);
         }
-        NodeKind::ScrollView => hasher.write(16),
+        NodeKind::ScrollView => hasher.write(17),
         NodeKind::VirtualListView(spec) => {
-            hasher.write(17);
+            hasher.write(18);
             hasher.write_u64(spec.total_items as u64);
             hasher.write_u64(spec.first_item_index as u64);
             hasher.write_u64(spec.item_height.to_bits() as u64);
             hasher.write_u64(spec.item_spacing.to_bits() as u64);
             hasher.write_u64(spec.overscan as u64);
         }
-        NodeKind::Text => hasher.write(18),
-        NodeKind::Image => hasher.write(19),
-        NodeKind::Rect => hasher.write(20),
-        NodeKind::Circle => hasher.write(21),
-        NodeKind::Ellipse => hasher.write(22),
-        NodeKind::NinePatch => hasher.write(23),
-        NodeKind::Polygon => hasher.write(24),
+        NodeKind::Text => hasher.write(19),
+        NodeKind::Image => hasher.write(20),
+        NodeKind::Rect => hasher.write(21),
+        NodeKind::Circle => hasher.write(22),
+        NodeKind::Ellipse => hasher.write(23),
+        NodeKind::NinePatch => hasher.write(24),
+        NodeKind::Polygon => hasher.write(25),
+    }
+}
+
+fn hash_grid_spec(spec: &tela_contract::GridSpec, hasher: &mut FnvHasher) {
+    hasher.write_u64(spec.columns.len() as u64);
+    for track in &spec.columns {
+        hash_grid_track(*track, hasher);
+    }
+    hasher.write_u64(spec.rows.len() as u64);
+    for track in &spec.rows {
+        hash_grid_track(*track, hasher);
+    }
+    hasher.write_u64(spec.column_gap.to_bits() as u64);
+    hasher.write_u64(spec.row_gap.to_bits() as u64);
+}
+
+fn hash_grid_track(track: tela_contract::GridTrack, hasher: &mut FnvHasher) {
+    match track {
+        tela_contract::GridTrack::Fixed(value) => {
+            hasher.write(1);
+            hasher.write_u64(value.to_bits() as u64);
+        }
+        tela_contract::GridTrack::Flex(value) => {
+            hasher.write(2);
+            hasher.write_u64(value.to_bits() as u64);
+        }
     }
 }
 

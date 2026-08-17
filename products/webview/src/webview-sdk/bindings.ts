@@ -23,10 +23,17 @@ export interface TelaWebviewBindings {
   validate_development_bundle(index: DevelopmentBundleIndex, bytes: Uint8Array): ValidatedBundle;
   decode_app_status(bytes: Uint8Array): WebAppStatus;
   event_viewport(width: number, height: number): Uint8Array;
-  event_pointer_down(x: number, y: number): Uint8Array;
-  event_pointer_up(x: number, y: number): Uint8Array;
-  event_pointer_move(x: number, y: number): Uint8Array;
-  event_pointer_scroll(x: number, y: number, deltaX: number, deltaY: number): Uint8Array;
+  event_pointer(
+    pointerId: bigint,
+    kind: number,
+    phase: number,
+    x: number,
+    y: number,
+    buttons: number,
+    timestampMicros: bigint,
+    deltaX: number,
+    deltaY: number,
+  ): Uint8Array;
   event_key_down(physicalKey: number, modifierBits: number, repeat: boolean): Uint8Array;
   event_set_input_value(value: string): Uint8Array;
   event_input_focus(): Uint8Array;

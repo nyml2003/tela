@@ -1,7 +1,8 @@
 //! `Switch` 组件（AntD 简化）：轨道 + 滑块，受控开合态。
 
 use tela_contract::{
-    BindId, Color, Fill, Insets, InteractConcern, LayoutConcern, Size, UiNode, VisualConcern,
+    Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy, LayoutConcern, SemanticKey,
+    Size, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::LayoutContainer;
 
@@ -17,7 +18,7 @@ const KNOB: f32 = 12.0;
 pub struct Switch {
     checked: bool,
     disabled: bool,
-    bind_id: Option<BindId>,
+    action_key: Option<SemanticKey>,
 }
 
 impl Default for Switch {
@@ -32,7 +33,7 @@ impl Switch {
         Self {
             checked: false,
             disabled: false,
-            bind_id: None,
+            action_key: None,
         }
     }
 
@@ -48,9 +49,9 @@ impl Switch {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置由 Application 路由的稳定动作键。
+    pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
+        self.action_key = Some(SemanticKey(action_key.into()));
         self
     }
 
@@ -104,12 +105,18 @@ impl Switch {
                 ..LayoutConcern::default()
             })
             .into();
+        if let Some(action_key) = self.action_key {
+            node.identity = Some(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(action_key),
+                update_mode: UpdateMode::Dirty,
+            });
+        }
         if !self.disabled {
             node.interact = Some(InteractConcern {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }

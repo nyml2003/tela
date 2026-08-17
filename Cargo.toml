@@ -4,6 +4,7 @@ members = [
     "crates/kernel/contract",
     "crates/kernel/core",
     "crates/ui/foundation",
+    "crates/ui/headless",
     "crates/ui/mobile-kit",
     "crates/ui/desktop-kit",
     "crates/presentation/resources/fonts",

@@ -3,10 +3,15 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    FocusAppearance, InputEvent, Insets, NodeId, NodeKind, PhysicalKey, PointerEvent, ScrollState,
-    SemanticKey, UiAction, UiFrame, UiNode, UiResources, Viewport,
+    BindId, FocusAppearance, InputEvent, Insets, NodeId, NodeKind, PhysicalKey, PointerEvent,
+    ScrollState, SemanticKey, TextInputEvent, TextSelection, UiAction, UiFrame, UiNode,
+    UiResources, Value, Viewport,
 };
 use tela_core::{DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore};
+use tela_ui_headless::{
+    ActionTrigger, ComponentPartPath, ComponentPartRole, EventFrame, EventRegistry, HeadlessEvent,
+    RoutedEvent, components,
+};
 
 use crate::{
     domain::{Entry, EntryKind, MobileWorkspace},
@@ -48,6 +53,8 @@ pub struct App {
     identity_allocator: IdentityAllocator,
     view_state: ViewStateStore,
     scroll_key: Option<SemanticKey>,
+    event_registry: EventRegistry,
+    event_frame: Option<EventFrame>,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -68,6 +75,8 @@ impl App {
             identity_allocator: IdentityAllocator::new(),
             view_state: ViewStateStore::new(),
             scroll_key: None,
+            event_registry: EventRegistry::new(),
+            event_frame: None,
         }
     }
 
@@ -134,6 +143,9 @@ impl App {
             return self.ensure_frame();
         }
         self.scroll_key = discover_scroll_key(&tree);
+        self.event_registry = EventRegistry::new();
+        register_mobile_event_routes(&mut self.event_registry, &tree);
+        self.event_frame = Some(self.event_registry.begin_frame(&tree));
         self.tree = Some(tree);
         self.frame = Some(frame);
         true
@@ -173,13 +185,20 @@ impl App {
 
     /// Replaces the controlled query value supplied by the native text channel.
     pub fn set_input_value(&mut self, value: String) -> u32 {
-        if self.query == value {
-            return 0;
+        if !self.input_focused() {
+            if self.query == value {
+                return 0;
+            }
+            self.query = value;
+            self.reset_scroll();
+            self.invalidate_frame();
+            return 1;
         }
-        self.query = value;
-        self.reset_scroll();
-        self.invalidate_frame();
-        1
+        u32::from(self.dispatch_text_input(TextInputEvent::Edit {
+            selection: TextSelection::collapsed(value.len() as u32),
+            value,
+            composing: false,
+        }))
     }
 
     /// The platform text channel became focused. The core click already owns focus state.
@@ -194,15 +213,31 @@ impl App {
 
     /// Commits the current search interaction by hiding the text channel but retaining the query.
     pub fn input_enter(&mut self) -> u32 {
-        u32::from(self.blur_input())
+        let committed = if self.input_focused() {
+            let value = self.query.clone();
+            self.dispatch_text_input(TextInputEvent::Commit {
+                selection: TextSelection::collapsed(value.len() as u32),
+                value,
+            })
+        } else {
+            false
+        };
+        u32::from(committed || self.blur_input())
     }
 
     /// Cancels the current search interaction and clears its value.
     pub fn input_cancel(&mut self) -> u32 {
-        let had_value = !self.query.is_empty();
-        self.query.clear();
+        let canceled = if self.input_focused() {
+            self.dispatch_text_input(TextInputEvent::Cancel {
+                selection: TextSelection::collapsed(self.query.len() as u32),
+            })
+        } else {
+            let had_value = !self.query.is_empty();
+            self.query.clear();
+            had_value
+        };
         let blurred = self.blur_input();
-        if had_value || blurred {
+        if canceled || blurred {
             self.reset_scroll();
             self.invalidate_frame();
             1
@@ -283,8 +318,15 @@ impl App {
     fn handle_actions(&mut self, actions: &[UiAction]) -> bool {
         let mut changed = false;
         for action in actions {
+            let routed = self
+                .event_frame
+                .as_ref()
+                .and_then(|frame| self.event_registry.dispatch(frame, action));
+            if let Some(routed) = routed {
+                changed |= self.handle_routed_event(routed);
+                continue;
+            }
             match action {
-                UiAction::Click { node_id } => changed |= self.handle_click(*node_id),
                 UiAction::Scroll { node_id, delta } => {
                     changed |= self.handle_scroll(*node_id, delta.y)
                 }
@@ -295,25 +337,66 @@ impl App {
         changed
     }
 
-    fn handle_click(&mut self, node_id: NodeId) -> bool {
-        let bind_id = self
-            .tree
-            .as_ref()
-            .and_then(|tree| bind_id_at(tree, node_id))
-            .map(str::to_owned);
-        let Some(bind_id) = bind_id else {
+    fn handle_routed_event(&mut self, routed: RoutedEvent) -> bool {
+        match (routed.part.as_ref(), routed.event) {
+            (Some(part), HeadlessEvent::Activate) if component_part_key(part) == "mobile.back" => {
+                self.go_back()
+            }
+            (Some(part), HeadlessEvent::Activate | HeadlessEvent::Select { .. }) => {
+                component_part_key(part)
+                    .strip_prefix("mobile.entry.")
+                    .is_some_and(|entry_id| self.open_entry(entry_id))
+            }
+            (
+                Some(part),
+                HeadlessEvent::TextInput {
+                    event: TextInputEvent::Cancel { .. },
+                },
+            ) if component_part_key(part) == SEARCH_KEY => {
+                if self.query.is_empty() {
+                    false
+                } else {
+                    self.query.clear();
+                    self.reset_scroll();
+                    true
+                }
+            }
+            (None, HeadlessEvent::ValueChange { bind_id, value }) => {
+                self.handle_field_value_change(bind_id, value)
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_field_value_change(&mut self, bind_id: BindId, value: Value) -> bool {
+        if bind_id.0 != SEARCH_KEY {
+            return false;
+        }
+        let Value::String(value) = value else {
             return false;
         };
-        if bind_id == "mobile.back" {
-            return self.go_back();
-        }
-        if bind_id == SEARCH_KEY {
-            return true;
-        }
-        let Some(entry_id) = bind_id.strip_prefix("mobile.entry.") else {
+        if self.query == value {
             return false;
-        };
-        self.open_entry(entry_id)
+        }
+        self.query = value;
+        self.reset_scroll();
+        true
+    }
+
+    fn dispatch_text_input(&mut self, event: TextInputEvent) -> bool {
+        self.ensure_frame();
+        let frame = self.frame().clone();
+        let actions = self.profile.dispatch_input(
+            self.tree.as_ref().expect("mobile tree must be ensured"),
+            &frame,
+            &mut self.view_state,
+            &InputEvent::Text(event),
+        );
+        let changed = self.handle_actions(&actions);
+        if changed {
+            self.invalidate_frame();
+        }
+        changed
     }
 
     fn open_entry(&mut self, entry_id: &str) -> bool {
@@ -410,6 +493,7 @@ impl App {
     fn invalidate_frame(&mut self) {
         self.frame = None;
         self.tree = None;
+        self.event_frame = None;
     }
 }
 
@@ -433,32 +517,76 @@ fn discover_scroll_key(tree: &UiTree) -> Option<SemanticKey> {
     visit(tree.root(), tree.keys(), &mut 0)
 }
 
-#[cfg_attr(test, allow(dead_code))]
-fn bind_id_at(tree: &UiTree, target: NodeId) -> Option<&str> {
-    fn visit<'a>(node: &'a UiNode, target: NodeId, index: &mut u32) -> Option<&'a str> {
-        if *index == target.0 {
-            return node
-                .interact
-                .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
-                .map(|bind| bind.0.as_str());
+fn register_mobile_event_routes(registry: &mut EventRegistry, tree: &UiTree) {
+    for key in tree.keys() {
+        let Some(interact) = tree.interact_for_key(key) else {
+            continue;
+        };
+        if interact.input.is_some() {
+            let root = components::Input::compose("mobile.search")
+                .part(ComponentPartRole::Input, key.clone());
+            let part = root.parts().last().expect("search input part");
+            registry
+                .register_part(
+                    &root,
+                    part,
+                    ActionTrigger::TextInput,
+                    HeadlessEvent::TextInput {
+                        event: TextInputEvent::Cancel {
+                            selection: TextSelection::default(),
+                        },
+                    },
+                )
+                .expect("search route must satisfy the Input contract");
         }
-        *index += 1;
-        for child in &node.children {
-            if let Some(bind) = visit(child, target, index) {
-                return Some(bind);
+        if interact.clickable && interact.input.is_none() {
+            if key.0.starts_with("mobile.entry.") {
+                let root = components::List::compose("mobile.entries")
+                    .part(ComponentPartRole::Item, key.clone());
+                let part = root.parts().last().expect("entry item part");
+                registry
+                    .register_part(
+                        &root,
+                        part,
+                        ActionTrigger::Click,
+                        HeadlessEvent::Select {
+                            value: key.0.clone(),
+                        },
+                    )
+                    .expect("entry route must satisfy the List contract");
+                continue;
             }
+
+            let root = components::Button::compose("mobile.action")
+                .part(ComponentPartRole::Trigger, key.clone());
+            let part = root.parts().last().expect("action trigger part");
+            registry
+                .register_part(&root, part, ActionTrigger::Click, HeadlessEvent::Activate)
+                .expect("action route must satisfy the Button contract");
         }
-        None
     }
-    visit(tree.root(), target, &mut 0)
+}
+
+fn component_part_key(part: &ComponentPartPath) -> &str {
+    part.item_key().unwrap_or_else(|| part.as_str())
 }
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{IconProvider, Insets, NodeId, PhysicalKey, UiNode, UiResources};
+    use std::collections::HashMap;
+
+    use tela_contract::{
+        Color, IconProvider, Insets, PhysicalKey, SemanticKey, UiAction, UiResources, Viewport,
+    };
+    use tela_core::{FocusSlot, UiTree};
     use tela_icon_resources::MaterialIconFontProvider;
+    use tela_mobile_ui_kit::MobileRecipe;
+    use tela_render_raster::{RasterConfig, render_frame};
     use tela_text_resources::ControlledTextMeasurer;
+    use tela_ui_headless::{
+        COMPONENT_CATALOG, ComponentArchetype, ComponentPartRole, ComponentRoot, ComponentState,
+        ControlledValue,
+    };
 
     use super::{App, Route};
 
@@ -478,23 +606,56 @@ mod tests {
         }
     }
 
-    fn node_id_for_binding(node: &UiNode, target: &str, index: &mut u32) -> Option<NodeId> {
-        let node_id = NodeId(*index);
-        if node
-            .interact
-            .as_ref()
-            .and_then(|interact| interact.bind_id.as_ref())
-            .is_some_and(|bind| bind.0 == target)
-        {
-            return Some(node_id);
-        }
-        *index += 1;
-        for child in &node.children {
-            if let Some(node_id) = node_id_for_binding(child, target, index) {
-                return Some(node_id);
+    fn raster_fingerprint(pixels: &[u8]) -> u64 {
+        pixels.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    fn catalog_matrix_value(root: &ComponentRoot, state: ComponentState) -> ControlledValue {
+        match state {
+            ComponentState::Content => ControlledValue::Text("matrix content".to_owned()),
+            ComponentState::Value => match root.spec().archetype() {
+                ComponentArchetype::Range => ControlledValue::Number(24.0),
+                _ => ControlledValue::Text("matrix value".to_owned()),
+            },
+            ComponentState::Selection | ComponentState::Expanded => ControlledValue::Keys(vec![
+                root.parts()
+                    .iter()
+                    .find(|part| part.role() == ComponentPartRole::Item)
+                    .expect("stateful collection must expose an item")
+                    .key()
+                    .0
+                    .clone(),
+            ]),
+            ComponentState::Open | ComponentState::Disabled | ComponentState::Loading => {
+                ControlledValue::Bool(true)
             }
+            ComponentState::Items => {
+                ControlledValue::Keys(vec!["matrix alpha".to_owned(), "matrix beta".to_owned()])
+            }
+            ComponentState::Query => ControlledValue::Text("matrix query".to_owned()),
+            ComponentState::Range => ControlledValue::Number(42.0),
+            ComponentState::CurrentPage => ControlledValue::Number(2.0),
+            ComponentState::Progress => ControlledValue::Number(48.0),
+            ComponentState::Error => ControlledValue::Text("matrix error".to_owned()),
         }
-        None
+    }
+
+    fn catalog_state_context(root: ComponentRoot, state: ComponentState) -> ComponentRoot {
+        if root.spec().archetype() == ComponentArchetype::Layer && state != ComponentState::Open {
+            root.state(ComponentState::Open, ControlledValue::Bool(true))
+        } else {
+            root
+        }
+    }
+
+    fn catalog_fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        hash
     }
 
     #[test]
@@ -505,6 +666,28 @@ mod tests {
         assert!(app.go_back());
         assert!(app.query.is_empty());
         assert_eq!(app.route, Route::Browse(None));
+    }
+
+    #[test]
+    fn focused_search_routes_kernel_text_events_through_field_value_change() {
+        let mut app = App::new(&TEST_RESOURCES);
+        assert!(app.ensure_frame());
+        let key = SemanticKey(super::SEARCH_KEY.to_owned());
+        let node_id = app
+            .tree
+            .as_ref()
+            .expect("tree")
+            .node_id_for_key(&key)
+            .expect("search field must have a stable key");
+        app.view_state.set_current_focus(FocusSlot {
+            key: Some(key),
+            node_id: Some(node_id),
+        });
+
+        assert_eq!(app.set_input_value("架构".to_owned()), 1);
+        assert_eq!(app.input_value(), "架构");
+        assert_eq!(app.input_cancel(), 1);
+        assert_eq!(app.input_value(), "");
     }
 
     #[test]
@@ -521,17 +704,111 @@ mod tests {
     }
 
     #[test]
-    fn mobile_cell_keeps_the_existing_entry_binding_and_navigation_behavior() {
+    fn safe_area_mobile_screen_has_a_stable_raster_reference() {
+        let mut app = App::new(&TEST_RESOURCES);
+        app.set_viewport(390.0, 844.0);
+        assert!(app.set_safe_area(Insets {
+            top: 47.0,
+            right: 0.0,
+            bottom: 34.0,
+            left: 0.0,
+        }));
+        assert!(app.ensure_frame());
+
+        let bitmap = render_frame(
+            app.frame(),
+            &RasterConfig::default_with(Color::rgba(1.0, 1.0, 1.0, 1.0)),
+        );
+        assert_eq!((bitmap.width, bitmap.height), (390, 844));
+        assert!(
+            bitmap
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel != [255, 255, 255, 255]),
+            "移动业务视图不能退化为空白 raster"
+        );
+
+        // FNV-1a 指纹是完整 RGBA 缓冲的紧凑 golden reference；视觉改动必须显式更新它。
+        assert_eq!(
+            raster_fingerprint(&bitmap.pixels),
+            4_663_901_108_784_084_735
+        );
+    }
+
+    #[test]
+    fn mobile_catalog_raster_reference_is_stable_at_the_application_boundary() {
+        let viewport = Viewport {
+            width: 240.0,
+            height: 360.0,
+        };
+        let background = Color::rgba(1.0, 1.0, 1.0, 1.0);
+        let mut hash = 14_695_981_039_346_656_037_u64;
+        for spec in COMPONENT_CATALOG {
+            if !spec.contract().recipes.mobile {
+                continue;
+            }
+            for state in
+                std::iter::once(None).chain(spec.contract().states.iter().copied().map(Some))
+            {
+                let root = match state {
+                    None => spec.root(format!("reference.raster.mobile.{}", spec.name)),
+                    Some(state) => {
+                        let baseline = catalog_state_context(
+                            spec.root(format!("reference.raster.mobile.{}.{state:?}", spec.name)),
+                            state,
+                        );
+                        baseline
+                            .clone()
+                            .state(state, catalog_matrix_value(&baseline, state))
+                    }
+                };
+                let tree = UiTree::new(MobileRecipe::new(&root).into_node().unwrap_or_else(
+                    |error| panic!("{} {state:?} raster recipe: {error:?}", spec.name),
+                ))
+                .unwrap_or_else(|error| panic!("{} {state:?} raster tree: {error:?}", spec.name));
+                let frame = tree
+                    .resolve(viewport, &TEST_TEXT_MEASURER, &HashMap::new())
+                    .unwrap_or_else(|error| {
+                        panic!("{} {state:?} raster frame: {error:?}", spec.name)
+                    });
+                let bitmap = render_frame(&frame, &RasterConfig::default_with(background));
+                assert_eq!(
+                    (bitmap.width, bitmap.height),
+                    (viewport.width as u32, viewport.height as u32),
+                    "{} {state:?} raster dimensions",
+                    spec.name
+                );
+                assert!(
+                    bitmap
+                        .pixels
+                        .chunks_exact(4)
+                        .any(|pixel| pixel != [255, 255, 255, 255]),
+                    "{} {state:?} must not produce a blank raster",
+                    spec.name
+                );
+                hash = catalog_fnv1a(hash, spec.name.as_bytes());
+                hash = catalog_fnv1a(hash, format!("{state:?}").as_bytes());
+                hash = catalog_fnv1a(hash, &bitmap.pixels);
+            }
+        }
+        assert_eq!(
+            hash, 17_379_567_066_821_406_475,
+            "update the raster reference intentionally after visual review"
+        );
+    }
+
+    #[test]
+    fn mobile_cell_routes_its_semantic_action_through_the_event_frame() {
         let mut app = App::new(&TEST_RESOURCES);
         assert!(app.ensure_frame());
-        let node_id = node_id_for_binding(
-            app.tree.as_ref().expect("tree").root(),
-            "mobile.entry.design",
-            &mut 0,
-        )
-        .expect("the first MobileCell must expose the existing entry target");
+        let node_id = app
+            .tree
+            .as_ref()
+            .expect("tree")
+            .node_id_for_key(&SemanticKey("mobile.entry.design".to_owned()))
+            .expect("the first MobileCell must expose its semantic action key");
 
-        assert!(app.handle_click(node_id));
+        assert!(app.handle_actions(&[UiAction::Click { node_id }]));
         assert_eq!(app.route, Route::Browse(Some("design".to_owned())));
     }
 

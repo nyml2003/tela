@@ -4,8 +4,8 @@
 //! 手势、返回键和系统 bars 的读取仍属于 Target。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, Insets, InteractConcern, LayoutConcern, OverlaySpec,
-    PixelOffset, Size, StackAlign, UiNode, Viewport, VisualConcern,
+    BorderRadius, Color, Fill, Insets, InteractConcern, LayoutConcern, OverlaySpec, PixelOffset,
+    Size, StackAlign, UiNode, Viewport, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
@@ -29,18 +29,18 @@ pub enum MobileActionKind {
 pub struct MobileAction {
     label: String,
     description: Option<String>,
-    target: String,
+    action_key: tela_contract::SemanticKey,
     kind: MobileActionKind,
     disabled: bool,
 }
 
 impl MobileAction {
-    /// 创建一个动作。`target` 是 Application 接收的稳定动作标识。
-    pub fn new(label: impl Into<String>, target: impl Into<String>) -> Self {
+    /// 创建一个动作。`action_key` 是 Application 接收的稳定动作键。
+    pub fn new(label: impl Into<String>, action_key: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             description: None,
-            target: target.into(),
+            action_key: tela_contract::SemanticKey(action_key.into()),
             kind: MobileActionKind::default(),
             disabled: false,
         }
@@ -358,13 +358,12 @@ fn action_node(action: MobileAction, width: f32, style: MobileActionSheetStyle) 
         cross_align: tela_contract::CrossAlign::Center,
         ..LayoutConcern::default()
     })
-    .identity(semantic_identity(action.target.clone()))
+    .identity(semantic_identity(action.action_key.0))
     .into();
     if !action.disabled {
         node.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
-            bind_id: Some(BindId(action.target)),
             ..InteractConcern::default()
         });
     }
@@ -376,12 +375,15 @@ mod tests {
     use super::{MobileAction, MobileActionKind, MobileActionSheet};
     use tela_contract::{Fill, Insets, UiNode, Viewport};
 
-    fn has_bind_id(node: &UiNode, target: &str) -> bool {
-        node.interact
+    fn has_action_key(node: &UiNode, target: &str) -> bool {
+        node.identity
             .as_ref()
-            .and_then(|interact| interact.bind_id.as_ref())
+            .and_then(|identity| identity.semantic_key.as_ref())
             .is_some_and(|id| id.0 == target)
-            || node.children.iter().any(|child| has_bind_id(child, target))
+            || node
+                .children
+                .iter()
+                .any(|child| has_action_key(child, target))
     }
 
     #[test]
@@ -427,7 +429,7 @@ mod tests {
             ),
             "底部安全区内的 padding 必须延续 sheet 表面，而非露出遮罩"
         );
-        assert!(has_bind_id(&node, "entry.actions.trash"));
-        assert!(has_bind_id(&node, "entry.actions.cancel"));
+        assert!(has_action_key(&node, "entry.actions.trash"));
+        assert!(has_action_key(&node, "entry.actions.cancel"));
     }
 }

@@ -1,8 +1,8 @@
 //! 桌面工作台的状态与空内容反馈组件。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, IdentityConcern, KeyStrategy, LayoutConcern, SemanticKey,
-    Size, UiNode, UpdateMode, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, KeyStrategy, LayoutConcern, SemanticKey, Size,
+    UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 use tela_ui_foundation::{Button, ButtonVariant};
@@ -93,16 +93,16 @@ impl From<StatusBadge> for UiNode {
 /// 空态中的可选主动作。
 pub struct EmptyAction {
     label: String,
-    target: String,
+    action_key: SemanticKey,
     disabled: bool,
 }
 
 impl EmptyAction {
-    /// 创建动作。`target` 由 Application 解释。
-    pub fn new(label: impl Into<String>, target: impl Into<String>) -> Self {
+    /// 创建动作。`action_key` 由 Application 路由。
+    pub fn new(label: impl Into<String>, action_key: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            target: target.into(),
+            action_key: SemanticKey(action_key.into()),
             disabled: false,
         }
     }
@@ -170,12 +170,9 @@ impl EmptyState {
                 .into_node();
             button.identity = Some(IdentityConcern {
                 key_strategy: KeyStrategy::SemanticId,
-                semantic_key: Some(SemanticKey(action.target.clone())),
+                semantic_key: Some(action.action_key),
                 update_mode: UpdateMode::Dirty,
             });
-            if let Some(interact) = &mut button.interact {
-                interact.bind_id = Some(BindId(action.target));
-            }
             content.push(button);
         }
         let content: UiNode = LayoutContainer::column(content)
@@ -242,9 +239,9 @@ mod tests {
         let action = content.children.last().expect("action");
         assert_eq!(
             action
-                .interact
+                .identity
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|target| target.0.as_str()),
             Some("files.clear-filter")
         );

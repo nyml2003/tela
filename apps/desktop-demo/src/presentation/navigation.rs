@@ -136,12 +136,12 @@ fn nav_row(entry: &Entry, selected: bool, width: f32, icons: &dyn IconProvider) 
 
 fn scope_row(
     label: &str,
-    bind_id: &str,
+    action_key: &str,
     selected: bool,
     width: f32,
     icons: &dyn IconProvider,
 ) -> UiNode {
-    let icon_name = match bind_id {
+    let icon_name = match action_key {
         "filter.all" => IconName::AllFiles,
         "filter.favorites" => IconName::Favorite,
         "filter.tagged" => IconName::Tag,
@@ -174,5 +174,5 @@ fn scope_row(
         ..VisualConcern::default()
     })
     .into();
-    clickable(row, bind_id.to_owned())
+    clickable(row, action_key)
 }

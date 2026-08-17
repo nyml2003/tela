@@ -4,31 +4,238 @@
 use crate::{NodeId, Point, TextMeasurer, TextureId, TextureRef, Viewport};
 use std::time::Duration;
 
-/// 指针输入事件（见 008-交互焦点与宿主接口 1）。
+/// 同一宿主会话内稳定的原始指针标识。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PointerId(pub u64);
+
+/// 原始指针设备类型。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PointerKind {
+    /// 鼠标或触控板指针。
+    #[default]
+    Mouse,
+    /// 直接触摸。
+    Touch,
+    /// 手写笔。
+    Pen,
+}
+
+/// 原始指针的生命周期阶段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PointerPhase {
+    /// 指针进入按下状态。
+    Down,
+    /// 指针位置变化。
+    Move,
+    /// 指针正常释放。
+    Up,
+    /// 设备、窗口或系统手势取消当前序列。
+    Cancel,
+    /// 独立的滚轮或触控板滚动增量。
+    Scroll,
+}
+
+/// 指针按键位集合。
+///
+/// 它是一个不透明位集而不是平台枚举，Target 只负责规范化自己的按键状态，
+/// Kernel 不需要认识 Win32、UIKit 或浏览器的原始常量。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PointerButtons(pub u16);
+
+impl PointerButtons {
+    /// 没有按键按下。
+    pub const NONE: Self = Self(0);
+    /// 主按键（鼠标左键或直接触摸）。
+    pub const PRIMARY: Self = Self(1 << 0);
+    /// 次按键（通常为鼠标右键）。
+    pub const SECONDARY: Self = Self(1 << 1);
+    /// 中键。
+    pub const AUXILIARY: Self = Self(1 << 2);
+
+    /// 是否包含某个按键集合。
+    pub const fn contains(self, buttons: Self) -> bool {
+        self.0 & buttons.0 == buttons.0
+    }
+}
+
+/// Target 规范化后交给 Kernel 的原始指针帧。
+///
+/// 它不携带 click、scroll 手势或应用组件含义。多个 `PointerId` 可交错出现；
+/// 捕获和手势仲裁由 `tela-core` 保持跨帧状态并给出通用 `UiAction`。
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PointerEvent {
-    /// 按下。
-    Down {
-        /// 指针位置（逻辑坐标）。
+pub struct PointerEvent {
+    /// 指针 id；鼠标通常固定为零，触摸和笔必须保留宿主原始 id。
+    pub pointer_id: PointerId,
+    /// 设备类型。
+    pub kind: PointerKind,
+    /// 生命周期阶段。
+    pub phase: PointerPhase,
+    /// 当前逻辑坐标。
+    pub position: Point,
+    /// 当前按键状态。
+    pub buttons: PointerButtons,
+    /// 单调时钟的微秒刻度，由 Target 提供；不要求与 Unix 时间对应。
+    pub timestamp_micros: u64,
+    /// 仅 `Scroll` 阶段使用的逻辑增量；其余阶段必须为零。
+    pub delta: Point,
+}
+
+impl PointerEvent {
+    /// 构建一个完全显式的原始指针帧。
+    pub const fn new(
+        pointer_id: PointerId,
+        kind: PointerKind,
+        phase: PointerPhase,
         position: Point,
-    },
-    /// 释放。
-    Up {
-        /// 指针位置（逻辑坐标）。
-        position: Point,
-    },
-    /// 移动。
-    Move {
-        /// 指针位置（逻辑坐标）。
-        position: Point,
-    },
-    /// 滚轮。
-    Scroll {
-        /// 指针当前位置（命中测试用，见 008-1）。
-        position: Point,
-        /// 滚动增量。
+        buttons: PointerButtons,
+        timestamp_micros: u64,
         delta: Point,
-    },
+    ) -> Self {
+        Self {
+            pointer_id,
+            kind,
+            phase,
+            position,
+            buttons,
+            timestamp_micros,
+            delta,
+        }
+    }
+
+    /// 鼠标主键按下的常用构造器。
+    pub const fn mouse_down(position: Point) -> Self {
+        Self::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Down,
+            position,
+            PointerButtons::PRIMARY,
+            0,
+            Point { x: 0.0, y: 0.0 },
+        )
+    }
+
+    /// 鼠标移动的常用构造器。
+    pub const fn mouse_move(position: Point) -> Self {
+        Self::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Move,
+            position,
+            PointerButtons::NONE,
+            0,
+            Point { x: 0.0, y: 0.0 },
+        )
+    }
+
+    /// 鼠标主键释放的常用构造器。
+    pub const fn mouse_up(position: Point) -> Self {
+        Self::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Up,
+            position,
+            PointerButtons::NONE,
+            0,
+            Point { x: 0.0, y: 0.0 },
+        )
+    }
+
+    /// 鼠标滚轮或触控板滚动的常用构造器。
+    pub const fn mouse_scroll(position: Point, delta: Point) -> Self {
+        Self::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Scroll,
+            position,
+            PointerButtons::NONE,
+            0,
+            delta,
+        )
+    }
+
+    /// 是否是会终止当前指针序列的阶段。
+    pub const fn is_terminal(self) -> bool {
+        matches!(self.phase, PointerPhase::Up | PointerPhase::Cancel)
+    }
+}
+
+/// 识别出的通用手势类别。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GestureKind {
+    /// 单指平移，通常由滚动或拖动组件消费。
+    Pan,
+    /// 单指快速定向移动。
+    Swipe,
+    /// 保持在触控阈值内的长按。
+    LongPress,
+    /// 双指缩放。
+    Pinch,
+}
+
+/// 手势生命周期阶段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GesturePhase {
+    /// 仲裁完成并开始交给获胜者。
+    Start,
+    /// 手势增量更新。
+    Update,
+    /// 手势正常结束。
+    End,
+    /// 手势被另一候选者、取消事件或节点卸载终止。
+    Cancel,
+}
+
+/// 手势可接受的方向。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GestureAxis {
+    /// 不限制方向。
+    #[default]
+    Any,
+    /// 只接受主要水平位移。
+    Horizontal,
+    /// 只接受主要垂直位移。
+    Vertical,
+}
+
+/// 节点申请的通用手势能力。
+///
+/// 它只描述可接受的输入类别与优先级，不包含 Slider、Carousel、Refresh 等组件专属状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GestureConfig {
+    /// 是否可赢得平移手势。
+    pub pan: bool,
+    /// 是否可赢得滑动手势。
+    pub swipe: bool,
+    /// 是否可赢得长按手势。
+    pub long_press: bool,
+    /// 是否可赢得双指缩放手势。
+    pub pinch: bool,
+    /// 平移/滑动接受的主要方向。
+    pub axis: GestureAxis,
+    /// 候选者优先级；同级时命中路径中更接近叶子的节点胜出。
+    pub priority: i16,
+}
+
+/// Kernel 发出的通用手势数据。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GestureEvent {
+    /// 手势类别。
+    pub kind: GestureKind,
+    /// 生命周期阶段。
+    pub phase: GesturePhase,
+    /// 主指针。
+    pub pointer_id: PointerId,
+    /// Pinch 的第二指针；其他手势为 `None`。
+    pub secondary_pointer_id: Option<PointerId>,
+    /// 当前主指针位置。
+    pub position: Point,
+    /// 相对上一帧的平移增量。
+    pub delta: Point,
+    /// 相对起点的累计平移。
+    pub translation: Point,
+    /// Pinch 相对初始双指距离的比例；非 Pinch 为 `1.0`。
+    pub scale: f32,
 }
 
 /// 输入事件：指针 / 键盘（宿主注入，见 008-交互焦点与宿主接口 4）。
@@ -41,6 +248,133 @@ pub enum InputEvent {
     /// 原始平台按键不进入 core；宿主先以 `RawKeyboardEvent` 查询当前键位表，再把
     /// 结果作为本事件传入。这样 core 不拥有用户配置、键盘布局或平台适配逻辑。
     Keyboard(KeyboardIntentEvent),
+    /// 当前焦点文本输入节点的 IME / 受控编辑事件。
+    ///
+    /// Target 只负责把平台文本服务规范化为此值；Kernel 依据本帧焦点确认它确实落在
+    /// 声明 `TextInputSpec` 的节点上，再分别产出字段 `ValueChange` 和组件文本事件。
+    Text(TextInputEvent),
+}
+
+/// 文本输入的语义类型。
+///
+/// 它是 Host 选择软键盘/编辑行为的提示，也是 Headless/Input recipe 的稳定能力声明；
+/// 不是 HTML input type 或 UIKit/Android 的具体枚举。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextInputKind {
+    /// 普通单行文本。
+    #[default]
+    Text,
+    /// 密码或其他应遮蔽的文本。
+    Password,
+    /// 搜索文本，Host 可以提供搜索动作键。
+    Search,
+    /// 数值文本，Host 可以选择数字键盘。
+    Number,
+    /// 多行文本。
+    Multiline,
+    /// 一次性验证码；Host 可以提供数字键盘和自动填充。
+    Otp,
+}
+
+/// 文本中的选择区，使用 UTF-8 字节偏移表示。
+///
+/// Application 在投影受控字符串时负责把它限制在字符串边界上；Contract 只保证锚点和
+/// 焦点都以同一稳定单位表达，因此 Host 不需要猜测 grapheme 或 UTF-16 索引。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextSelection {
+    /// 选择锚点（UTF-8 字节偏移）。
+    pub anchor: u32,
+    /// 当前焦点（UTF-8 字节偏移）。
+    pub focus: u32,
+}
+
+impl TextSelection {
+    /// 创建折叠光标。
+    pub const fn collapsed(offset: u32) -> Self {
+        Self {
+            anchor: offset,
+            focus: offset,
+        }
+    }
+
+    /// 返回已排序的起止范围，不丢失原始方向信息。
+    pub const fn ordered(self) -> (u32, u32) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
+/// 节点声明给 Kernel、Headless 与 Target 的文本输入能力。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextInputSpec {
+    /// 输入语义类型。
+    pub kind: TextInputKind,
+    /// 受控文本在本帧的光标/选择快照。
+    pub selection: TextSelection,
+}
+
+impl TextInputSpec {
+    /// 用折叠在开头的选择创建输入能力。
+    pub const fn new(kind: TextInputKind) -> Self {
+        Self {
+            kind,
+            selection: TextSelection::collapsed(0),
+        }
+    }
+
+    /// 覆盖本帧的光标或选择快照。
+    pub const fn selection(mut self, selection: TextSelection) -> Self {
+        self.selection = selection;
+        self
+    }
+}
+
+/// Target 规范化后的文本编辑生命周期。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextInputEvent {
+    /// 受控文本在编辑中发生变化；`composing` 表示 IME 尚未提交候选文本。
+    Edit {
+        /// 当前完整受控文本值。
+        value: String,
+        /// 当前选择。
+        selection: TextSelection,
+        /// 是否处于 IME composition。
+        composing: bool,
+    },
+    /// 已提交一次编辑边界，例如 Enter、完成键或 IME confirm。
+    Commit {
+        /// 当前完整受控文本值。
+        value: String,
+        /// 当前选择。
+        selection: TextSelection,
+    },
+    /// 取消当前文本编辑但不修改业务字段值。
+    Cancel {
+        /// 取消时的选择，可用于恢复宿主光标。
+        selection: TextSelection,
+    },
+}
+
+impl TextInputEvent {
+    /// 返回此事件所携带的选择快照。
+    pub const fn selection(&self) -> TextSelection {
+        match self {
+            Self::Edit { selection, .. }
+            | Self::Commit { selection, .. }
+            | Self::Cancel { selection } => *selection,
+        }
+    }
+
+    /// 返回编辑后的完整字符串；取消事件没有新值。
+    pub fn value(&self) -> Option<&str> {
+        match self {
+            Self::Edit { value, .. } | Self::Commit { value, .. } => Some(value),
+            Self::Cancel { .. } => None,
+        }
+    }
 }
 
 /// 业务绑定标识：唯一业务变更通道，挂在 `InteractConcern.bind_id`（见 012-业务数据绑定）。
@@ -66,6 +400,33 @@ pub enum Value {
 /// 纯视图动作（滚动/模态/焦点）走 `node_id` 链路，不带 `BindId`。
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
+    /// 原始指针帧已被捕获节点或当前命中节点接收。
+    ///
+    /// 这是 Slider、Splitter 等需要连续坐标的通用出口；应用/Headless 按稳定部件路径
+    /// 解释它，Kernel 不认识具体组件。
+    Pointer {
+        /// 接收当前指针帧的节点。
+        node_id: NodeId,
+        /// 已经过坐标规范化的原始帧。
+        event: PointerEvent,
+    },
+    /// Kernel 手势仲裁后的通用输出。
+    Gesture {
+        /// 获胜候选者节点。
+        node_id: NodeId,
+        /// 手势数据。
+        event: GestureEvent,
+    },
+    /// 当前焦点文本输入节点收到 IME / 受控编辑事件。
+    ///
+    /// 当节点同时声明 `BindId` 时，同一输入帧还会额外产生 `ValueChange`；该动作保留
+    /// selection、composition 和取消语义，供 Headless 与 Application 管理临时编辑状态。
+    TextInput {
+        /// 当前焦点输入节点。
+        node_id: NodeId,
+        /// 文本编辑生命周期。
+        event: TextInputEvent,
+    },
     /// 点击。
     Click {
         /// 命中的节点。
@@ -455,10 +816,16 @@ pub enum ClipboardOp {
 /// 输入法组合状态（宿主落地，见 008-交互焦点与宿主接口 4）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImeUpdate {
+    /// 当前输入节点的语义类型，供 Host 选择软键盘与编辑策略。
+    pub kind: TextInputKind,
     /// 是否处于组合输入中。
     pub composing: bool,
     /// 组合文本。
     pub text: String,
+    /// 当前光标/选择。
+    pub selection: TextSelection,
+    /// 是否取消了当前编辑序列。
+    pub cancelled: bool,
 }
 
 /// 宿主端口入站（core → host）：IME、剪贴板、时钟、资源加载、视口信息与文本度量。

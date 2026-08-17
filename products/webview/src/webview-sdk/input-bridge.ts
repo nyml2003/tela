@@ -95,23 +95,48 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
     synchronize();
     return consumed;
   };
+  const pointerKind = (pointerType: string): number => {
+    if (pointerType === 'touch') return 1;
+    if (pointerType === 'pen') return 2;
+    return 0;
+  };
+  const timestampMicros = (timestamp: number): bigint => BigInt(Math.max(0, Math.round(timestamp * 1000)));
+  const pointerId = (id: number): bigint => BigInt(Math.max(0, Math.trunc(id)));
+  const sendPointer = (
+    event: PointerEvent,
+    phase: number,
+    position = point(event),
+    deltaX = 0,
+    deltaY = 0,
+  ): boolean => send(bindings.event_pointer(
+    pointerId(event.pointerId),
+    pointerKind(event.pointerType),
+    phase,
+    position.x,
+    position.y,
+    Math.max(0, Math.min(0xffff, Math.trunc(event.buttons))),
+    timestampMicros(event.timeStamp),
+    deltaX,
+    deltaY,
+  ));
   const onPointerDown = (event: PointerEvent) => {
     event.preventDefault();
-    const position = point(event);
     canvas.setPointerCapture?.(event.pointerId);
-    send(bindings.event_pointer_down(position.x, position.y));
+    sendPointer(event, 0);
     synchronize(true);
   };
   const onPointerUp = (event: PointerEvent) => {
-    const position = point(event);
-    send(bindings.event_pointer_up(position.x, position.y));
+    event.preventDefault();
+    sendPointer(event, 2);
   };
   const onPointerMove = (event: PointerEvent) => {
-    const position = point(event);
-    send(bindings.event_pointer_move(position.x, position.y));
+    sendPointer(event, 1);
   };
-  const onPointerLeave = () => {
-    send(bindings.event_pointer_move(-1, -1));
+  const onPointerCancel = (event: PointerEvent) => {
+    sendPointer(event, 3);
+  };
+  const onPointerLeave = (event: PointerEvent) => {
+    sendPointer(event, 1, { x: -1, y: -1 });
   };
   const onWheel = (event: WheelEvent) => {
     event.preventDefault();
@@ -123,9 +148,14 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
         ? logical.height
         : 1;
     const bounds = canvas.getBoundingClientRect();
-    send(bindings.event_pointer_scroll(
+    send(bindings.event_pointer(
+      0n,
+      0,
+      4,
       position.x,
       position.y,
+      0,
+      timestampMicros(event.timeStamp),
       event.deltaX * unit * logical.width / Math.max(bounds.width, 1),
       event.deltaY * unit * logical.height / Math.max(bounds.height, 1),
     ));
@@ -179,6 +209,7 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointercancel', onPointerCancel);
   canvas.addEventListener('pointerleave', onPointerLeave);
   canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('keydown', onCanvasKeyDown);
@@ -197,6 +228,7 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointermove', onPointerMove);
+      canvas.removeEventListener('pointercancel', onPointerCancel);
       canvas.removeEventListener('pointerleave', onPointerLeave);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('keydown', onCanvasKeyDown);

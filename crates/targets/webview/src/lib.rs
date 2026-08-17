@@ -13,7 +13,10 @@ use std::cell::RefCell;
 
 #[cfg(target_arch = "wasm32")]
 use tela_app_abi::decode_frame;
-use tela_app_abi::{ABI_VERSION, AppEvent, AppStatus, decode_status, encode_event};
+use tela_app_abi::{
+    ABI_VERSION, AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, AppStatus,
+    decode_status, encode_event,
+};
 use tela_bundle::{BundleArchive, DevelopmentManifest, read_archive, sha256_hex};
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -144,38 +147,57 @@ pub fn event_viewport(width: f32, height: f32) -> Result<Vec<u8>, JsValue> {
     encode_host_event(AppEvent::Viewport { width, height })
 }
 
-/// Encodes a primary pointer press for the guest.
+/// Encodes one complete raw browser pointer packet for the guest.
+///
+/// `kind` uses `0 = mouse`, `1 = touch`, `2 = pen`; `phase` uses `0 = down`, `1 = move`,
+/// `2 = up`, `3 = cancel`, `4 = scroll`. JavaScript must forward browser `pointerId`, `buttons`
+/// and `timeStamp` unchanged after coordinate conversion. It must not infer click or drag.
 #[wasm_bindgen]
-pub fn event_pointer_down(x: f32, y: f32) -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::PointerDown { x, y })
-}
-
-/// Encodes a primary pointer release for the guest.
-#[wasm_bindgen]
-pub fn event_pointer_up(x: f32, y: f32) -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::PointerUp { x, y })
-}
-
-/// Encodes a pointer movement event for the guest.
-#[wasm_bindgen]
-pub fn event_pointer_move(x: f32, y: f32) -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::PointerMove { x, y })
-}
-
-/// Encodes a pointer wheel event for the guest.
-#[wasm_bindgen]
-pub fn event_pointer_scroll(
+#[allow(clippy::too_many_arguments)]
+pub fn event_pointer(
+    pointer_id: u64,
+    kind: u8,
+    phase: u8,
     x: f32,
     y: f32,
+    buttons: u16,
+    timestamp_micros: u64,
     delta_x: f32,
     delta_y: f32,
 ) -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::PointerScroll {
+    let kind = match kind {
+        0 => AppPointerKind::Mouse,
+        1 => AppPointerKind::Touch,
+        2 => AppPointerKind::Pen,
+        value => {
+            return Err(js_error(format!(
+                "unsupported browser pointer kind: {value}"
+            )));
+        }
+    };
+    let phase = match phase {
+        0 => AppPointerPhase::Down,
+        1 => AppPointerPhase::Move,
+        2 => AppPointerPhase::Up,
+        3 => AppPointerPhase::Cancel,
+        4 => AppPointerPhase::Scroll,
+        value => {
+            return Err(js_error(format!(
+                "unsupported browser pointer phase: {value}"
+            )));
+        }
+    };
+    encode_host_event(AppEvent::Pointer(AppPointerEvent::new(
+        pointer_id,
+        kind,
+        phase,
         x,
         y,
+        buttons,
+        timestamp_micros,
         delta_x,
         delta_y,
-    })
+    )))
 }
 
 /// Encodes a normalized physical-key event for the guest keymap.

@@ -14,11 +14,13 @@ native-app = ["app-runtime"]
 tela-contract = { path = "../../crates/kernel/contract" }
 tela-core = { path = "../../crates/kernel/core" }
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
+tela-ui-headless = { path = "../../crates/ui/headless" }
 tela-mobile-ui-kit = { path = "../../crates/ui/mobile-kit" }
 
 [dev-dependencies]
 # 真实资源只用于应用回归测试；产品运行时经 UiResources 注入。
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-render-raster = { path = "../../crates/presentation/renderers/raster" }
 tela-text-resources = { path = "../../crates/presentation/resources/text" }
 
 [lints.rust]

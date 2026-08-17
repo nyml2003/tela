@@ -5,17 +5,20 @@ mod input;
 use std::collections::{BTreeSet, HashMap};
 
 use tela_contract::{
-    Color, FocusAppearance, InputEvent, NodeId, NodeKind, PointerEvent, RawKeyboardEvent,
-    ScrollState, SemanticKey, ShortcutId, UiAction, UiFrame, UiNode, UiResources, Viewport,
+    BindId, Color, FocusAppearance, InputEvent, NodeId, NodeKind, PointerEvent, RawKeyboardEvent,
+    ScrollState, SemanticKey, ShortcutId, UiAction, UiFrame, UiNode, UiResources, Value, Viewport,
 };
 use tela_core::{
     DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore, restore_focus, save_focus,
 };
-use tela_desktop_ui_kit::{LocalStateRuntime, intent_from_action};
+use tela_desktop_ui_kit::LocalStateRuntime;
+use tela_ui_headless::{
+    ActionTrigger, ComponentPartPath, ComponentPartRole, ComponentRuntime, EventFrame,
+    EventRegistry, HeadlessEvent, RoutedEvent, Signal, components,
+};
 
 use super::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
-use super::reactive::ComponentRuntime;
-use super::{Intent, apply_intent, intent_from_bind_id};
+use super::{Intent, apply_intent, intent_from_component_part};
 use crate::domain::{FileManagerModel, FileManagerSession};
 use crate::presentation::operation::OPERATION_MODAL_KEY;
 use crate::presentation::{
@@ -49,17 +52,19 @@ pub struct App {
     nav_scroll_key: Option<SemanticKey>,
     detail_scroll_key: Option<SemanticKey>,
     clickable_keys: BTreeSet<SemanticKey>,
-    hovered_toolbar_target: Option<String>,
+    hovered_toolbar_action_key: Option<SemanticKey>,
     keymap: KeymapSnapshot,
     #[cfg(test)]
     frame_trace: Vec<u8>,
-    /// 由 `runtime::input` 管理的隐藏 DOM 编辑器目标，不是 tela key 或业务状态。
-    dom_input_target: Option<tela_desktop_ui_kit::IntentTarget>,
+    /// 由 `runtime::input` 管理的隐藏 DOM 编辑器字段，不是 tela key 或业务状态。
+    dom_input_target: Option<BindId>,
     /// 弹窗关闭后的显式焦点恢复延迟到新树建好后执行，避免把旧帧 node id 带回页面。
     restore_focus_pending: bool,
-    revision: tela_ui_foundation::Signal<u64>,
+    revision: Signal<u64>,
     component_runtime: ComponentRuntime,
     local_state: LocalStateRuntime,
+    event_registry: EventRegistry,
+    event_frame: Option<EventFrame>,
 }
 
 impl App {
@@ -67,7 +72,7 @@ impl App {
     ///
     /// Application 只请求文本度量和语义图标，不链接字体、Material glyph 或 renderer。
     pub fn new(resources: &'static dyn UiResources) -> Self {
-        let revision = tela_ui_foundation::Signal::new(0);
+        let revision = Signal::new(0);
         let mut component_runtime = ComponentRuntime::new();
         component_runtime.watch("app.shell", &revision);
         Self {
@@ -83,7 +88,7 @@ impl App {
             nav_scroll_key: None,
             detail_scroll_key: None,
             clickable_keys: BTreeSet::new(),
-            hovered_toolbar_target: None,
+            hovered_toolbar_action_key: None,
             keymap: KeymapSnapshot::file_manager_default(),
             #[cfg(test)]
             frame_trace: Vec::new(),
@@ -92,6 +97,8 @@ impl App {
             revision,
             component_runtime,
             local_state: LocalStateRuntime::new(),
+            event_registry: EventRegistry::new(),
+            event_frame: None,
         }
     }
 
@@ -133,7 +140,7 @@ impl App {
             viewport: self.viewport,
             search_focused: false,
             operation_focused: false,
-            hovered_target: self.hovered_toolbar_target.clone(),
+            hovered_action_key: self.hovered_toolbar_action_key.clone(),
             search_input,
             operation_input,
             detail_scroll_y: self.detail_scroll_y(),
@@ -150,10 +157,10 @@ impl App {
         }
         self.profile.ensure_modal_focus(&tree, &mut self.view_state);
         let mut controls = discover_controls(&tree);
-        let hovered_target = self.toolbar_target_for_hover_key(&tree);
-        if self.hovered_toolbar_target != hovered_target {
-            self.hovered_toolbar_target = hovered_target;
-            props.hovered_target = self.hovered_toolbar_target.clone();
+        let hovered_action_key = self.toolbar_action_key_for_hover_key(&tree);
+        if self.hovered_toolbar_action_key != hovered_action_key {
+            self.hovered_toolbar_action_key = hovered_action_key;
+            props.hovered_action_key = self.hovered_toolbar_action_key.clone();
             tree =
                 UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
                     .expect("文件管理器场景必须合法");
@@ -204,6 +211,9 @@ impl App {
         self.nav_scroll_key = controls.scrolls.first().cloned();
         self.detail_scroll_key = controls.scrolls.get(1).cloned();
         self.clickable_keys = controls.clickable;
+        self.event_registry = EventRegistry::new();
+        register_tree_event_routes(&mut self.event_registry, &tree);
+        self.event_frame = Some(self.event_registry.begin_frame(&tree));
         self.tree = Some(tree);
         self.frame = Some(frame);
         true
@@ -298,18 +308,21 @@ impl App {
     }
 
     #[cfg(test)]
-    fn dispatch_bind_id(&mut self, bind_id: &str) -> bool {
-        let Some(intent) = intent_from_bind_id(bind_id) else {
-            return false;
-        };
-        self.dispatch_controller_intent(intent);
-        self.mark_view_dirty();
-        true
+    fn dispatch_component_part(&mut self, part: &str) -> bool {
+        let changed = self.handle_routed_event(RoutedEvent {
+            part: Some(ComponentPartPath::new(part)),
+            event: HeadlessEvent::Activate,
+        });
+        if changed {
+            self.mark_view_dirty();
+        }
+        changed
     }
 
     fn invalidate_frame(&mut self) {
         self.frame = None;
         self.tree = None;
+        self.event_frame = None;
         #[cfg(test)]
         self.frame_trace.clear();
     }
@@ -323,7 +336,7 @@ impl App {
         apply_intent(&mut self.model, &mut self.session, intent);
         if self.session.operation.is_none() {
             self.local_state
-                .release_target(&tela_desktop_ui_kit::IntentTarget::new("operation.value"));
+                .release_binding(&BindId("operation.value".to_owned()));
         }
     }
     fn dispatch_controller_intent(&mut self, intent: Intent) {
@@ -337,25 +350,17 @@ impl App {
     fn handle_ui_actions(&mut self, actions: &[UiAction]) -> bool {
         let mut changed = false;
         for action in actions {
+            let routed = self
+                .event_frame
+                .as_ref()
+                .and_then(|frame| self.event_registry.dispatch(frame, action));
+            if let Some(routed) = routed {
+                changed |= self.handle_routed_event(routed);
+                continue;
+            }
             match action {
-                UiAction::Click { node_id } => changed |= self.handle_click(*node_id),
                 UiAction::Scroll { node_id, delta } => {
                     changed |= self.handle_scroll(*node_id, delta.y)
-                }
-                UiAction::Hover { node_id, entered } => {
-                    let target = self.toolbar_target_at(*node_id);
-                    if *entered {
-                        if self.hovered_toolbar_target != target {
-                            self.hovered_toolbar_target = target;
-                            changed = true;
-                        }
-                    } else if target.as_deref() == self.hovered_toolbar_target.as_deref() {
-                        self.hovered_toolbar_target = None;
-                        changed = true;
-                    }
-                }
-                UiAction::ShortcutActivated { shortcut_id } => {
-                    changed |= self.handle_shortcut(shortcut_id);
                 }
                 UiAction::CloseModal { .. } if self.session.operation.is_some() => {
                     self.dispatch_controller_intent(Intent::CancelOperation);
@@ -367,6 +372,55 @@ impl App {
             }
         }
         changed
+    }
+
+    fn handle_routed_event(&mut self, routed: RoutedEvent) -> bool {
+        match (routed.part.as_ref(), routed.event) {
+            (Some(part), HeadlessEvent::Activate | HeadlessEvent::Select { .. }) => {
+                let Some(intent) = intent_from_component_part(part) else {
+                    return false;
+                };
+                if self.session.operation.is_some() && !is_operation_part(part) {
+                    return false;
+                }
+                self.dispatch_controller_intent(intent);
+                true
+            }
+            (Some(part), HeadlessEvent::HoverChange { entered })
+                if is_toolbar_action_part(part) =>
+            {
+                let action_key =
+                    SemanticKey(part.item_key().unwrap_or_else(|| part.as_str()).to_owned());
+                if entered {
+                    if self.hovered_toolbar_action_key != Some(action_key.clone()) {
+                        self.hovered_toolbar_action_key = Some(action_key);
+                        return true;
+                    }
+                } else if self.hovered_toolbar_action_key.as_ref() == Some(&action_key) {
+                    self.hovered_toolbar_action_key = None;
+                    return true;
+                }
+                false
+            }
+            (None, HeadlessEvent::ShortcutActivated { id }) => self.handle_shortcut(&id),
+            (None, HeadlessEvent::ValueChange { bind_id, value }) => {
+                self.handle_field_value_change(bind_id, value)
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_field_value_change(&mut self, bind_id: BindId, value: Value) -> bool {
+        let Value::String(value) = value else {
+            return false;
+        };
+        let intent = match bind_id.0.as_str() {
+            "operation.value" => Intent::SetOperationValue(value),
+            "file.search" => Intent::SetQuery(value),
+            _ => return false,
+        };
+        self.apply_controller_intent(intent);
+        true
     }
 
     fn handle_shortcut(&mut self, shortcut: &ShortcutId) -> bool {
@@ -387,60 +441,13 @@ impl App {
         })
     }
 
-    fn toolbar_target_at(&self, node_id: NodeId) -> Option<String> {
-        self.tree
-            .as_ref()
-            .and_then(|tree| node_at(tree.root(), node_id.0 as usize, &mut 0))
-            .and_then(|node| node.interact.as_ref())
-            .and_then(|interact| interact.bind_id.as_ref())
-            .and_then(|bind_id| bind_id.0.strip_prefix("ui.invoke:"))
-            .map(str::to_owned)
-    }
-
-    /// 状态栏提示只投影当前 core hover key 在本帧树上的实际工具栏绑定。
-    ///
-    /// 节点条件卸载、重排或默认身份复用后，不能用旧字符串猜测它仍然对应哪个命令。
-    fn toolbar_target_for_hover_key(&self, tree: &UiTree) -> Option<String> {
-        let key = self.view_state.hover_key()?;
-        tree.interact_for_key(key)
-            .and_then(|interact| interact.bind_id.as_ref())
-            .and_then(|bind_id| bind_id.0.strip_prefix("ui.invoke:"))
-            .map(str::to_owned)
-    }
-
-    fn handle_click(&mut self, node_id: NodeId) -> bool {
-        let Some(tree) = self.tree.as_ref() else {
-            return false;
-        };
-        let Some(node) = node_at(tree.root(), node_id.0 as usize, &mut 0) else {
-            return false;
-        };
-        let Some(bind_id) = node
-            .interact
-            .as_ref()
-            .and_then(|interact| interact.bind_id.as_ref())
-        else {
-            return false;
-        };
-        let action = UiAction::Click { node_id };
-        let intent = intent_from_action(&action, Some(bind_id))
-            .and_then(|intent| match intent {
-                tela_desktop_ui_kit::UiIntent::Invoke { target } => {
-                    intent_from_bind_id(target.as_str())
-                }
-                tela_desktop_ui_kit::UiIntent::Preview { .. }
-                | tela_desktop_ui_kit::UiIntent::Commit { .. } => None,
-            })
-            .or_else(|| intent_from_bind_id(&bind_id.0));
-        let Some(intent) = intent else {
-            return false;
-        };
-        if self.session.operation.is_some() && !bind_id.0.starts_with("operation.") {
-            return false;
-        }
-        self.dispatch_controller_intent(intent);
-        self.mark_view_dirty();
-        true
+    /// 状态栏只从当前帧实际悬停的语义键恢复工具栏状态，条件卸载后不会猜测旧节点。
+    fn toolbar_action_key_for_hover_key(&self, tree: &UiTree) -> Option<SemanticKey> {
+        let key = self.view_state.hover_key()?.clone();
+        tree.interact_for_key(&key)
+            .filter(|interact| interact.clickable)
+            .filter(|_| key.0.starts_with("command."))
+            .map(|_| key)
     }
 
     fn handle_scroll(&mut self, node_id: NodeId, delta_y: f32) -> bool {
@@ -503,6 +510,83 @@ impl App {
     }
 }
 
+/// 将本帧可激活的语义节点显式映射为 Headless 部件事件。
+///
+/// `NodeId` 只在 `EventFrame` 内存活；下一轮树投影会重建 registry 与映射，避免条件卸载
+/// 或重排后继续解释旧节点。文本字段被排除在外，值只沿 `BindId` 的 `ValueChange` 通道流动。
+fn register_tree_event_routes(registry: &mut EventRegistry, tree: &UiTree) {
+    for key in tree.keys() {
+        let Some(interact) = tree.interact_for_key(key) else {
+            continue;
+        };
+        if !interact.clickable || interact.input.is_some() {
+            continue;
+        }
+        if key.0.starts_with("entry-") {
+            let root = components::List::compose("desktop.entries")
+                .part(ComponentPartRole::Item, key.clone());
+            let part = root.parts().last().expect("entry item part");
+            registry
+                .register_part(
+                    &root,
+                    part,
+                    ActionTrigger::Click,
+                    HeadlessEvent::Select {
+                        value: key.0.clone(),
+                    },
+                )
+                .expect("entry route must satisfy the List contract");
+            continue;
+        }
+
+        let root = components::Button::compose("desktop.action")
+            .part(ComponentPartRole::Trigger, key.clone());
+        let part = root.parts().last().expect("action trigger part");
+        registry
+            .register_part(&root, part, ActionTrigger::Click, HeadlessEvent::Activate)
+            .expect("action route must satisfy the Button contract");
+        if key.0.starts_with("command.") {
+            registry
+                .register_part(
+                    &root,
+                    part,
+                    ActionTrigger::HoverEnter,
+                    HeadlessEvent::HoverChange { entered: true },
+                )
+                .expect("toolbar hover must satisfy the Button contract");
+            registry
+                .register_part(
+                    &root,
+                    part,
+                    ActionTrigger::HoverLeave,
+                    HeadlessEvent::HoverChange { entered: false },
+                )
+                .expect("toolbar hover must satisfy the Button contract");
+        }
+    }
+}
+
+fn is_toolbar_action_part(part: &ComponentPartPath) -> bool {
+    part.item_key()
+        .unwrap_or_else(|| part.as_str())
+        .starts_with("command.")
+}
+
+#[cfg(test)]
+fn node_key_for_component_part(part: &str) -> SemanticKey {
+    if let Some(entry_id) = part.strip_prefix("entry.select.") {
+        return SemanticKey(format!("entry-{entry_id}"));
+    }
+    SemanticKey(part.to_owned())
+}
+
+fn is_operation_part(part: &ComponentPartPath) -> bool {
+    matches!(
+        part.item_key().unwrap_or_else(|| part.as_str()),
+        "operation.confirm" | "operation.cancel"
+    )
+}
+
 fn intent_replaces_detail_content(intent: &Intent) -> bool {
     matches!(
         intent,
@@ -548,31 +632,26 @@ fn discover_controls(tree: &UiTree) -> Controls {
     visit(tree.root(), tree.keys(), &mut 0, &mut out);
     out
 }
-fn node_at<'a>(node: &'a UiNode, target: usize, i: &mut usize) -> Option<&'a UiNode> {
-    if *i == target {
-        return Some(node);
-    }
-    *i += 1;
-    for child in &node.children {
-        if let Some(found) = node_at(child, target, i) {
-            return Some(found);
-        }
-    }
-    None
-}
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::domain::FileCommand;
     use crate::presentation::shared::{
         APP_INSET, BORDER, BORDER_WIDTH, SHELL_BOTTOM_RADIUS, SHELL_TOP_RADIUS, STATUS_BAR_H,
         SURFACE, TOP_BAR_H,
     };
-    use tela_contract::{IconName, UiResources};
-    use tela_core::FocusSlot;
+    use tela_contract::{Color, IconName, UiResources};
+    use tela_core::{FocusSlot, UiTree};
+    use tela_desktop_ui_kit::DesktopRecipe;
     use tela_icon_resources::MaterialIconFontProvider;
+    use tela_render_raster::{RasterConfig, render_frame};
     use tela_text_resources::ControlledTextMeasurer;
     use tela_ui_foundation::Icon;
+    use tela_ui_headless::{
+        COMPONENT_CATALOG, ComponentArchetype, ComponentRoot, ComponentState, ControlledValue,
+    };
 
     static TEST_TEXT_MEASURER: ControlledTextMeasurer = ControlledTextMeasurer;
     static TEST_ICON_PROVIDER: MaterialIconFontProvider = MaterialIconFontProvider;
@@ -590,34 +669,76 @@ mod tests {
         }
     }
 
-    fn click_bound(app: &mut App, bind_id: &str) {
+    fn raster_fingerprint(pixels: &[u8]) -> u64 {
+        pixels.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    fn catalog_matrix_value(root: &ComponentRoot, state: ComponentState) -> ControlledValue {
+        match state {
+            ComponentState::Content => ControlledValue::Text("matrix content".to_owned()),
+            ComponentState::Value => match root.spec().archetype() {
+                ComponentArchetype::Range => ControlledValue::Number(24.0),
+                _ => ControlledValue::Text("matrix value".to_owned()),
+            },
+            ComponentState::Selection | ComponentState::Expanded => ControlledValue::Keys(vec![
+                root.parts()
+                    .iter()
+                    .find(|part| part.role() == tela_ui_headless::ComponentPartRole::Item)
+                    .expect("stateful collection must expose an item")
+                    .key()
+                    .0
+                    .clone(),
+            ]),
+            ComponentState::Open | ComponentState::Disabled | ComponentState::Loading => {
+                ControlledValue::Bool(true)
+            }
+            ComponentState::Items => {
+                ControlledValue::Keys(vec!["matrix alpha".to_owned(), "matrix beta".to_owned()])
+            }
+            ComponentState::Query => ControlledValue::Text("matrix query".to_owned()),
+            ComponentState::Range => ControlledValue::Number(42.0),
+            ComponentState::CurrentPage => ControlledValue::Number(2.0),
+            ComponentState::Progress => ControlledValue::Number(48.0),
+            ComponentState::Error => ControlledValue::Text("matrix error".to_owned()),
+        }
+    }
+
+    fn catalog_state_context(root: ComponentRoot, state: ComponentState) -> ComponentRoot {
+        if root.spec().archetype() == ComponentArchetype::Layer && state != ComponentState::Open {
+            root.state(ComponentState::Open, ControlledValue::Bool(true))
+        } else {
+            root
+        }
+    }
+
+    fn catalog_fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        hash
+    }
+
+    fn click_action(app: &mut App, action_key: &str) {
         app.ensure_frame();
         let tree = app.tree.as_ref().expect("tree");
         let node_id = tree
-            .node_ids()
-            .iter()
-            .copied()
-            .find(|id| {
-                node_at(tree.root(), id.0 as usize, &mut 0)
-                    .and_then(|node| node.interact.as_ref())
-                    .and_then(|interact| interact.bind_id.as_ref())
-                    .is_some_and(|bound| {
-                        bound.0 == bind_id || bound.0 == format!("ui.invoke:{bind_id}")
-                    })
-            })
-            .expect("交互绑定应存在");
+            .node_id_for_key(&node_key_for_component_part(action_key))
+            .expect("交互动作键应存在");
         let hit = app
             .frame()
             .hit_regions
             .iter()
             .find(|region| region.node_id == node_id)
-            .expect("交互绑定应有命中区");
-        app.handle_pointer(PointerEvent::Down {
-            position: tela_contract::Point {
-                x: hit.rect.x + hit.rect.w.min(320.0) / 2.0,
-                y: hit.rect.y + hit.rect.h / 2.0,
-            },
-        });
+            .expect("交互动作键应有命中区");
+        let position = tela_contract::Point {
+            x: hit.rect.x + hit.rect.w.min(320.0) / 2.0,
+            y: hit.rect.y + hit.rect.h / 2.0,
+        };
+        app.handle_pointer(PointerEvent::mouse_down(position));
+        app.handle_pointer(PointerEvent::mouse_up(position));
     }
 
     #[test]
@@ -644,6 +765,91 @@ mod tests {
         for label in ["TELA 文件", "新建", "工作区", "README.md"] {
             assert!(labels.contains(&label.to_owned()), "缺少 {label}");
         }
+    }
+
+    #[test]
+    fn desktop_shell_has_a_stable_raster_reference() {
+        let mut app = App::new(&TEST_RESOURCES);
+        app.set_viewport(960.0, 640.0);
+        assert!(app.ensure_frame());
+
+        let bitmap = render_frame(
+            app.frame(),
+            &RasterConfig::default_with(Color::rgba(1.0, 1.0, 1.0, 1.0)),
+        );
+        assert_eq!((bitmap.width, bitmap.height), (960, 640));
+        assert!(
+            bitmap
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel != [255, 255, 255, 255]),
+            "桌面业务视图不能退化为空白 raster"
+        );
+
+        // FNV-1a 指纹是完整 RGBA 缓冲的紧凑 golden reference；视觉改动必须显式更新它。
+        assert_eq!(raster_fingerprint(&bitmap.pixels), 964_169_848_808_499_583);
+    }
+
+    #[test]
+    fn desktop_catalog_raster_reference_is_stable_at_the_application_boundary() {
+        let viewport = Viewport {
+            width: 360.0,
+            height: 240.0,
+        };
+        let background = Color::rgba(1.0, 1.0, 1.0, 1.0);
+        let mut hash = 14_695_981_039_346_656_037_u64;
+        for spec in COMPONENT_CATALOG {
+            if !spec.contract().recipes.desktop {
+                continue;
+            }
+            for state in
+                std::iter::once(None).chain(spec.contract().states.iter().copied().map(Some))
+            {
+                let root = match state {
+                    None => spec.root(format!("reference.raster.desktop.{}", spec.name)),
+                    Some(state) => {
+                        let baseline = catalog_state_context(
+                            spec.root(format!("reference.raster.desktop.{}.{state:?}", spec.name)),
+                            state,
+                        );
+                        baseline
+                            .clone()
+                            .state(state, catalog_matrix_value(&baseline, state))
+                    }
+                };
+                let tree = UiTree::new(DesktopRecipe::new(&root).into_node().unwrap_or_else(
+                    |error| panic!("{} {state:?} raster recipe: {error:?}", spec.name),
+                ))
+                .unwrap_or_else(|error| panic!("{} {state:?} raster tree: {error:?}", spec.name));
+                let frame = tree
+                    .resolve(viewport, &TEST_TEXT_MEASURER, &HashMap::new())
+                    .unwrap_or_else(|error| {
+                        panic!("{} {state:?} raster frame: {error:?}", spec.name)
+                    });
+                let bitmap = render_frame(&frame, &RasterConfig::default_with(background));
+                assert_eq!(
+                    (bitmap.width, bitmap.height),
+                    (viewport.width as u32, viewport.height as u32),
+                    "{} {state:?} raster dimensions",
+                    spec.name
+                );
+                assert!(
+                    bitmap
+                        .pixels
+                        .chunks_exact(4)
+                        .any(|pixel| pixel != [255, 255, 255, 255]),
+                    "{} {state:?} must not produce a blank raster",
+                    spec.name
+                );
+                hash = catalog_fnv1a(hash, spec.name.as_bytes());
+                hash = catalog_fnv1a(hash, format!("{state:?}").as_bytes());
+                hash = catalog_fnv1a(hash, &bitmap.pixels);
+            }
+        }
+        assert_eq!(
+            hash, 5_309_942_653_942_596_073,
+            "update the raster reference intentionally after visual review"
+        );
     }
 
     #[test]
@@ -736,7 +942,7 @@ mod tests {
         app.mark_view_dirty();
         assert!(app.ensure_frame());
 
-        assert!(app.dispatch_bind_id("folder.open.2"));
+        assert!(app.dispatch_component_part("folder.open.2"));
         assert_eq!(app.session.current_dir, 2);
         assert_eq!(app.view_state.scroll(&detail_key), ScrollState::default());
         assert!(app.ensure_frame());
@@ -1128,19 +1334,19 @@ mod tests {
     }
 
     #[test]
-    fn component_bindings_route_selection_directory_navigation_and_commands() {
+    fn component_parts_route_selection_directory_navigation_and_commands() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.dispatch_bind_id("entry.select.5"));
+        assert!(app.dispatch_component_part("entry.select.5"));
         assert_eq!(app.session.selected, BTreeSet::from([5]));
-        assert!(app.dispatch_bind_id("command.toggle-view"));
+        assert!(app.dispatch_component_part("command.toggle-view"));
         assert_eq!(app.session.view, crate::domain::DirectoryView::Grid);
-        assert!(app.dispatch_bind_id("filter.favorites"));
+        assert!(app.dispatch_component_part("filter.favorites"));
         assert_eq!(app.session.filter, crate::domain::EntryFilter::Favorites);
-        assert!(app.dispatch_bind_id("folder.open.2"));
+        assert!(app.dispatch_component_part("folder.open.2"));
         assert_eq!(app.session.current_dir, 2);
         assert_eq!(app.session.filter, crate::domain::EntryFilter::All);
-        assert!(app.dispatch_bind_id("command.new-folder"));
-        assert!(app.dispatch_bind_id("operation.confirm"));
+        assert!(app.dispatch_component_part("command.new-folder"));
+        assert!(app.dispatch_component_part("operation.confirm"));
         assert!(
             app.model
                 .entries_in_filtered(2, "", app.session.filter, app.session.sort)
@@ -1170,7 +1376,7 @@ mod tests {
     #[test]
     fn operation_modal_requires_confirm_and_writes_its_controlled_draft() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert!(app.dispatch_component_part("command.new-folder"));
         assert_eq!(
             app.session.operation.as_ref().map(|draft| &draft.value),
             Some(&"新建文件夹".to_owned())
@@ -1183,7 +1389,7 @@ mod tests {
                 .iter()
                 .all(|entry| entry.name != "验收目录")
         );
-        assert!(app.dispatch_bind_id("operation.confirm"));
+        assert!(app.dispatch_component_part("operation.confirm"));
         assert!(app.session.operation.is_none());
         assert!(
             app.model
@@ -1191,8 +1397,8 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name == "验收目录")
         );
-        assert!(app.dispatch_bind_id("command.rename"));
-        assert!(app.dispatch_bind_id("operation.cancel"));
+        assert!(app.dispatch_component_part("command.rename"));
+        assert!(app.dispatch_component_part("operation.cancel"));
         assert!(app.session.operation.is_none());
         assert_eq!(app.session.notice, "已取消操作");
     }
@@ -1200,7 +1406,7 @@ mod tests {
     #[test]
     fn operation_draft_commits_at_boundaries_and_does_not_survive_a_reopen() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert!(app.dispatch_component_part("command.new-folder"));
         assert_eq!(app.set_input_value("仅本地草稿".to_owned()), 1);
         assert_eq!(
             app.session
@@ -1220,22 +1426,23 @@ mod tests {
                 .map(|draft| draft.value.as_str()),
             Some("仅本地草稿")
         );
-        assert!(app.dispatch_bind_id("operation.cancel"));
-        assert!(app.dispatch_bind_id("command.add-tag"));
+        assert!(app.dispatch_component_part("operation.cancel"));
+        assert!(app.dispatch_component_part("command.add-tag"));
         app.ensure_frame();
         assert_eq!(app.input_value(), "重点");
         assert_eq!(app.set_input_value("临时标签".to_owned()), 1);
         assert_eq!(app.input_cancel(), 1);
         assert_eq!(app.input_value(), "重点");
-        assert!(app.dispatch_bind_id("operation.cancel"));
-        assert!(app.dispatch_bind_id("command.add-tag"));
+        assert!(app.dispatch_component_part("operation.cancel"));
+        assert!(app.dispatch_component_part("command.add-tag"));
         app.ensure_frame();
         assert_eq!(app.input_value(), "重点");
 
+        assert!(app.dispatch_component_part("operation.cancel"));
         app.session.select(5);
-        assert!(app.dispatch_bind_id("command.rename"));
+        assert!(app.dispatch_component_part("command.rename"));
         assert_eq!(app.set_input_value("README-已重命名.md".to_owned()), 1);
-        assert!(app.dispatch_bind_id("operation.confirm"));
+        assert!(app.dispatch_component_part("operation.confirm"));
         assert_eq!(
             app.model.entry(5).map(|entry| entry.name.as_str()),
             Some("README-已重命名.md")
@@ -1260,7 +1467,7 @@ mod tests {
         app.set_viewport(1199.0, 800.0);
         app.ensure_frame();
         let before = readme_x(&app);
-        assert!(app.dispatch_bind_id("navigation.toggle"));
+        assert!(app.dispatch_component_part("navigation.toggle"));
         app.ensure_frame();
         assert_eq!(readme_x(&app), before);
         let trace = std::str::from_utf8(app.frame_trace()).unwrap();
@@ -1268,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn canvas_hit_testing_routes_bound_actions_through_core() {
+    fn canvas_hit_testing_routes_semantic_actions_through_core() {
         let mut app = App::new(&TEST_RESOURCES);
         app.ensure_frame();
         assert!(app.frame().hit_regions.iter().all(|region| {
@@ -1277,35 +1484,27 @@ mod tests {
                 && region.rect.w.is_finite()
                 && region.rect.h.is_finite()
         }));
-        click_bound(&mut app, "entry.select.5");
+        click_action(&mut app, "entry.select.5");
         assert_eq!(app.session.selected, BTreeSet::from([5]));
-        click_bound(&mut app, "folder.open.1");
+        click_action(&mut app, "folder.open.1");
         assert_eq!(app.session.current_dir, 1);
-        click_bound(&mut app, "folder.open.2");
+        click_action(&mut app, "folder.open.2");
         assert_eq!(app.session.current_dir, 2);
-        click_bound(&mut app, "entry.select.8");
-        click_bound(&mut app, "command.rename");
+        click_action(&mut app, "entry.select.8");
+        click_action(&mut app, "command.rename");
         assert!(app.session.operation.is_some());
-        click_bound(&mut app, "operation.confirm");
+        click_action(&mut app, "operation.confirm");
         assert!(app.session.operation.is_none());
         assert_eq!(app.model.entry(5).expect("README 存在").name, "README.md");
     }
 
     #[test]
-    fn toolbar_hover_is_projected_from_core_view_state_without_a_component_key() {
+    fn toolbar_hover_is_projected_from_core_view_state_by_semantic_action_key() {
         let mut app = App::new(&TEST_RESOURCES);
         app.ensure_frame();
         let tree = app.tree.as_ref().expect("tree");
         let node_id = tree
-            .node_ids()
-            .iter()
-            .copied()
-            .find(|id| {
-                node_at(tree.root(), id.0 as usize, &mut 0)
-                    .and_then(|node| node.interact.as_ref())
-                    .and_then(|interact| interact.bind_id.as_ref())
-                    .is_some_and(|bind| bind.0 == "ui.invoke:command.new-folder")
-            })
+            .node_id_for_key(&SemanticKey("command.new-folder".to_owned()))
             .expect("Toolbar 新建项应存在");
         let hit = app
             .frame()
@@ -1313,21 +1512,25 @@ mod tests {
             .iter()
             .find(|region| region.node_id == node_id)
             .expect("Toolbar 新建项应可命中");
-        app.handle_pointer(PointerEvent::Move {
-            position: tela_contract::Point {
-                x: hit.rect.x + 1.0,
-                y: hit.rect.y + 1.0,
-            },
-        });
+        app.handle_pointer(PointerEvent::mouse_move(tela_contract::Point {
+            x: hit.rect.x + 1.0,
+            y: hit.rect.y + 1.0,
+        }));
         assert_eq!(
-            app.hovered_toolbar_target.as_deref(),
+            app.hovered_toolbar_action_key
+                .as_ref()
+                .map(|key| key.0.as_str()),
             Some("command.new-folder")
         );
         assert!(app.ensure_frame());
-        app.handle_pointer(PointerEvent::Move {
-            position: tela_contract::Point { x: -1.0, y: -1.0 },
-        });
-        assert_eq!(app.hovered_toolbar_target, None, "离开必须恢复状态栏投影");
+        app.handle_pointer(PointerEvent::mouse_move(tela_contract::Point {
+            x: -1.0,
+            y: -1.0,
+        }));
+        assert_eq!(
+            app.hovered_toolbar_action_key, None,
+            "离开必须恢复状态栏投影"
+        );
         assert!(app.ensure_frame());
     }
 
@@ -1339,15 +1542,7 @@ mod tests {
         app.ensure_frame();
         let tree = app.tree.as_ref().expect("tree");
         let node_id = tree
-            .node_ids()
-            .iter()
-            .copied()
-            .find(|id| {
-                node_at(tree.root(), id.0 as usize, &mut 0)
-                    .and_then(|node| node.interact.as_ref())
-                    .and_then(|interact| interact.bind_id.as_ref())
-                    .is_some_and(|bind| bind.0 == "ui.invoke:command.rename")
-            })
+            .node_id_for_key(&SemanticKey("command.rename".to_owned()))
             .expect("选中项目后 Toolbar 重命名项应存在");
         let hit = app
             .frame()
@@ -1355,14 +1550,14 @@ mod tests {
             .iter()
             .find(|region| region.node_id == node_id)
             .expect("Toolbar 重命名项应可命中");
-        app.handle_pointer(PointerEvent::Move {
-            position: tela_contract::Point {
-                x: hit.rect.x + 1.0,
-                y: hit.rect.y + 1.0,
-            },
-        });
+        app.handle_pointer(PointerEvent::mouse_move(tela_contract::Point {
+            x: hit.rect.x + 1.0,
+            y: hit.rect.y + 1.0,
+        }));
         assert_eq!(
-            app.hovered_toolbar_target.as_deref(),
+            app.hovered_toolbar_action_key
+                .as_ref()
+                .map(|key| key.0.as_str()),
             Some("command.rename")
         );
 
@@ -1370,7 +1565,7 @@ mod tests {
         app.invalidate_frame();
         app.ensure_frame();
         assert_eq!(
-            app.hovered_toolbar_target, None,
+            app.hovered_toolbar_action_key, None,
             "已卸载节点的 core hover key 不得继续投影旧状态栏说明"
         );
     }
@@ -1463,7 +1658,7 @@ mod tests {
         app.ensure_frame();
         assert_eq!(app.handle_raw_key_codes(0x2b, 0, false), 1);
         let background_focus = app.view_state.current_focus_key().cloned();
-        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert!(app.dispatch_component_part("command.new-folder"));
         assert!(app.ensure_frame());
         assert!(app.session.operation.is_some());
         let modal_focus = app.view_state.current_focus_key().cloned();
@@ -1531,7 +1726,7 @@ mod tests {
     fn modal_keymap_scope_overrides_the_default_snapshot_layer() {
         let mut app = App::new(&TEST_RESOURCES);
         app.ensure_frame();
-        assert!(app.dispatch_bind_id("command.new-folder"));
+        assert!(app.dispatch_component_part("command.new-folder"));
         assert!(app.ensure_frame());
         assert!(
             app.operation_input_focused(),

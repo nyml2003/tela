@@ -1,9 +1,9 @@
 //! 带本地草稿语义的文本输入分子组件。
 
-use tela_contract::UiNode;
+use tela_contract::{BindId, UiNode};
 use tela_ui_foundation::Input;
 
-use crate::{IntentTarget, local_state::DraftInputSnapshot};
+use crate::local_state::DraftInputSnapshot;
 
 /// 主题中立的草稿文本输入。
 ///
@@ -11,7 +11,7 @@ use crate::{IntentTarget, local_state::DraftInputSnapshot};
 /// [`Input`] 节点，因此不会要求页面管理 tela key。
 pub struct DraftInput {
     snapshot: DraftInputSnapshot,
-    target: IntentTarget,
+    bind_id: BindId,
     placeholder: String,
     disabled: bool,
     focused: bool,
@@ -20,10 +20,10 @@ pub struct DraftInput {
 
 impl DraftInput {
     /// 由当前运行时快照创建输入组件。
-    pub fn new(snapshot: DraftInputSnapshot, target: impl Into<IntentTarget>) -> Self {
+    pub fn new(snapshot: DraftInputSnapshot, bind_id: impl Into<String>) -> Self {
         Self {
             snapshot,
-            target: target.into(),
+            bind_id: BindId(bind_id.into()),
             placeholder: String::new(),
             disabled: false,
             focused: false,
@@ -63,7 +63,7 @@ impl DraftInput {
     /// 构建本帧节点树。
     pub fn into_node(self) -> UiNode {
         Input::new()
-            .bind_id(self.target.as_str())
+            .bind_id(self.bind_id.0)
             .value(self.snapshot.value())
             .placeholder(self.placeholder)
             .disabled(self.disabled)

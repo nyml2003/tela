@@ -2,12 +2,12 @@
 
 use tela_contract::{
     BorderRadius, Color, Fill, IconName, IconProvider, IdentityConcern, Insets, KeyStrategy,
-    LayoutConcern, Size, UiNode, VisualConcern,
+    LayoutConcern, SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::LayoutContainer;
 use tela_ui_foundation::{Button, ButtonPalette, ButtonState, ButtonVariant};
 
-use crate::{IconButton, intent::IntentTarget};
+use crate::IconButton;
 
 /// Toolbar 的视觉与布局参数。
 ///
@@ -62,7 +62,7 @@ impl Default for ToolbarStyle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolbarItem {
     label: String,
-    target: IntentTarget,
+    action_key: SemanticKey,
     icon: Option<IconName>,
     show_label: bool,
     disabled: bool,
@@ -73,10 +73,10 @@ pub struct ToolbarItem {
 
 impl ToolbarItem {
     /// 创建一个普通命令项。
-    pub fn new(label: impl Into<String>, target: impl Into<IntentTarget>) -> Self {
+    pub fn new(label: impl Into<String>, action_key: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            target: target.into(),
+            action_key: SemanticKey(action_key.into()),
             icon: None,
             show_label: true,
             disabled: false,
@@ -98,7 +98,7 @@ impl ToolbarItem {
         self
     }
 
-    /// 设置禁用态。禁用项不会产生 `UiIntent`。
+    /// 设置禁用态。禁用项不会产生激活动作。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -124,9 +124,9 @@ impl ToolbarItem {
         self
     }
 
-    /// 返回此项的业务意图目标。
-    pub fn target(&self) -> &IntentTarget {
-        &self.target
+    /// 返回此项的稳定组件动作 key。
+    pub fn action_key(&self) -> &SemanticKey {
+        &self.action_key
     }
 
     fn into_node(
@@ -136,6 +136,7 @@ impl ToolbarItem {
         button_border_radius: f32,
         icons: &dyn IconProvider,
     ) -> UiNode {
+        let action_key = self.action_key.clone();
         let mut button = if let Some(icon) = self.icon {
             let mut value = IconButton::new(icon)
                 .size(self.width, 30.0)
@@ -161,9 +162,7 @@ impl ToolbarItem {
                 value = value.palette(palette);
             }
             let mut node = value.into_node(icons);
-            if let Some(interact) = &mut node.interact {
-                interact.bind_id = Some(self.target.bind_id());
-            }
+            node.identity = Some(action_identity(action_key));
             return node;
         } else {
             // 兼容无图标的调用方，继续使用已有原子按钮。
@@ -188,9 +187,7 @@ impl ToolbarItem {
             button = button.palette(palette);
         }
         let mut node = button.into_node();
-        if let Some(interact) = &mut node.interact {
-            interact.bind_id = Some(self.target.bind_id());
-        }
+        node.identity = Some(action_identity(action_key));
         node
     }
 }
@@ -202,7 +199,7 @@ impl ToolbarItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolbarOverflow {
     label: String,
-    target: IntentTarget,
+    action_key: SemanticKey,
     items: Vec<ToolbarItem>,
     width: f32,
 }
@@ -211,12 +208,12 @@ impl ToolbarOverflow {
     /// 创建溢出入口及其逻辑项目。
     pub fn new(
         label: impl Into<String>,
-        target: impl Into<IntentTarget>,
+        action_key: impl Into<String>,
         items: Vec<ToolbarItem>,
     ) -> Self {
         Self {
             label: label.into(),
-            target: target.into(),
+            action_key: SemanticKey(action_key.into()),
             items,
             width: 52.0,
         }
@@ -228,9 +225,9 @@ impl ToolbarOverflow {
         self
     }
 
-    /// 返回溢出入口目标。
-    pub fn target(&self) -> &IntentTarget {
-        &self.target
+    /// 返回溢出入口的稳定组件动作 key。
+    pub fn action_key(&self) -> &SemanticKey {
+        &self.action_key
     }
 
     /// 返回由宿主在后续菜单中消费的项目。
@@ -239,7 +236,7 @@ impl ToolbarOverflow {
     }
 
     fn trigger(&self) -> ToolbarItem {
-        ToolbarItem::new(self.label.clone(), self.target.clone()).width(self.width)
+        ToolbarItem::new(self.label.clone(), self.action_key.0.clone()).width(self.width)
     }
 }
 
@@ -249,7 +246,7 @@ pub struct Toolbar {
     overflow: Option<ToolbarOverflow>,
     prefix: Option<UiNode>,
     style: ToolbarStyle,
-    hovered_target: Option<String>,
+    hovered_action_key: Option<SemanticKey>,
 }
 
 impl Default for Toolbar {
@@ -266,7 +263,7 @@ impl Toolbar {
             overflow: None,
             prefix: None,
             style: ToolbarStyle::default(),
-            hovered_target: None,
+            hovered_action_key: None,
         }
     }
 
@@ -282,14 +279,12 @@ impl Toolbar {
         self
     }
 
-    /// 以目标路由名向指定项目投影 core 的当前悬停状态。
-    ///
-    /// 业务页面不管理 tela key；该路由值仅用于本次受控 view 投影。
-    pub fn hovered_target(mut self, target: Option<&str>) -> Self {
+    /// 以稳定组件动作 key 向指定项目投影 core 的当前悬停状态。
+    pub fn hovered_action_key(mut self, action_key: Option<&SemanticKey>) -> Self {
         for item in &mut self.items {
-            item.hovered = Some(item.target.as_str()) == target;
+            item.hovered = Some(item.action_key()) == action_key;
         }
-        self.hovered_target = target.map(str::to_owned);
+        self.hovered_action_key = action_key.cloned();
         self
     }
 
@@ -308,8 +303,8 @@ impl Toolbar {
     /// 生成本帧节点树。
     ///
     /// Toolbar 的项目可由选择、权限或窗口宽度条件增删，因此它只在集合边界声明 core 的
-    /// `AutoStableIdentity` 策略。调用方不提供、组件也不保存 tela key；实际身份仍由 core
-    /// 根据稳定命令绑定分配。
+    /// `AutoStableIdentity` 策略。每个命令的稳定语义 key 由 `ToolbarItem` 自身携带，
+    /// EventRegistry 在当前帧把该 key 路由到组件事件。
     pub fn into_node(self, icons: &dyn IconProvider) -> UiNode {
         let mut children: Vec<UiNode> = self
             .items
@@ -329,7 +324,7 @@ impl Toolbar {
         if let Some(overflow) = self.overflow {
             children.push(LayoutContainer::spacer().into());
             let mut trigger = overflow.trigger();
-            trigger.hovered = Some(trigger.target.as_str()) == self.hovered_target.as_deref();
+            trigger.hovered = Some(trigger.action_key()) == self.hovered_action_key.as_ref();
             children.push(trigger.into_node(
                 self.style.button_palette,
                 self.style.destructive_button_palette,
@@ -361,13 +356,20 @@ impl Toolbar {
     }
 }
 
+fn action_identity(action_key: SemanticKey) -> IdentityConcern {
+    IdentityConcern {
+        key_strategy: KeyStrategy::SemanticId,
+        semantic_key: Some(action_key),
+        update_mode: UpdateMode::Dirty,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Toolbar, ToolbarItem, ToolbarOverflow, ToolbarStyle};
-    use crate::{UiIntent, intent_from_action};
     use tela_contract::{
         BorderRadius, Color, IconName, IconOpticalMetrics, IconProvider, IconRequest,
-        IconResolveError, IconVisual, NodeId, SemanticKey, TextContent, TextStyleRef, UiAction,
+        IconResolveError, IconVisual, SemanticKey, TextContent, TextStyleRef,
     };
     use tela_core::{IdentityAllocator, Primitive, UiTree};
 
@@ -392,34 +394,33 @@ mod tests {
         }
     }
 
-    fn key_for_target(tree: &UiTree, target: &str) -> SemanticKey {
-        let bind_id = format!("ui.invoke:{target}");
+    fn key_for_action(tree: &UiTree, action_key: &str) -> SemanticKey {
         tree.keys()
             .iter()
-            .find(|key| {
-                tree.interact_for_key(key)
-                    .and_then(|interact| interact.bind_id.as_ref())
-                    .is_some_and(|candidate| candidate.0 == bind_id)
-            })
+            .find(|key| key.0 == action_key)
             .cloned()
-            .expect("Toolbar 项目应有稳定 core key")
+            .expect("Toolbar 项目应有稳定 semantic key")
     }
 
     #[test]
-    fn enabled_item_maps_click_to_invoke() {
+    fn enabled_item_exposes_a_clickable_semantic_action_key() {
         let node = Toolbar::new()
             .item(ToolbarItem::new("刷新", "command.refresh").width(64.0))
             .into_node(&TestIcons);
         let button = &node.children[0];
-        let bind_id = button
-            .interact
-            .as_ref()
-            .and_then(|interact| interact.bind_id.as_ref());
+        assert!(
+            button
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.clickable)
+        );
         assert_eq!(
-            intent_from_action(&UiAction::Click { node_id: NodeId(1) }, bind_id),
-            Some(UiIntent::Invoke {
-                target: "command.refresh".into(),
-            })
+            button
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.semantic_key.as_ref())
+                .map(|key| key.0.as_str()),
+            Some("command.refresh")
         );
     }
 
@@ -436,7 +437,7 @@ mod tests {
         let node = Toolbar::new()
             .item(ToolbarItem::new("刷新", "command.refresh"))
             .item(ToolbarItem::new("同步", "command.sync"))
-            .hovered_target(Some("command.sync"))
+            .hovered_action_key(Some(&SemanticKey("command.sync".to_owned())))
             .into_node(&TestIcons);
         let first = node.children[0]
             .visual
@@ -457,19 +458,17 @@ mod tests {
             vec![ToolbarItem::new("导出", "command.export")],
         );
         assert_eq!(overflow.items().len(), 1);
-        assert_eq!(overflow.target().as_str(), "toolbar.more");
+        assert_eq!(overflow.action_key().0, "toolbar.more");
 
         let node = Toolbar::new().overflow(overflow).into_node(&TestIcons);
         let trigger = node.children.last().expect("overflow trigger");
-        let bind_id = trigger
-            .interact
-            .as_ref()
-            .and_then(|interact| interact.bind_id.as_ref());
         assert_eq!(
-            intent_from_action(&UiAction::Click { node_id: NodeId(2) }, bind_id),
-            Some(UiIntent::Invoke {
-                target: "toolbar.more".into(),
-            })
+            trigger
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.semantic_key.as_ref())
+                .map(|key| key.0.as_str()),
+            Some("toolbar.more")
         );
     }
 
@@ -485,8 +484,8 @@ mod tests {
             &mut allocator,
         )
         .expect("Toolbar 应构成合法树");
-        let rename_key = key_for_target(&first, "command.rename");
-        let view_key = key_for_target(&first, "command.toggle-view");
+        let rename_key = key_for_action(&first, "command.rename");
+        let view_key = key_for_action(&first, "command.toggle-view");
 
         let second = UiTree::new_with_allocator(
             Toolbar::new()
@@ -502,7 +501,7 @@ mod tests {
             "被卸载命令的 key 不能复用给后续项目"
         );
         assert_eq!(
-            key_for_target(&second, "command.toggle-view"),
+            key_for_action(&second, "command.toggle-view"),
             view_key,
             "同一命令移动后仍由 core 保持其身份"
         );

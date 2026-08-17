@@ -29,11 +29,12 @@ impl DefaultApplicationProfile {
         Self::default()
     }
 
-    /// Reconciles cross-frame focus and hover state against a newly built tree.
+    /// Reconciles cross-frame focus, hover, and pointer capture state against a newly built tree.
     ///
     pub fn reconcile_tree(&self, tree: &UiTree, view_state: &mut ViewStateStore) {
         view_state.reconcile_focus(&tree.focusable_nodes());
         view_state.reconcile_hover(tree.keys());
+        view_state.reconcile_pointers(tree.keys());
     }
 
     /// Applies the default modal-entry focus rule after an application has reconciled its view.

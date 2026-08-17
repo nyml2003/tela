@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    BaseSize, Constraints, ContentConcern, CrossAlign, Insets, LayoutBox, LayoutConcern, MinMax,
-    NodeKind, OverlaySpec, Size, StackAlign, TextMeasureRequest, TextMeasurer, UiLayoutError,
-    UiNode, VirtualListSpec,
+    BaseSize, Constraints, ContentConcern, CrossAlign, GridAlign, GridItemPlacement, GridSpec,
+    GridTrack, Insets, LayoutBox, LayoutConcern, MinMax, NodeKind, OverlaySpec, Size, StackAlign,
+    TextMeasureRequest, TextMeasurer, UiLayoutError, UiNode, VirtualListSpec,
 };
 
 /// 布局引擎抽象。
@@ -131,6 +131,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         children: &mut P,
     ) -> Result<LayoutBox, UiLayoutError> {
         self.visit(node);
+        validate_text_constraint_for_measurement(node)?;
         if node.kind.is_logical_container() {
             return self.measure_logical(node, constraints, children);
         }
@@ -146,6 +147,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
                 self.measure_linear(node, constraints, Axis::Width, true, children)
             }
             NodeKind::Wrap => self.measure_wrap(node, constraints, children),
+            NodeKind::Grid(spec) => self.measure_grid(node, spec, constraints, children),
             NodeKind::Frame => self.measure_frame(node, constraints, children),
             // Expanded/Spacer/Overlay only receive their final context from the parent primitive.
             // The fallback makes malformed direct use deterministic; validation rejects it in normal trees.
@@ -235,6 +237,16 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             }
             _ => None,
         };
+        let text_auto_height = match (&node.content, text_metrics) {
+            (Some(ContentConcern::Text(text)), Some(metrics)) => node
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.text_constraint)
+                .and_then(|constraint| constraint.max_lines)
+                .map(|max_lines| metrics.height.min(text.line_height * max_lines as f32))
+                .unwrap_or(metrics.height),
+            _ => 0.0,
+        };
         let w = self.resolve_size_axis(
             node,
             Axis::Width,
@@ -250,7 +262,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             Axis::Height,
             AxisSize {
                 percent_base: constraints.max_h,
-                auto_fallback: text_metrics.map_or(0.0, |metrics| metrics.height),
+                auto_fallback: text_auto_height,
                 min: constraints.min_h,
                 max: constraints.max_h,
             },
@@ -586,6 +598,116 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             h: self_h,
             first_baseline: propagated_baseline(&boxes),
             children: boxes,
+        })
+    }
+
+    /// Grid：轨道先由容器的最终尺寸确定，再以每个 item 的最终单元格约束测量一次。
+    ///
+    /// 轨道不支持隐式内容尺寸，所以不会出现“量完 child 才发现轨道变大”的回溯测量。
+    fn measure_grid<P: ChildMeasurer<M>>(
+        &mut self,
+        node: &UiNode,
+        spec: &GridSpec,
+        constraints: Constraints,
+        child_measurer: &mut P,
+    ) -> Result<LayoutBox, UiLayoutError> {
+        let layout = layout_of(node);
+        let known_w = self.declared_extent(node, Axis::Width, constraints)?;
+        let known_h = self.declared_extent(node, Axis::Height, constraints)?;
+        let inset_w = axis_insets(&layout, Axis::Width);
+        let inset_h = axis_insets(&layout, Axis::Height);
+        let fallback_w = grid_preferred_extent(
+            &spec.columns,
+            spec.column_gap,
+            known_w
+                .map(|extent| (extent - inset_w).max(0.0))
+                .or_else(|| {
+                    constraints
+                        .max_w
+                        .is_finite()
+                        .then_some((constraints.max_w - inset_w).max(0.0))
+                }),
+        )? + inset_w;
+        let fallback_h = grid_preferred_extent(
+            &spec.rows,
+            spec.row_gap,
+            known_h
+                .map(|extent| (extent - inset_h).max(0.0))
+                .or_else(|| {
+                    constraints
+                        .max_h
+                        .is_finite()
+                        .then_some((constraints.max_h - inset_h).max(0.0))
+                }),
+        )? + inset_h;
+        let self_w = known_w.unwrap_or(self.resolve_self_axis(
+            node,
+            Axis::Width,
+            fallback_w,
+            constraints,
+        )?);
+        let self_h = known_h.unwrap_or(self.resolve_self_axis(
+            node,
+            Axis::Height,
+            fallback_h,
+            constraints,
+        )?);
+        let columns =
+            resolve_grid_tracks(&spec.columns, spec.column_gap, (self_w - inset_w).max(0.0))?;
+        let rows = resolve_grid_tracks(&spec.rows, spec.row_gap, (self_h - inset_h).max(0.0))?;
+        let placements = grid_placements(node, columns.len(), rows.len())?;
+        let column_offsets = grid_track_offsets(&columns, spec.column_gap);
+        let row_offsets = grid_track_offsets(&rows, spec.row_gap);
+        let origin_x = content_origin(&layout, Axis::Width);
+        let origin_y = content_origin(&layout, Axis::Height);
+        let mut children = Vec::with_capacity(node.children.len());
+
+        for (index, child) in node.children.iter().enumerate() {
+            let placement = placements[index];
+            let column = usize::from(placement.column);
+            let row = usize::from(placement.row);
+            let width = grid_span_extent(
+                &columns,
+                spec.column_gap,
+                column,
+                usize::from(placement.column_span),
+            )?;
+            let height =
+                grid_span_extent(&rows, spec.row_gap, row, usize::from(placement.row_span))?;
+            let margin = margin_of(child);
+            let available_w = (width - margin_axis(&margin, Axis::Width)).max(0.0);
+            let available_h = (height - margin_axis(&margin, Axis::Height)).max(0.0);
+            let mut child_constraints = Constraints {
+                min_w: 0.0,
+                max_w: available_w,
+                min_h: 0.0,
+                max_h: available_h,
+            };
+            if placement.justify_self == GridAlign::Stretch {
+                child_constraints.min_w = available_w;
+            }
+            if placement.align_self == GridAlign::Stretch {
+                child_constraints.min_h = available_h;
+            }
+            let mut box_ = child_measurer.measure_child(self, child, index, child_constraints)?;
+            box_.x = origin_x
+                + column_offsets[column]
+                + margin.left
+                + grid_align_offset(placement.justify_self, box_.w, available_w);
+            box_.y = origin_y
+                + row_offsets[row]
+                + margin.top
+                + grid_align_offset(placement.align_self, box_.h, available_h);
+            children.push(box_);
+        }
+
+        Ok(LayoutBox {
+            x: 0.0,
+            y: 0.0,
+            w: self_w,
+            h: self_h,
+            first_baseline: propagated_baseline(&children),
+            children,
         })
     }
 
@@ -1010,6 +1132,21 @@ fn layout_of(node: &UiNode) -> LayoutConcern {
     node.layout.clone().unwrap_or_default()
 }
 
+/// `UiTree::new` 之外直接调用布局引擎时，仍保持文本约束的同一失败语义。
+fn validate_text_constraint_for_measurement(node: &UiNode) -> Result<(), UiLayoutError> {
+    let Some(constraint) = node
+        .layout
+        .as_ref()
+        .and_then(|layout| layout.text_constraint)
+    else {
+        return Ok(());
+    };
+    if !matches!(node.kind, NodeKind::Text) || !constraint.is_valid() {
+        return Err(UiLayoutError::InvalidTextConstraint);
+    }
+    Ok(())
+}
+
 fn axis_size(node: &UiNode, axis: Axis) -> Option<Size> {
     let layout = node.layout.as_ref()?;
     match axis {
@@ -1212,4 +1349,164 @@ fn stack_align_pos(
         BottomLeft | BottomCenter | BottomRight => (area_h - h).max(0.0),
     };
     (x + offset.x, y + offset.y)
+}
+
+fn grid_preferred_extent(
+    tracks: &[GridTrack],
+    gap: f32,
+    available: Option<f32>,
+) -> Result<f32, UiLayoutError> {
+    validate_grid_tracks(tracks, gap)?;
+    let fixed = tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Fixed(value) => *value,
+            GridTrack::Flex(_) => 0.0,
+        })
+        .sum::<f32>();
+    let minimum = fixed + gap * tracks.len().saturating_sub(1) as f32;
+    if tracks
+        .iter()
+        .any(|track| matches!(track, GridTrack::Flex(_)))
+    {
+        Ok(available.unwrap_or(minimum).max(minimum))
+    } else {
+        Ok(minimum)
+    }
+}
+
+fn resolve_grid_tracks(
+    tracks: &[GridTrack],
+    gap: f32,
+    available: f32,
+) -> Result<Vec<f32>, UiLayoutError> {
+    validate_grid_tracks(tracks, gap)?;
+    let fixed = tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Fixed(value) => *value,
+            GridTrack::Flex(_) => 0.0,
+        })
+        .sum::<f32>();
+    let total_weight = tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Fixed(_) => 0.0,
+            GridTrack::Flex(weight) => *weight,
+        })
+        .sum::<f32>();
+    let free = (available - fixed - gap * tracks.len().saturating_sub(1) as f32).max(0.0);
+    Ok(tracks
+        .iter()
+        .map(|track| match track {
+            GridTrack::Fixed(value) => *value,
+            GridTrack::Flex(weight) => free * *weight / total_weight,
+        })
+        .collect())
+}
+
+fn validate_grid_tracks(tracks: &[GridTrack], gap: f32) -> Result<(), UiLayoutError> {
+    if tracks.is_empty()
+        || !gap.is_finite()
+        || gap < 0.0
+        || tracks.iter().any(|track| match track {
+            GridTrack::Fixed(value) => !value.is_finite() || *value < 0.0,
+            GridTrack::Flex(weight) => !weight.is_finite() || *weight <= 0.0,
+        })
+    {
+        return Err(UiLayoutError::InvalidGrid);
+    }
+    Ok(())
+}
+
+fn grid_track_offsets(tracks: &[f32], gap: f32) -> Vec<f32> {
+    let mut offsets = Vec::with_capacity(tracks.len());
+    let mut cursor = 0.0;
+    for track in tracks {
+        offsets.push(cursor);
+        cursor += *track + gap;
+    }
+    offsets
+}
+
+fn grid_span_extent(
+    tracks: &[f32],
+    gap: f32,
+    start: usize,
+    span: usize,
+) -> Result<f32, UiLayoutError> {
+    if span == 0 || start >= tracks.len() || start.saturating_add(span) > tracks.len() {
+        return Err(UiLayoutError::InvalidGrid);
+    }
+    Ok(tracks[start..start + span].iter().sum::<f32>() + gap * (span - 1) as f32)
+}
+
+fn grid_align_offset(align: GridAlign, child_extent: f32, available: f32) -> f32 {
+    match align {
+        GridAlign::Start | GridAlign::Stretch => 0.0,
+        GridAlign::Center => ((available - child_extent) / 2.0).max(0.0),
+        GridAlign::End => (available - child_extent).max(0.0),
+    }
+}
+
+fn grid_placements(
+    node: &UiNode,
+    columns: usize,
+    rows: usize,
+) -> Result<Vec<GridItemPlacement>, UiLayoutError> {
+    if columns == 0 || rows == 0 {
+        return Err(UiLayoutError::InvalidGrid);
+    }
+    let mut occupied = vec![false; columns * rows];
+    for child in &node.children {
+        if let Some(placement) = child.layout.as_ref().and_then(|layout| layout.grid_item) {
+            occupy_layout_grid_cells(&mut occupied, columns, rows, placement)?;
+        }
+    }
+    let mut placements = Vec::with_capacity(node.children.len());
+    for child in &node.children {
+        let placement =
+            if let Some(placement) = child.layout.as_ref().and_then(|layout| layout.grid_item) {
+                placement
+            } else {
+                let Some(index) = occupied.iter().position(|occupied| !occupied) else {
+                    return Err(UiLayoutError::InvalidGrid);
+                };
+                occupied[index] = true;
+                GridItemPlacement::at((index % columns) as u16, (index / columns) as u16)
+            };
+        placements.push(placement);
+    }
+    Ok(placements)
+}
+
+fn occupy_layout_grid_cells(
+    occupied: &mut [bool],
+    columns: usize,
+    rows: usize,
+    placement: GridItemPlacement,
+) -> Result<(), UiLayoutError> {
+    let column = usize::from(placement.column);
+    let row = usize::from(placement.row);
+    let column_span = usize::from(placement.column_span);
+    let row_span = usize::from(placement.row_span);
+    if column_span == 0
+        || row_span == 0
+        || column >= columns
+        || row >= rows
+        || column.saturating_add(column_span) > columns
+        || row.saturating_add(row_span) > rows
+    {
+        return Err(UiLayoutError::InvalidGrid);
+    }
+    for y in row..row + row_span {
+        for x in column..column + column_span {
+            let cell = &mut occupied[y * columns + x];
+            if *cell {
+                return Err(UiLayoutError::InvalidGrid);
+            }
+            *cell = true;
+        }
+    }
+    Ok(())
 }

@@ -4,9 +4,9 @@
 //! 反查文本目标，并在 DOM `blur` 已晚于焦点转移时短暂保存旧目标，保证草稿提交仍回到
 //! 正确的组件实例。
 
-use tela_contract::Value;
+use tela_contract::BindId;
 use tela_core::UiTree;
-use tela_desktop_ui_kit::{DraftInputEvent, DraftInputSnapshot, IntentTarget, UiIntent};
+use tela_desktop_ui_kit::{DraftInputEvent, DraftInputSnapshot};
 
 use super::{App, Intent};
 
@@ -44,11 +44,11 @@ impl App {
         (
             target
                 .as_ref()
-                .is_some_and(|target| target.as_str() == "file.search"),
+                .is_some_and(|target| target.0 == "file.search"),
             self.operation_accepts_input()
                 && target
                     .as_ref()
-                    .is_some_and(|target| target.as_str() == "operation.value"),
+                    .is_some_and(|target| target.0 == "operation.value"),
         )
     }
 
@@ -59,7 +59,7 @@ impl App {
     #[cfg(test)]
     pub(super) fn operation_input_focused(&self) -> bool {
         self.current_text_input_target()
-            .is_some_and(|target| target.as_str() == "operation.value")
+            .is_some_and(|target| target.0 == "operation.value")
     }
 
     /// 当前 Input 是否为 tela-core 焦点；浏览器据此决定是否激活隐藏编辑器。
@@ -128,7 +128,7 @@ impl App {
     }
 
     pub(super) fn commit_operation_input_before_confirm(&mut self) {
-        self.dispatch_draft_input_for(&IntentTarget::new("operation.value"), DraftInputEvent::Blur);
+        self.dispatch_draft_input_for(&BindId("operation.value".to_owned()), DraftInputEvent::Blur);
     }
 
     pub(super) fn input_is_composing(&self) -> bool {
@@ -154,19 +154,15 @@ impl App {
             .unwrap_or(0)
     }
 
-    fn dispatch_draft_input_for(&mut self, target: &IntentTarget, event: DraftInputEvent) -> u32 {
+    fn dispatch_draft_input_for(&mut self, target: &BindId, event: DraftInputEvent) -> u32 {
         let Some(outcome) = self.local_state.dispatch(target, event) else {
             return 0;
         };
         let mut changed = outcome.changed;
-        if let Some(UiIntent::Commit {
-            target,
-            value: Value::String(value),
-        }) = outcome.intent
-        {
-            let intent = match target.as_str() {
-                "operation.value" => Intent::SetOperationValue(value),
-                "file.search" => Intent::SetQuery(value),
+        if let Some(commit) = outcome.commit {
+            let intent = match commit.bind_id.0.as_str() {
+                "operation.value" => Intent::SetOperationValue(commit.value),
+                "file.search" => Intent::SetQuery(commit.value),
                 _ => return u32::from(changed),
             };
             self.apply_controller_intent(intent);
@@ -178,29 +174,24 @@ impl App {
         u32::from(changed)
     }
 
-    fn current_text_input_target(&self) -> Option<IntentTarget> {
+    fn current_text_input_target(&self) -> Option<BindId> {
         self.tree
             .as_ref()
             .and_then(|tree| self.text_input_target_for(tree))
     }
 
-    fn text_input_target_for(&self, tree: &UiTree) -> Option<IntentTarget> {
+    fn text_input_target_for(&self, tree: &UiTree) -> Option<BindId> {
         let key = self.view_state.current_focus_key()?;
         let interact = tree.interact_for_key(key)?;
-        if !interact.text_input {
-            return None;
-        }
-        interact
-            .bind_id
-            .as_ref()
-            .map(|bind_id| IntentTarget::new(bind_id.0.clone()))
+        interact.input?;
+        interact.bind_id.as_ref().cloned()
     }
 
-    fn input_value_for(&self, target: &IntentTarget) -> String {
+    fn input_value_for(&self, target: &BindId) -> String {
         self.local_state
             .snapshot(target)
             .map(|snapshot| snapshot.value().to_owned())
-            .unwrap_or_else(|| match target.as_str() {
+            .unwrap_or_else(|| match target.0.as_str() {
                 "operation.value" => self
                     .session
                     .operation

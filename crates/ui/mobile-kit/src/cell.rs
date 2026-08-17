@@ -4,7 +4,7 @@
 //! 领域对象、导航和手势策略由 Application / Target 分别拥有。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, Insets, InteractConcern, LayoutConcern, Size, UiNode,
+    BorderRadius, Color, Fill, Insets, InteractConcern, LayoutConcern, SemanticKey, Size, UiNode,
     VisualConcern,
 };
 use tela_core::LayoutContainer;
@@ -56,7 +56,7 @@ pub struct MobileCell {
     value: Option<String>,
     leading: Option<UiNode>,
     trailing: Option<UiNode>,
-    target: Option<String>,
+    action_key: Option<SemanticKey>,
     disabled: bool,
     width: f32,
     min_height: f32,
@@ -65,7 +65,7 @@ pub struct MobileCell {
 }
 
 impl MobileCell {
-    /// 创建带主标题的非交互单元；通过 [`Self::target`] 把它变为可点击行。
+    /// 创建带主标题的非交互单元；通过 [`Self::action_key`] 把它变为可点击行。
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -73,7 +73,7 @@ impl MobileCell {
             value: None,
             leading: None,
             trailing: None,
-            target: None,
+            action_key: None,
             disabled: false,
             width: 1.0,
             min_height: 56.0,
@@ -111,9 +111,9 @@ impl MobileCell {
         self
     }
 
-    /// 为可点击单元声明 Application 处理的稳定动作标识。
-    pub fn target(mut self, target: impl Into<String>) -> Self {
-        self.target = Some(target.into());
+    /// 为可点击单元声明 Application 路由的稳定动作键。
+    pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
+        self.action_key = Some(SemanticKey(action_key.into()));
         self
     }
 
@@ -202,13 +202,12 @@ impl MobileCell {
                 ..VisualConcern::default()
             })
             .into();
-        if let Some(target) = self.target {
-            node.identity = Some(semantic_identity(target.clone()));
+        if let Some(action_key) = self.action_key {
+            node.identity = Some(semantic_identity(action_key.0));
             if !self.disabled {
                 node.interact = Some(InteractConcern {
                     clickable: true,
                     focusable: true,
-                    bind_id: Some(BindId(target)),
                     ..InteractConcern::default()
                 });
             }
@@ -361,7 +360,7 @@ mod tests {
         let node = MobileCell::new("设计资料")
             .label("12 个项目")
             .value("今天")
-            .target("mobile.entry.design")
+            .action_key("mobile.entry.design")
             .width(320.0)
             .min_height(8.0)
             .into_node();
@@ -371,9 +370,9 @@ mod tests {
             Some(Size::fixed(MIN_TOUCH_TARGET))
         );
         assert_eq!(
-            node.interact
+            node.identity
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|id| id.0.as_str()),
             Some("mobile.entry.design")
         );

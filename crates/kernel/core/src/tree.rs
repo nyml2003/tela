@@ -47,6 +47,7 @@ impl UiTree {
     ) -> Result<Self, UiBuildError> {
         let root = root.into();
         let result = validate::validate(&root, allocator)?;
+        validate::validate_teleport_references(&root, &result.keys)?;
         Ok(Self {
             root,
             keys: result.keys,
@@ -67,6 +68,25 @@ impl UiTree {
     /// 按深度优先前序遍历序的结构 id（本帧有效，见 003-4）。
     pub fn node_ids(&self) -> &[NodeId] {
         &self.node_ids
+    }
+
+    /// 按本帧结构 id 查询对应的跨帧稳定语义 key。
+    ///
+    /// NodeId 只在当前树有效；调用者若需要跨帧保存身份，必须保存返回的
+    /// SemanticKey，不能保存 NodeId。
+    pub fn key_for_node_id(&self, node_id: NodeId) -> Option<&SemanticKey> {
+        self.node_ids
+            .iter()
+            .position(|candidate| *candidate == node_id)
+            .and_then(|index| self.keys.get(index))
+    }
+
+    /// 按跨帧稳定语义 key 查询本帧结构 id。
+    pub fn node_id_for_key(&self, key: &SemanticKey) -> Option<NodeId> {
+        self.keys
+            .iter()
+            .position(|candidate| candidate == key)
+            .and_then(|index| self.node_ids.get(index).copied())
     }
 
     /// DFS 序节点表（交互层用：节点引用 + 结构 id + key 对齐）。

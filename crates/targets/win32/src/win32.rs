@@ -15,13 +15,14 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
+    time::Instant,
 };
 
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
     Win32WindowHandle, WindowsDisplayHandle,
 };
-use tela_app_abi::{AppEvent, CursorKind};
+use tela_app_abi::{AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, CursorKind};
 use tela_contract::{Color, UiFrame};
 use tela_render_wgpu::WgpuRenderer;
 use windows::{
@@ -192,6 +193,7 @@ struct WindowState {
     startup_cancel: Arc<AtomicBool>,
     device_loss: Arc<Mutex<Option<DeviceLossReport>>>,
     gpu_generation: u64,
+    input_epoch: Instant,
     mouse_leave_tracking: bool,
     pointer_captured: bool,
     startup_error: Option<String>,
@@ -214,6 +216,7 @@ impl WindowState {
             startup_cancel,
             device_loss: Arc::new(Mutex::new(None)),
             gpu_generation: 0,
+            input_epoch: Instant::now(),
             mouse_leave_tracking: false,
             pointer_captured: false,
             startup_error: None,
@@ -481,6 +484,33 @@ impl WindowState {
         Ok(())
     }
 
+    fn mouse_pointer_event(
+        &self,
+        phase: AppPointerPhase,
+        x: f32,
+        y: f32,
+        buttons: u16,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> AppEvent {
+        let timestamp_micros = self
+            .input_epoch
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        AppEvent::Pointer(AppPointerEvent::new(
+            0,
+            AppPointerKind::Mouse,
+            phase,
+            x,
+            y,
+            buttons,
+            timestamp_micros,
+            delta_x,
+            delta_y,
+        ))
+    }
+
     fn key_down(&mut self, virtual_key: u16, repeat: bool) -> Result<bool, String> {
         if !self.lifecycle.can_render() {
             return Ok(false);
@@ -738,7 +768,8 @@ impl WindowState {
 
     fn pointer_left_client(&mut self) -> Result<(), String> {
         self.mouse_leave_tracking = false;
-        self.pointer(AppEvent::PointerMove { x: -1.0, y: -1.0 })
+        let event = self.mouse_pointer_event(AppPointerPhase::Move, -1.0, -1.0, 0, 0.0, 0.0);
+        self.pointer(event)
     }
 
     fn window_focus_changed(&mut self, focused: bool) -> Result<(), String> {
@@ -1082,7 +1113,13 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_KILLFOCUS => {
-            state.end_pointer_capture(false);
+            if state.pointer_captured {
+                state.end_pointer_capture(false);
+                let event =
+                    state.mouse_pointer_event(AppPointerPhase::Cancel, -1.0, -1.0, 0, 0.0, 0.0);
+                let cancel_result = state.pointer(event);
+                handle_window_error(state, cancel_result);
+            }
             let pointer_result = state.pointer_left_client();
             handle_window_error(state, pointer_result);
             let focus_result = state.window_focus_changed(false);
@@ -1093,10 +1130,15 @@ unsafe extern "system" fn window_proc(
             state.begin_mouse_leave_tracking();
             let (x, y) = client_point(lparam);
             let dpi_scale = state.dpi_scale;
-            let result = state.pointer(AppEvent::PointerMove {
-                x: x as f32 / dpi_scale,
-                y: y as f32 / dpi_scale,
-            });
+            let event = state.mouse_pointer_event(
+                AppPointerPhase::Move,
+                x as f32 / dpi_scale,
+                y as f32 / dpi_scale,
+                if state.pointer_captured { 1 } else { 0 },
+                0.0,
+                0.0,
+            );
+            let result = state.pointer(event);
             handle_window_error(state, result);
             LRESULT(0)
         }
@@ -1111,26 +1153,42 @@ unsafe extern "system" fn window_proc(
             state.begin_pointer_capture();
             let (x, y) = client_point(lparam);
             let dpi_scale = state.dpi_scale;
-            let result = state.pointer(AppEvent::PointerDown {
-                x: x as f32 / dpi_scale,
-                y: y as f32 / dpi_scale,
-            });
+            let event = state.mouse_pointer_event(
+                AppPointerPhase::Down,
+                x as f32 / dpi_scale,
+                y as f32 / dpi_scale,
+                1,
+                0.0,
+                0.0,
+            );
+            let result = state.pointer(event);
             handle_window_error(state, result);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
             let (x, y) = client_point(lparam);
             let dpi_scale = state.dpi_scale;
-            let result = state.pointer(AppEvent::PointerUp {
-                x: x as f32 / dpi_scale,
-                y: y as f32 / dpi_scale,
-            });
+            let event = state.mouse_pointer_event(
+                AppPointerPhase::Up,
+                x as f32 / dpi_scale,
+                y as f32 / dpi_scale,
+                0,
+                0.0,
+                0.0,
+            );
+            let result = state.pointer(event);
             handle_window_error(state, result);
             state.end_pointer_capture(true);
             LRESULT(0)
         }
         WM_CAPTURECHANGED | WM_CANCELMODE => {
-            state.end_pointer_capture(false);
+            if state.pointer_captured {
+                state.end_pointer_capture(false);
+                let event =
+                    state.mouse_pointer_event(AppPointerPhase::Cancel, -1.0, -1.0, 0, 0.0, 0.0);
+                let result = state.pointer(event);
+                handle_window_error(state, result);
+            }
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
@@ -1142,12 +1200,15 @@ unsafe extern "system" fn window_proc(
             let _ = unsafe { ScreenToClient(hwnd, &mut point) };
             let delta = ((wparam.0 as u32 >> 16) as u16 as i16) as f32;
             let dpi_scale = state.dpi_scale;
-            let result = state.pointer(AppEvent::PointerScroll {
-                x: point.x as f32 / dpi_scale,
-                y: point.y as f32 / dpi_scale,
-                delta_x: 0.0,
-                delta_y: -(delta / 120.0) * 48.0,
-            });
+            let event = state.mouse_pointer_event(
+                AppPointerPhase::Scroll,
+                point.x as f32 / dpi_scale,
+                point.y as f32 / dpi_scale,
+                0,
+                0.0,
+                -(delta / 120.0) * 48.0,
+            );
+            let result = state.pointer(event);
             handle_window_error(state, result);
             LRESULT(0)
         }

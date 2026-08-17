@@ -6,9 +6,11 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    BorderRadius, BorderStroke, ClipRect, ContentConcern, DrawCommand, DrawPayload, Fill,
-    FocusAppearance, HitRegion, LayoutBox, NodeId, NodeKind, Overflow, Point, Rect, ScrollBounds,
-    ScrollState, SemanticKey, TextMeasurer, UiFrame, UiLayoutError, UiNode, Viewport,
+    AnchorAlign, AnchorSide, AnchoredPlacement, BorderRadius, BorderStroke, ClipRect,
+    ContentConcern, DrawCommand, DrawPayload, Fill, FocusAppearance, HitRegion, LayoutBox, NodeId,
+    NodeKind, Overflow, Point, Rect, ScrollBounds, ScrollState, SemanticKey, TeleportSource,
+    TeleportSpec, TextConstraint, TextContent, TextMeasureRequest, TextMeasurer, TextOverflow,
+    UiFrame, UiLayoutError, UiNode, Viewport,
 };
 
 use crate::layout::{DefaultLayoutEngine, LayoutEngine};
@@ -16,7 +18,7 @@ use crate::tree::UiTree;
 use crate::update::{LayoutCache, measure_dirty};
 
 /// emit 上下文：命令/命中区域收集、滚动输入、节点 id/key 映射、Teleport 顶层队列。
-struct EmitContext<'a> {
+struct EmitContext<'a, M: TextMeasurer + ?Sized> {
     commands: Vec<DrawCommand>,
     hit_regions: Vec<HitRegion>,
     scroll_bounds: Vec<ScrollBounds>,
@@ -26,18 +28,22 @@ struct EmitContext<'a> {
     node_meta: HashMap<usize, (NodeId, SemanticKey)>,
     /// Teleport 提升队列：主遍历后按队列渲染（全局顶层，见 008-3）。
     pending_teleports: Vec<TeleportEntry>,
+    /// 普通树遍历得到的逻辑盒；Teleport 只能锚定这份未提升树中的稳定节点。
+    node_rects: HashMap<SemanticKey, Rect>,
+    viewport: Viewport,
     focus_key: Option<&'a SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
+    text_measurer: &'a M,
 }
 
 /// Teleport 提升项（节点 + 布局盒 + 祖先平移；提升后视觉独立于父布局）。
 struct TeleportEntry {
     node: usize,
     box_: LayoutBox,
-    offset: (f32, f32),
+    spec: TeleportSpec,
 }
 
-impl EmitContext<'_> {
+impl<M: TextMeasurer + ?Sized> EmitContext<'_, M> {
     fn node_meta(&self, node: &UiNode) -> (NodeId, SemanticKey) {
         self.node_meta
             .get(&(node as *const UiNode as usize))
@@ -86,6 +92,7 @@ pub(crate) fn resolve_tree_with_focus(
         tree,
         &root_box,
         viewport,
+        text_measurer,
         scroll_inputs,
         focus_key,
         focus_appearance,
@@ -159,6 +166,7 @@ pub(crate) fn resolve_tree_dirty_with_focus(
         tree,
         &root_box,
         viewport,
+        text_measurer,
         scroll_inputs,
         focus_key,
         focus_appearance,
@@ -166,10 +174,11 @@ pub(crate) fn resolve_tree_dirty_with_focus(
 }
 
 /// 布局盒树 → 帧生成（emit 阶段，Full/Dirty 共用）。
-fn emit_frame_tree(
+fn emit_frame_tree<M: TextMeasurer + ?Sized>(
     tree: &UiTree,
     root_box: &LayoutBox,
     viewport: Viewport,
+    text_measurer: &M,
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
     focus_key: Option<&SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
@@ -188,8 +197,11 @@ fn emit_frame_tree(
         scroll_inputs,
         node_meta,
         pending_teleports: Vec::new(),
+        node_rects: HashMap::new(),
+        viewport,
         focus_key,
         focus_appearance,
+        text_measurer,
     };
     emit_frame(&tree.root, root_box, &mut ctx, (0.0, 0.0), None, false);
     // Teleport 提升：主遍历后按队列渲染（顶层，见 008-3）。
@@ -206,18 +218,36 @@ fn emit_frame_tree(
 }
 
 /// 渲染一个 Teleport 提升项（递归子树，clip 从顶层起算）。
-fn emit_frame_teleport(root: &UiNode, entry: TeleportEntry, ctx: &mut EmitContext<'_>) {
+fn emit_frame_teleport<M: TextMeasurer + ?Sized>(
+    root: &UiNode,
+    entry: TeleportEntry,
+    ctx: &mut EmitContext<'_, M>,
+) {
     // 从根定位 Teleport 子树：DFS 索引同步（entry.node 为 DFS 序索引）。
     let mut nodes = Vec::new();
     collect_refs(root, &mut nodes);
     let Some(node) = nodes.get(entry.node) else {
         return;
     };
+    let anchor = match &entry.spec.source {
+        TeleportSource::Anchor(key) => ctx.node_rects.get(key).copied(),
+    };
+    let Some(anchor) = anchor else {
+        // `UiTree::new` 已验证锚点；这里仍防御性跳过，避免被手工绕过构建入口时产生错误命中区。
+        return;
+    };
+    let offset = place_anchored_overlay(
+        anchor,
+        entry.box_.w,
+        entry.box_.h,
+        entry.spec.placement,
+        ctx.viewport,
+    );
     let children = &node.children;
     // 子树按原 layout box children 遍历（box 树与节点树对齐）。
     let boxes = &entry.box_.children;
     for (child_node, child_box) in children.iter().zip(boxes) {
-        emit_frame(child_node, child_box, ctx, entry.offset, None, true);
+        emit_frame(child_node, child_box, ctx, offset, None, true);
     }
 }
 
@@ -231,10 +261,10 @@ fn collect_refs<'a>(node: &'a UiNode, out: &mut Vec<&'a UiNode>) {
 /// 深度优先同步遍历：节点树 + 盒子树（DFS 序与构建期 id/key 对齐）。
 ///
 /// `offset` 为祖先滚动平移累计；`clip` 为祖先裁剪区域预合并结果。
-fn emit_frame(
+fn emit_frame<M: TextMeasurer + ?Sized>(
     node: &UiNode,
     box_: &LayoutBox,
-    ctx: &mut EmitContext<'_>,
+    ctx: &mut EmitContext<'_, M>,
     offset: (f32, f32),
     clip: Option<ClipRect>,
     expanding_teleport: bool,
@@ -242,12 +272,26 @@ fn emit_frame(
     let (node_id, key) = ctx.node_meta(node);
     let layout = node.layout.as_ref();
 
+    if !expanding_teleport {
+        ctx.node_rects.insert(
+            key.clone(),
+            Rect {
+                x: box_.x + offset.0,
+                y: box_.y + offset.1,
+                w: box_.w,
+                h: box_.h,
+            },
+        );
+    }
+
     // Teleport 提升：主遍历遇到 Teleport 时收集到顶层队列（不原位递归）；展开模式不收集。
-    if matches!(node.kind, NodeKind::Teleport(_)) && !expanding_teleport {
+    if let NodeKind::Teleport(spec) = &node.kind
+        && !expanding_teleport
+    {
         ctx.pending_teleports.push(TeleportEntry {
             node: node_id.0 as usize,
             box_: box_.clone(),
-            offset,
+            spec: spec.clone(),
         });
         // 自身无命令（逻辑容器）；命中区域不产生（Teleport 节点不可交互）。
         return;
@@ -328,13 +372,13 @@ fn emit_frame(
 }
 
 /// 在焦点节点子树之后追加装饰，不进入命中区或布局。
-fn emit_focus_ring(
+fn emit_focus_ring<M: TextMeasurer + ?Sized>(
     node: &UiNode,
     box_: &LayoutBox,
     offset: (f32, f32),
     clip: Option<ClipRect>,
     key: &SemanticKey,
-    ctx: &mut EmitContext<'_>,
+    ctx: &mut EmitContext<'_, M>,
 ) {
     let Some(focus_key) = ctx.focus_key else {
         return;
@@ -377,6 +421,182 @@ fn emit_focus_ring(
             radius,
         },
     });
+}
+
+/// 从锚点、浮层尺寸与视口纯函数地计算 Teleport 的顶层偏移。
+fn place_anchored_overlay(
+    anchor: Rect,
+    overlay_w: f32,
+    overlay_h: f32,
+    placement: AnchoredPlacement,
+    viewport: Viewport,
+) -> (f32, f32) {
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: viewport.width,
+        h: viewport.height,
+    };
+    let mut side = placement.side;
+    let mut position = anchored_origin(anchor, overlay_w, overlay_h, side, placement.align);
+    position.0 += placement.offset.x;
+    position.1 += placement.offset.y;
+
+    if placement.flip {
+        let opposite = opposite_anchor_side(side);
+        let opposite_position = {
+            let mut position =
+                anchored_origin(anchor, overlay_w, overlay_h, opposite, placement.align);
+            position.0 += placement.offset.x;
+            position.1 += placement.offset.y;
+            position
+        };
+        if main_axis_overflow(
+            position,
+            overlay_w,
+            overlay_h,
+            side,
+            viewport,
+            placement.viewport_padding,
+        ) > main_axis_overflow(
+            opposite_position,
+            overlay_w,
+            overlay_h,
+            opposite,
+            viewport,
+            placement.viewport_padding,
+        ) {
+            side = opposite;
+            position = opposite_position;
+        }
+    }
+
+    if placement.shift {
+        shift_cross_axis(
+            &mut position,
+            overlay_w,
+            overlay_h,
+            side,
+            viewport,
+            placement.viewport_padding,
+        );
+    }
+    if placement.clamp {
+        clamp_overlay(
+            &mut position,
+            overlay_w,
+            overlay_h,
+            viewport,
+            placement.viewport_padding,
+        );
+    }
+    position
+}
+
+fn anchored_origin(
+    anchor: Rect,
+    overlay_w: f32,
+    overlay_h: f32,
+    side: AnchorSide,
+    align: AnchorAlign,
+) -> (f32, f32) {
+    match side {
+        AnchorSide::Top => (
+            aligned_origin(anchor.x, anchor.w, overlay_w, align),
+            anchor.y - overlay_h,
+        ),
+        AnchorSide::Bottom => (
+            aligned_origin(anchor.x, anchor.w, overlay_w, align),
+            anchor.y + anchor.h,
+        ),
+        AnchorSide::Left => (
+            anchor.x - overlay_w,
+            aligned_origin(anchor.y, anchor.h, overlay_h, align),
+        ),
+        AnchorSide::Right => (
+            anchor.x + anchor.w,
+            aligned_origin(anchor.y, anchor.h, overlay_h, align),
+        ),
+    }
+}
+
+fn aligned_origin(
+    anchor_origin: f32,
+    anchor_extent: f32,
+    overlay_extent: f32,
+    align: AnchorAlign,
+) -> f32 {
+    match align {
+        AnchorAlign::Start => anchor_origin,
+        AnchorAlign::Center => anchor_origin + (anchor_extent - overlay_extent) / 2.0,
+        AnchorAlign::End => anchor_origin + anchor_extent - overlay_extent,
+    }
+}
+
+fn opposite_anchor_side(side: AnchorSide) -> AnchorSide {
+    match side {
+        AnchorSide::Top => AnchorSide::Bottom,
+        AnchorSide::Right => AnchorSide::Left,
+        AnchorSide::Bottom => AnchorSide::Top,
+        AnchorSide::Left => AnchorSide::Right,
+    }
+}
+
+fn main_axis_overflow(
+    position: (f32, f32),
+    overlay_w: f32,
+    overlay_h: f32,
+    side: AnchorSide,
+    viewport: Rect,
+    padding: f32,
+) -> f32 {
+    let min_x = viewport.x + padding;
+    let max_x = viewport.x + viewport.w - padding;
+    let min_y = viewport.y + padding;
+    let max_y = viewport.y + viewport.h - padding;
+    match side {
+        AnchorSide::Top | AnchorSide::Bottom => {
+            (min_y - position.1).max(0.0) + (position.1 + overlay_h - max_y).max(0.0)
+        }
+        AnchorSide::Left | AnchorSide::Right => {
+            (min_x - position.0).max(0.0) + (position.0 + overlay_w - max_x).max(0.0)
+        }
+    }
+}
+
+fn shift_cross_axis(
+    position: &mut (f32, f32),
+    overlay_w: f32,
+    overlay_h: f32,
+    side: AnchorSide,
+    viewport: Rect,
+    padding: f32,
+) {
+    match side {
+        AnchorSide::Top | AnchorSide::Bottom => {
+            position.0 = clamp_axis(position.0, overlay_w, viewport.x, viewport.w, padding);
+        }
+        AnchorSide::Left | AnchorSide::Right => {
+            position.1 = clamp_axis(position.1, overlay_h, viewport.y, viewport.h, padding);
+        }
+    }
+}
+
+fn clamp_overlay(
+    position: &mut (f32, f32),
+    overlay_w: f32,
+    overlay_h: f32,
+    viewport: Rect,
+    padding: f32,
+) {
+    position.0 = clamp_axis(position.0, overlay_w, viewport.x, viewport.w, padding);
+    position.1 = clamp_axis(position.1, overlay_h, viewport.y, viewport.h, padding);
+}
+
+fn clamp_axis(value: f32, extent: f32, origin: f32, viewport_extent: f32, padding: f32) -> f32 {
+    let min = origin + padding;
+    let max = (origin + viewport_extent - padding - extent).max(min);
+    value.clamp(min, max)
 }
 
 /// draw_order 排序键：分组（InnerBottom < Normal < InnerTop）+ 组内权重，稳定排序保持树序兜底。
@@ -461,12 +681,12 @@ fn intersect_clip(a: Option<ClipRect>, b: ClipRect) -> ClipRect {
 }
 
 /// 生成绘制命令（消费 `visual` + `content`，顺序即 z 序；逻辑容器透明无命令）。
-fn emit_draw_command(
+fn emit_draw_command<M: TextMeasurer + ?Sized>(
     node: &UiNode,
     box_: &LayoutBox,
     offset: (f32, f32),
     clip: Option<ClipRect>,
-    ctx: &mut EmitContext<'_>,
+    ctx: &mut EmitContext<'_, M>,
 ) {
     // `visual_offset` is deliberately applied only when projecting a layout box to a draw
     // command. Layout, hit regions, scroll bounds, and ancestor clips remain logical.
@@ -481,11 +701,25 @@ fn emit_draw_command(
         w: box_.w,
         h: box_.h,
     };
+    let mut effective_clip = clip;
     let payload = match (&node.kind, &node.content, &node.visual) {
-        (NodeKind::Text, Some(ContentConcern::Text(text)), _) => DrawPayload::Text {
-            text: text.clone(),
-            baseline_y: geometry.y + box_.first_baseline.unwrap_or(text.font_size),
-        },
+        (NodeKind::Text, Some(ContentConcern::Text(text)), _) => {
+            let (text, local_clip) = project_text_content(
+                text,
+                node.layout
+                    .as_ref()
+                    .and_then(|layout| layout.text_constraint),
+                geometry,
+                ctx.text_measurer,
+            );
+            if let Some(local_clip) = local_clip {
+                effective_clip = Some(intersect_clip(effective_clip, local_clip));
+            }
+            DrawPayload::Text {
+                baseline_y: geometry.y + box_.first_baseline.unwrap_or(text.font_size),
+                text,
+            }
+        }
         (NodeKind::Image, Some(ContentConcern::Image(image)), _) => DrawPayload::Image {
             texture: image.texture.clone(),
         },
@@ -569,7 +803,73 @@ fn emit_draw_command(
     };
     ctx.commands.push(DrawCommand {
         geometry,
-        clip,
+        clip: effective_clip,
         payload,
     });
+}
+
+/// 将文本约束投影为 renderer 无关的最终文本与命令级裁剪区。
+///
+/// `TextMeasurer` 是唯一允许判断字形宽度、换行与行数的地方；通过它二分 UTF-8
+/// 字符边界，可以避免各 renderer 对省略号保留长度产生漂移。
+fn project_text_content<M: TextMeasurer + ?Sized>(
+    text: &TextContent,
+    constraint: Option<TextConstraint>,
+    geometry: Rect,
+    measurer: &M,
+) -> (TextContent, Option<ClipRect>) {
+    let Some(constraint) = constraint else {
+        return (text.clone(), None);
+    };
+    let Some(max_lines) = constraint.max_lines else {
+        return (text.clone(), None);
+    };
+    let visible_height = (text.line_height * max_lines as f32)
+        .min(geometry.h)
+        .max(0.0);
+    let local_clip = Some(ClipRect {
+        rect: Rect {
+            x: geometry.x,
+            y: geometry.y,
+            w: geometry.w.max(0.0),
+            h: visible_height,
+        },
+    });
+    if constraint.overflow == TextOverflow::Clip {
+        return (text.clone(), local_clip);
+    }
+
+    let fits = |value: &str| {
+        let metrics = measurer.measure(&TextMeasureRequest {
+            text: value,
+            text_style: &text.font,
+            font_size: text.font_size,
+            line_height: text.line_height,
+            max_width: Some(geometry.w.max(0.0)),
+        });
+        metrics.width <= geometry.w + 0.01
+            && metrics.line_count <= max_lines as u32
+            && metrics.height <= visible_height + 0.01
+    };
+    if fits(&text.text) {
+        return (text.clone(), local_clip);
+    }
+
+    let mut boundaries: Vec<usize> = text.text.char_indices().map(|(index, _)| index).collect();
+    boundaries.push(text.text.len());
+    let ellipsis = "...";
+    let mut low = 0usize;
+    let mut high = boundaries.len().saturating_sub(1);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let candidate = format!("{}{}", &text.text[..boundaries[middle]], ellipsis);
+        if fits(&candidate) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let mut projected = text.clone();
+    projected.text = format!("{}{}", &text.text[..boundaries[low]], ellipsis);
+    (projected, local_clip)
 }

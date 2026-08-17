@@ -1,8 +1,8 @@
 //! 移动页面的空内容反馈。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy,
-    LayoutConcern, SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern,
+    SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::LayoutContainer;
 
@@ -12,16 +12,16 @@ use crate::shared::{DISABLED_TEXT, PRIMARY, SUBTLE_SURFACE, TEXT, TEXT_SECONDARY
 /// 空态中由 Application 处理的可选恢复动作。
 pub struct MobileEmptyAction {
     label: String,
-    target: String,
+    action_key: SemanticKey,
     disabled: bool,
 }
 
 impl MobileEmptyAction {
-    /// 创建恢复动作；`target` 是稳定动作标识。
-    pub fn new(label: impl Into<String>, target: impl Into<String>) -> Self {
+    /// 创建恢复动作；`action_key` 是稳定动作键。
+    pub fn new(label: impl Into<String>, action_key: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            target: target.into(),
+            action_key: SemanticKey(action_key.into()),
             disabled: false,
         }
     }
@@ -184,7 +184,7 @@ fn action_node(action: MobileEmptyAction, style: MobileEmptyStateStyle) -> UiNod
     })
     .identity(IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
-        semantic_key: Some(SemanticKey(action.target.clone())),
+        semantic_key: Some(action.action_key),
         update_mode: UpdateMode::Dirty,
     })
     .into();
@@ -192,7 +192,6 @@ fn action_node(action: MobileEmptyAction, style: MobileEmptyStateStyle) -> UiNod
         node.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
-            bind_id: Some(BindId(action.target)),
             ..InteractConcern::default()
         });
     }
@@ -224,9 +223,9 @@ mod tests {
         );
         assert_eq!(
             action
-                .interact
+                .identity
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|id| id.0.as_str()),
             Some("mobile.clear-filter")
         );

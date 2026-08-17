@@ -1,138 +1,116 @@
-//! iPhone touch normalization for the direct mobile session.
+//! iPhone touch normalization without target-side gesture recognition.
 
-use tela_contract::{Point, PointerEvent};
+use std::{collections::BTreeMap, time::Instant};
+
+use tela_contract::{Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase};
 
 /// UIKit touch phases represented independently from Winit for local unit tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TouchPhase {
-    /// A finger became the active pointer.
+    /// A finger entered the target surface.
     Started,
-    /// The active finger moved.
+    /// A finger changed coordinates.
     Moved,
-    /// The active finger was released.
+    /// A finger left normally.
     Ended,
-    /// UIKit cancelled the active gesture.
+    /// UIKit cancelled the pointer sequence.
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ActiveTouch {
-    id: u64,
-    start_x: f32,
-    start_y: f32,
-    last_x: f32,
-    last_y: f32,
-    dragging: bool,
-}
-
-/// Keeps taps atomic while turning sufficiently long movement into a mobile scroll gesture.
+/// Normalizes UIKit data into raw Contract pointer events.
+///
+/// No touch slop, delayed click, or scroll synthesis exists here. The active map is only lifecycle
+/// bookkeeping so a suspended UIKit host can send one `Cancel` for each touch still known to it.
 #[derive(Clone, Debug)]
 pub(crate) struct TouchAdapter {
-    touch_slop: f32,
-    active: Option<ActiveTouch>,
+    epoch: Instant,
+    active: BTreeMap<u64, Point>,
 }
 
 impl TouchAdapter {
-    /// Creates an adapter using a touch slop measured in UIKit logical points.
-    pub(crate) fn new(touch_slop: f32) -> Self {
+    /// Creates an empty raw touch normalizer.
+    pub(crate) fn new() -> Self {
         Self {
-            touch_slop: touch_slop.max(0.0),
-            active: None,
+            epoch: Instant::now(),
+            active: BTreeMap::new(),
         }
     }
 
-    /// Clears an interrupted gesture before the next UIKit lifecycle activation.
-    pub(crate) fn reset(&mut self) {
-        self.active = None;
+    /// Converts one logical UIKit touch point using the host monotonic clock.
+    pub(crate) fn handle(&mut self, id: u64, phase: TouchPhase, x: f32, y: f32) -> PointerEvent {
+        self.handle_at(id, phase, x, y, self.now_micros())
     }
 
-    /// Accepts one logical UIKit touch point and emits direct application pointer events.
-    pub(crate) fn handle(
+    /// Converts one logical UIKit touch point using an explicit timestamp for tests.
+    pub(crate) fn handle_at(
         &mut self,
         id: u64,
         phase: TouchPhase,
         x: f32,
         y: f32,
-    ) -> Vec<PointerEvent> {
-        match phase {
-            TouchPhase::Started => self.start(id, x, y),
-            TouchPhase::Moved => self.move_active(id, x, y),
-            TouchPhase::Ended => self.end(id, x, y),
-            TouchPhase::Cancelled => self.cancel(id),
-        }
-    }
-
-    fn start(&mut self, id: u64, x: f32, y: f32) -> Vec<PointerEvent> {
-        if self.active.is_some() {
-            return Vec::new();
-        }
-        self.active = Some(ActiveTouch {
-            id,
-            start_x: x,
-            start_y: y,
-            last_x: x,
-            last_y: y,
-            dragging: false,
-        });
-        Vec::new()
-    }
-
-    fn move_active(&mut self, id: u64, x: f32, y: f32) -> Vec<PointerEvent> {
-        let Some(mut active) = self.active else {
-            return Vec::new();
+        timestamp_micros: u64,
+    ) -> PointerEvent {
+        let position = Point { x, y };
+        let phase = match phase {
+            TouchPhase::Started => {
+                self.active.insert(id, position);
+                PointerPhase::Down
+            }
+            TouchPhase::Moved => {
+                self.active.insert(id, position);
+                PointerPhase::Move
+            }
+            TouchPhase::Ended => {
+                self.active.remove(&id);
+                PointerPhase::Up
+            }
+            TouchPhase::Cancelled => {
+                self.active.remove(&id);
+                PointerPhase::Cancel
+            }
         };
-        if active.id != id {
-            return Vec::new();
-        }
-        let previous_x = active.last_x;
-        let previous_y = active.last_y;
-        active.last_x = x;
-        active.last_y = y;
-        if !active.dragging {
-            active.dragging = (x - active.start_x).hypot(y - active.start_y) >= self.touch_slop;
-        }
-        self.active = Some(active);
-        if !active.dragging {
-            return Vec::new();
-        }
-        let delta_x = previous_x - x;
-        let delta_y = previous_y - y;
-        if delta_x.abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON {
-            return Vec::new();
-        }
-        vec![PointerEvent::Scroll {
-            position: Point { x, y },
-            delta: Point {
-                x: delta_x,
-                y: delta_y,
+        PointerEvent::new(
+            PointerId(id),
+            PointerKind::Touch,
+            phase,
+            position,
+            if matches!(phase, PointerPhase::Up | PointerPhase::Cancel) {
+                PointerButtons::NONE
+            } else {
+                PointerButtons::PRIMARY
             },
-        }]
+            timestamp_micros,
+            Point { x: 0.0, y: 0.0 },
+        )
     }
 
-    fn end(&mut self, id: u64, x: f32, y: f32) -> Vec<PointerEvent> {
-        let Some(active) = self.active.take() else {
-            return Vec::new();
-        };
-        if active.id != id {
-            self.active = Some(active);
-            return Vec::new();
-        }
-        if active.dragging {
-            Vec::new()
-        } else {
-            let position = Point { x, y };
-            vec![
-                PointerEvent::Down { position },
-                PointerEvent::Up { position },
-            ]
-        }
+    /// Converts every active touch into a terminal cancellation during lifecycle suspension.
+    pub(crate) fn cancel_all(&mut self) -> Vec<PointerEvent> {
+        let timestamp_micros = self.now_micros();
+        std::mem::take(&mut self.active)
+            .into_iter()
+            .map(|(id, position)| {
+                PointerEvent::new(
+                    PointerId(id),
+                    PointerKind::Touch,
+                    PointerPhase::Cancel,
+                    position,
+                    PointerButtons::NONE,
+                    timestamp_micros,
+                    Point { x: 0.0, y: 0.0 },
+                )
+            })
+            .collect()
     }
 
-    fn cancel(&mut self, id: u64) -> Vec<PointerEvent> {
-        if self.active.is_some_and(|active| active.id == id) {
-            self.active = None;
-        }
-        Vec::new()
+    fn now_micros(&self) -> u64 {
+        self.epoch.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+}
+
+impl Default for TouchAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -143,7 +121,7 @@ pub(crate) fn logical_coordinate(physical: f64, scale_factor: f64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{Point, PointerEvent};
+    use tela_contract::{Point, PointerButtons, PointerKind, PointerPhase};
 
     use super::{TouchAdapter, TouchPhase, logical_coordinate};
 
@@ -153,64 +131,39 @@ mod tests {
     }
 
     #[test]
-    fn tap_waits_for_release() {
-        let mut adapter = TouchAdapter::new(12.0);
-        assert!(
-            adapter
-                .handle(7, TouchPhase::Started, 20.0, 30.0)
-                .is_empty()
-        );
+    fn each_touch_phase_is_delivered_as_the_same_raw_sequence() {
+        let mut adapter = TouchAdapter::new();
+        let down = adapter.handle_at(7, TouchPhase::Started, 20.0, 30.0, 10);
+        let moved = adapter.handle_at(7, TouchPhase::Moved, 24.0, 33.0, 20);
+        let up = adapter.handle_at(7, TouchPhase::Ended, 24.0, 33.0, 30);
+        assert_eq!(down.kind, PointerKind::Touch);
+        assert_eq!(down.phase, PointerPhase::Down);
+        assert_eq!(down.buttons, PointerButtons::PRIMARY);
+        assert_eq!(moved.phase, PointerPhase::Move);
+        assert_eq!(up.phase, PointerPhase::Up);
+        assert_eq!(up.buttons, PointerButtons::NONE);
+        assert_eq!(moved.position, Point { x: 24.0, y: 33.0 });
         assert_eq!(
-            adapter.handle(7, TouchPhase::Ended, 20.0, 30.0),
-            [
-                PointerEvent::Down {
-                    position: Point { x: 20.0, y: 30.0 },
-                },
-                PointerEvent::Up {
-                    position: Point { x: 20.0, y: 30.0 },
-                },
-            ]
+            adapter.handle(8, TouchPhase::Cancelled, 1.0, 2.0).phase,
+            PointerPhase::Cancel
         );
     }
 
     #[test]
-    fn drag_scrolls_without_clicking() {
-        let mut adapter = TouchAdapter::new(8.0);
-        let _ = adapter.handle(3, TouchPhase::Started, 100.0, 100.0);
-        assert_eq!(
-            adapter.handle(3, TouchPhase::Moved, 100.0, 124.0),
-            [PointerEvent::Scroll {
-                position: Point { x: 100.0, y: 124.0 },
-                delta: Point { x: 0.0, y: -24.0 },
-            }]
-        );
+    fn simultaneous_touches_survive_and_lifecycle_reset_cancels_each_one() {
+        let mut adapter = TouchAdapter::new();
+        let _ = adapter.handle_at(1, TouchPhase::Started, 10.0, 20.0, 10);
+        let _ = adapter.handle_at(2, TouchPhase::Started, 30.0, 40.0, 11);
+        let _ = adapter.handle_at(1, TouchPhase::Moved, 12.0, 22.0, 12);
+        let cancelled = adapter.cancel_all();
+        assert_eq!(cancelled.len(), 2);
+        assert_eq!(cancelled[0].pointer_id.0, 1);
+        assert_eq!(cancelled[0].position, Point { x: 12.0, y: 22.0 });
+        assert_eq!(cancelled[1].pointer_id.0, 2);
         assert!(
-            adapter
-                .handle(3, TouchPhase::Ended, 100.0, 140.0)
-                .is_empty()
+            cancelled
+                .iter()
+                .all(|event| event.phase == PointerPhase::Cancel)
         );
-    }
-
-    #[test]
-    fn secondary_pointer_cannot_steal_the_active_gesture() {
-        let mut adapter = TouchAdapter::new(8.0);
-        let _ = adapter.handle(1, TouchPhase::Started, 0.0, 0.0);
-        assert!(adapter.handle(2, TouchPhase::Started, 0.0, 0.0).is_empty());
-        assert!(adapter.handle(2, TouchPhase::Ended, 0.0, 0.0).is_empty());
-        assert_eq!(adapter.handle(1, TouchPhase::Ended, 0.0, 0.0).len(), 2);
-    }
-
-    #[test]
-    fn cancellation_clears_a_pending_tap() {
-        let mut adapter = TouchAdapter::new(8.0);
-        let _ = adapter.handle(1, TouchPhase::Started, 0.0, 0.0);
-        assert!(
-            adapter
-                .handle(1, TouchPhase::Cancelled, 0.0, 0.0)
-                .is_empty()
-        );
-        let _ = adapter.handle(1, TouchPhase::Started, 0.0, 0.0);
-        adapter.reset();
-        assert!(adapter.handle(1, TouchPhase::Ended, 0.0, 0.0).is_empty());
     }
 }

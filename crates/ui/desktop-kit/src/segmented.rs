@@ -4,8 +4,8 @@
 //! 处理 [`tela_contract::UiAction::Click`]，不会把页面状态塞进组件内部。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy,
-    LayoutConcern, SemanticKey, Size, TextContent, TextStyleRef, UiNode, UpdateMode, VisualConcern,
+    BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern,
+    SemanticKey, Size, TextContent, TextStyleRef, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
@@ -79,18 +79,18 @@ impl Default for SegmentedStyle {
 /// 分段项的受控显示与动作定义。
 pub struct SegmentedItem {
     label: String,
-    target: String,
+    action_key: SemanticKey,
     selected: bool,
     hovered: bool,
     disabled: bool,
 }
 
 impl SegmentedItem {
-    /// 创建一个选项。`target` 是应用处理该项点击时收到的稳定动作标识。
-    pub fn new(label: impl Into<String>, target: impl Into<String>) -> Self {
+    /// 创建一个选项。`action_key` 是应用处理该项点击时收到的稳定动作键。
+    pub fn new(label: impl Into<String>, action_key: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            target: target.into(),
+            action_key: SemanticKey(action_key.into()),
             selected: false,
             hovered: false,
             disabled: false,
@@ -223,7 +223,7 @@ impl Segmented {
                 })
                 .identity(IdentityConcern {
                     key_strategy: KeyStrategy::SemanticId,
-                    semantic_key: Some(SemanticKey(item.target.clone())),
+                    semantic_key: Some(item.action_key),
                     update_mode: UpdateMode::Dirty,
                 })
                 .into();
@@ -232,7 +232,6 @@ impl Segmented {
                         clickable: true,
                         hoverable: true,
                         focusable: true,
-                        bind_id: Some(BindId(item.target)),
                         ..InteractConcern::default()
                     });
                 }
@@ -278,9 +277,9 @@ mod tests {
         assert_eq!(node.children.len(), 2);
         assert_eq!(
             node.children[0]
-                .interact
+                .identity
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref())
+                .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|bind| bind.0.as_str()),
             Some("view.list")
         );

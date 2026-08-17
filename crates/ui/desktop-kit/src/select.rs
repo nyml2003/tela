@@ -1,6 +1,9 @@
 //! `Select` / `Cascader` 组件（AntD 简化）：下拉选择与级联选择。
 
-use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, OverlaySpec, UiNode};
+use tela_contract::{
+    Color, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, OverlaySpec, SemanticKey,
+    UiNode, UpdateMode,
+};
 use tela_core::LayoutContainer;
 
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
@@ -21,7 +24,7 @@ pub struct Select {
     placeholder: String,
     expanded: bool,
     disabled: bool,
-    bind_id: Option<BindId>,
+    action_key: Option<SemanticKey>,
 }
 
 impl Default for Select {
@@ -39,7 +42,7 @@ impl Select {
             placeholder: String::new(),
             expanded: false,
             disabled: false,
-            bind_id: None,
+            action_key: None,
         }
     }
 
@@ -73,9 +76,11 @@ impl Select {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置由 Application 路由的稳定动作键前缀。
+    ///
+    /// 触发器和每个选项使用独立的语义键，调用方可将它们注册为不同的 headless part。
+    pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
+        self.action_key = Some(SemanticKey(action_key.into()));
         self
     }
 
@@ -96,7 +101,7 @@ impl Select {
         } else {
             TEXT_SECONDARY
         };
-        let trigger: UiNode = field_box(
+        let mut trigger: UiNode = field_box(
             vec![
                 text(&current, 13.0, shown_color),
                 LayoutContainer::spacer().into(),
@@ -115,6 +120,9 @@ impl Select {
         })
         .into();
 
+        if let Some(action_key) = &self.action_key {
+            trigger.identity = Some(action_identity(format!("{}.trigger", action_key.0)));
+        }
         let mut children = vec![trigger];
         if self.expanded {
             let option_nodes: Vec<UiNode> = self
@@ -139,11 +147,16 @@ impl Select {
                             ..LayoutConcern::default()
                         })
                         .into();
+                    if let Some(action_key) = &self.action_key {
+                        node.identity = Some(action_identity(format!(
+                            "{}.option[{}]",
+                            action_key.0, option.value
+                        )));
+                    }
                     if !self.disabled {
                         node.interact = Some(InteractConcern {
                             clickable: true,
                             hoverable: true,
-                            bind_id: self.bind_id.clone(),
                             ..InteractConcern::default()
                         });
                     }
@@ -187,7 +200,6 @@ impl Select {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -218,7 +230,7 @@ pub struct Cascader {
     path: Vec<String>,
     expanded: bool,
     disabled: bool,
-    bind_id: Option<BindId>,
+    action_key: Option<SemanticKey>,
 }
 
 impl Default for Cascader {
@@ -235,7 +247,7 @@ impl Cascader {
             path: Vec::new(),
             expanded: false,
             disabled: false,
-            bind_id: None,
+            action_key: None,
         }
     }
 
@@ -263,9 +275,9 @@ impl Cascader {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置由 Application 路由的稳定动作键前缀。
+    pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
+        self.action_key = Some(SemanticKey(action_key.into()));
         self
     }
 
@@ -285,7 +297,7 @@ impl Cascader {
                 break;
             }
         }
-        let trigger: UiNode = field_box(
+        let mut trigger: UiNode = field_box(
             vec![
                 text(
                     &breadcrumb,
@@ -312,6 +324,9 @@ impl Cascader {
         })
         .into();
 
+        if let Some(action_key) = &self.action_key {
+            trigger.identity = Some(action_identity(format!("{}.trigger", action_key.0)));
+        }
         let mut children = vec![trigger];
         if self.expanded {
             // 逐级选项列：当前路径的每级展示一列候选。
@@ -328,18 +343,34 @@ impl Cascader {
             }
             let column_nodes: Vec<UiNode> = panels
                 .iter()
-                .map(|column| {
+                .enumerate()
+                .map(|(depth, column)| {
                     let options: Vec<UiNode> = column
                         .iter()
                         .map(|option| {
-                            LayoutContainer::row([text(&option.label, 13.0, TEXT)])
-                                .layout(LayoutConcern {
-                                    width: Some(tela_contract::Size::fixed(120.0)),
-                                    height: Some(tela_contract::Size::fixed(26.0)),
-                                    cross_align: tela_contract::CrossAlign::Center,
-                                    ..LayoutConcern::default()
-                                })
-                                .into()
+                            let mut node: UiNode =
+                                LayoutContainer::row([text(&option.label, 13.0, TEXT)])
+                                    .layout(LayoutConcern {
+                                        width: Some(tela_contract::Size::fixed(120.0)),
+                                        height: Some(tela_contract::Size::fixed(26.0)),
+                                        cross_align: tela_contract::CrossAlign::Center,
+                                        ..LayoutConcern::default()
+                                    })
+                                    .into();
+                            if let Some(action_key) = &self.action_key {
+                                node.identity = Some(action_identity(format!(
+                                    "{}.level[{depth}].option[{}]",
+                                    action_key.0, option.value
+                                )));
+                            }
+                            if !self.disabled {
+                                node.interact = Some(InteractConcern {
+                                    clickable: true,
+                                    hoverable: true,
+                                    ..InteractConcern::default()
+                                });
+                            }
+                            node
                         })
                         .collect();
                     LayoutContainer::column(options)
@@ -386,7 +417,6 @@ impl Cascader {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
         }
@@ -397,6 +427,14 @@ impl Cascader {
 impl From<Cascader> for UiNode {
     fn from(cascader: Cascader) -> Self {
         cascader.into_node()
+    }
+}
+
+fn action_identity(action_key: String) -> IdentityConcern {
+    IdentityConcern {
+        key_strategy: KeyStrategy::SemanticId,
+        semantic_key: Some(SemanticKey(action_key)),
+        update_mode: UpdateMode::Dirty,
     }
 }
 

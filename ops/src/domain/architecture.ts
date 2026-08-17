@@ -1,4 +1,4 @@
-// 领域层：以 cargo metadata 的真实依赖校验 026 迁移后的分层。
+// 领域层：以 cargo metadata 的真实依赖校验 026 的产品分层和 030 的组件边界。
 // 这里刻意约束职责，而不是旧目录名：Product 负责选择完整链路，Target 只承载本地平台，
 // Kernel 与 UI Capability 不可反向认识 Presentation、Delivery 或 Target。
 
@@ -42,10 +42,16 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-contract',
     'tela-core',
     'tela-desktop-ui-kit',
+    'tela-ui-headless',
     'tela-ui-foundation',
   ],
   'tela-desktop-runtime': ['tela-bundle', 'tela-guest-runtime'],
-  'tela-desktop-ui-kit': ['tela-contract', 'tela-core', 'tela-ui-foundation'],
+  'tela-desktop-ui-kit': [
+    'tela-contract',
+    'tela-core',
+    'tela-ui-headless',
+    'tela-ui-foundation',
+  ],
   'tela-guest-runtime': [
     'serde_json',
     'tela-app-abi',
@@ -58,9 +64,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-contract',
     'tela-core',
     'tela-mobile-ui-kit',
+    'tela-ui-headless',
     'tela-ui-foundation',
   ],
-  'tela-mobile-ui-kit': ['tela-contract', 'tela-core', 'tela-ui-foundation'],
+  'tela-mobile-ui-kit': [
+    'tela-contract',
+    'tela-core',
+    'tela-ui-headless',
+    'tela-ui-foundation',
+  ],
   'tela-product-desktop-guest': [
     'tela-app-abi',
     'tela-contract',
@@ -148,14 +160,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'windows',
   ],
   'tela-text-resources': ['ab_glyph', 'tela-contract', 'tela-font-resources'],
+  'tela-ui-headless': ['tela-contract', 'tela-core'],
   'tela-ui-foundation': ['tela-contract', 'tela-core'],
 };
 
 /** 单元/像素测试可在边界外读取下层实现，但不能扩大生产依赖闭包。 */
 const ALLOWED_DEV: AllowedDeps = {
-  'tela-desktop-demo': ['tela-icon-resources', 'tela-text-resources'],
+  'tela-desktop-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-desktop-runtime': ['serde_json', 'tela-app-abi'],
-  'tela-mobile-demo': ['tela-icon-resources', 'tela-text-resources'],
+  'tela-mobile-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-render-raster': ['tela-core'],
   'tela-render-wgpu': ['naga', 'pollster'],
 };
@@ -193,6 +206,7 @@ const PRESENTATION_CRATES = new Set([
   ...RENDERER_CRATES,
 ]);
 const UI_CRATES = new Set([
+  'tela-ui-headless',
   'tela-ui-foundation',
   'tela-desktop-ui-kit',
   'tela-mobile-ui-kit',
@@ -226,13 +240,13 @@ function reportForbiddenDependencies(
   }
 }
 
-/** 校验 026 目标架构，返回违规列表（空 = 通过）。 */
+/** 校验 026 产品架构与 030 UI 组件边界，返回违规列表（空 = 通过）。 */
 export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[] {
   const violations: ArchViolation[] = [];
 
   for (const info of crates) {
     if (!MANAGED_CRATES.has(info.name)) {
-      violations.push({ crate: info.name, message: '未在 026 架构依赖表中登记的 crate' });
+      violations.push({ crate: info.name, message: '未在 026/030 架构依赖表中登记的 crate' });
       continue;
     }
 

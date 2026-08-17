@@ -5,7 +5,9 @@
 //! - 业务数据不进入仓库；仓库内没有任何业务语义（业务表单状态一律宿主持有，见 012）。
 
 use std::collections::HashMap;
-use tela_contract::{NodeId, ScrollState, SemanticKey};
+use tela_contract::{
+    GestureAxis, GestureKind, NodeId, Point, PointerId, PointerKind, ScrollState, SemanticKey,
+};
 
 /// 焦点状态槽（M6 交互层填充）。
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +32,46 @@ pub struct SelectionSlot {
     pub selected: bool,
 }
 
+/// 一个尚未结束的原始指针序列。
+///
+/// 这是纯视图生命周期状态：它只保存稳定 key、坐标和 Kernel 手势仲裁结果，
+/// 不携带任何组件或业务领域含义。
+#[derive(Clone, Debug)]
+pub(crate) struct PointerSession {
+    pub target_key: Option<SemanticKey>,
+    pub capture_key: Option<SemanticKey>,
+    pub start: Point,
+    pub last: Point,
+    pub started_at_micros: u64,
+    pub kind: PointerKind,
+    pub candidates: Vec<GestureCandidate>,
+    pub active_gesture: Option<ActiveGesture>,
+    pub long_press_started: bool,
+}
+
+/// 一个可参加当前指针仲裁的通用手势候选者。
+#[derive(Clone, Debug)]
+pub(crate) struct GestureCandidate {
+    pub key: SemanticKey,
+    pub kind: GestureKind,
+    pub axis: GestureAxis,
+    pub priority: i16,
+    /// 命中路径中离叶子越近，数值越大。
+    pub depth: usize,
+    /// 赢家是滚动容器时，Pan 更新还会投影为 `UiAction::Scroll`。
+    pub scroll_target: bool,
+}
+
+/// 已经赢得指针序列的手势状态。
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveGesture {
+    pub key: SemanticKey,
+    pub kind: GestureKind,
+    pub secondary_pointer_id: Option<PointerId>,
+    pub initial_distance: f32,
+    pub scroll_target: bool,
+}
+
 /// 视图状态仓库（见 004-更新策略与状态保持 3）。
 #[derive(Default)]
 pub struct ViewStateStore {
@@ -47,6 +89,8 @@ pub struct ViewStateStore {
     hover: Option<SemanticKey>,
     /// 模态栈（栈顶 = 当前激活模态，拦截下层输入，见 008-3）。
     modal: Vec<SemanticKey>,
+    /// 活跃原始指针序列；以 `PointerId` 分开保存以支持多指与独立捕获。
+    pointers: HashMap<PointerId, PointerSession>,
 }
 
 impl ViewStateStore {
@@ -167,6 +211,50 @@ impl ViewStateStore {
     /// 弹出当前模态（关闭弹窗时宿主调用）。
     pub fn pop_modal(&mut self) -> Option<SemanticKey> {
         self.modal.pop()
+    }
+
+    // ---------- 原始指针 / 捕获 / 手势 ----------
+
+    pub(crate) fn begin_pointer(&mut self, pointer_id: PointerId, session: PointerSession) {
+        self.pointers.insert(pointer_id, session);
+    }
+
+    pub(crate) fn pointer(&self, pointer_id: PointerId) -> Option<&PointerSession> {
+        self.pointers.get(&pointer_id)
+    }
+
+    pub(crate) fn pointer_mut(&mut self, pointer_id: PointerId) -> Option<&mut PointerSession> {
+        self.pointers.get_mut(&pointer_id)
+    }
+
+    pub(crate) fn end_pointer(&mut self, pointer_id: PointerId) -> Option<PointerSession> {
+        self.pointers.remove(&pointer_id)
+    }
+
+    pub(crate) fn active_pointers(&self) -> impl Iterator<Item = (PointerId, &PointerSession)> {
+        self.pointers.iter().map(|(id, session)| (*id, session))
+    }
+
+    /// 指定 pointer 当前捕获的稳定节点 key。
+    pub fn captured_pointer_key(&self, pointer_id: PointerId) -> Option<&SemanticKey> {
+        self.pointers
+            .get(&pointer_id)
+            .and_then(|session| session.capture_key.as_ref())
+    }
+
+    /// 新树构建后清除已卸载节点关联的指针序列与捕获。
+    ///
+    /// 释放由 Kernel 自动完成，不会把旧帧 `NodeId` 泄漏给新树。
+    pub fn reconcile_pointers(&mut self, keys: &[SemanticKey]) {
+        self.pointers.retain(|_, session| {
+            let still_mounted = |key: &SemanticKey| keys.iter().any(|candidate| candidate == key);
+            session.target_key.as_ref().is_none_or(still_mounted)
+                && session.capture_key.as_ref().is_none_or(still_mounted)
+                && session
+                    .candidates
+                    .iter()
+                    .all(|candidate| still_mounted(&candidate.key))
+        });
     }
 
     // ---------- 光标 ----------

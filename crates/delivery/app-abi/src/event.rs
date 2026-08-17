@@ -1,13 +1,129 @@
 //! Explicit host-to-guest input and guest-to-host status packets.
 
 use serde::{Deserialize, Serialize};
+use tela_contract::{Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase};
 
 use crate::FrameCodecError;
 
 const EVENT_MAGIC: [u8; 4] = *b"TLEV";
 const STATUS_MAGIC: [u8; 4] = *b"TLSV";
-const PACKET_VERSION: u16 = 1;
+const PACKET_VERSION: u16 = 2;
 const HEADER_LEN: usize = EVENT_MAGIC.len() + std::mem::size_of::<u16>();
+
+/// 原始指针设备类型在 Application ABI 中的稳定编码。
+///
+/// ABI 不直接序列化 `tela-contract` 的 Rust 值，以便 Host 与 guest 仅通过稳定的
+/// packet 定义通信；guest 再把它映射为 Contract 的 `PointerKind`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum AppPointerKind {
+    /// 鼠标或触控板指针。
+    Mouse = 0,
+    /// 直接触摸。
+    Touch = 1,
+    /// 手写笔。
+    Pen = 2,
+}
+
+/// 原始指针生命周期在 Application ABI 中的稳定编码。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum AppPointerPhase {
+    /// 指针按下。
+    Down = 0,
+    /// 指针移动。
+    Move = 1,
+    /// 指针释放。
+    Up = 2,
+    /// 指针序列被宿主或系统取消。
+    Cancel = 3,
+    /// 独立滚轮或触控板滚动增量。
+    Scroll = 4,
+}
+
+/// Host 传给 guest 的完整原始指针帧。
+///
+/// Target 只能负责将平台坐标、设备类型与按钮掩码规范化为这个 packet；不能在此之前
+/// 合成 Click 或 Scroll 手势。捕获、多指、嵌套滚动与手势仲裁由 guest 的 Kernel 完成。
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AppPointerEvent {
+    /// 同一宿主会话内稳定的原始指针 id。
+    pub pointer_id: u64,
+    /// 原始设备类别。
+    pub kind: AppPointerKind,
+    /// 当前生命周期阶段。
+    pub phase: AppPointerPhase,
+    /// 当前逻辑横坐标。
+    pub x: f32,
+    /// 当前逻辑纵坐标。
+    pub y: f32,
+    /// 平台规范化后的按钮位集；与 Contract `PointerButtons` 一一对应。
+    pub buttons: u16,
+    /// Host 单调时钟的微秒刻度。
+    pub timestamp_micros: u64,
+    /// 仅 `Scroll` 阶段使用的逻辑横向增量。
+    pub delta_x: f32,
+    /// 仅 `Scroll` 阶段使用的逻辑纵向增量。
+    pub delta_y: f32,
+}
+
+impl AppPointerEvent {
+    /// 构造完整的 ABI 原始指针帧。
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        pointer_id: u64,
+        kind: AppPointerKind,
+        phase: AppPointerPhase,
+        x: f32,
+        y: f32,
+        buttons: u16,
+        timestamp_micros: u64,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Self {
+        Self {
+            pointer_id,
+            kind,
+            phase,
+            x,
+            y,
+            buttons,
+            timestamp_micros,
+            delta_x,
+            delta_y,
+        }
+    }
+}
+
+impl From<AppPointerEvent> for PointerEvent {
+    fn from(event: AppPointerEvent) -> Self {
+        PointerEvent::new(
+            PointerId(event.pointer_id),
+            match event.kind {
+                AppPointerKind::Mouse => PointerKind::Mouse,
+                AppPointerKind::Touch => PointerKind::Touch,
+                AppPointerKind::Pen => PointerKind::Pen,
+            },
+            match event.phase {
+                AppPointerPhase::Down => PointerPhase::Down,
+                AppPointerPhase::Move => PointerPhase::Move,
+                AppPointerPhase::Up => PointerPhase::Up,
+                AppPointerPhase::Cancel => PointerPhase::Cancel,
+                AppPointerPhase::Scroll => PointerPhase::Scroll,
+            },
+            Point {
+                x: event.x,
+                y: event.y,
+            },
+            PointerButtons(event.buttons),
+            event.timestamp_micros,
+            Point {
+                x: event.delta_x,
+                y: event.delta_y,
+            },
+        )
+    }
+}
 
 /// One normalized event delivered by a platform SDK to the application guest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -19,38 +135,8 @@ pub enum AppEvent {
         /// Logical content height.
         height: f32,
     },
-    /// Primary pointer press in logical coordinates.
-    PointerDown {
-        /// Logical horizontal coordinate.
-        x: f32,
-        /// Logical vertical coordinate.
-        y: f32,
-    },
-    /// Primary pointer release in logical coordinates.
-    PointerUp {
-        /// Logical horizontal coordinate.
-        x: f32,
-        /// Logical vertical coordinate.
-        y: f32,
-    },
-    /// Pointer movement in logical coordinates.
-    PointerMove {
-        /// Logical horizontal coordinate.
-        x: f32,
-        /// Logical vertical coordinate.
-        y: f32,
-    },
-    /// Pointer wheel delta in logical coordinates.
-    PointerScroll {
-        /// Pointer logical horizontal coordinate.
-        x: f32,
-        /// Pointer logical vertical coordinate.
-        y: f32,
-        /// Horizontal scroll delta.
-        delta_x: f32,
-        /// Vertical scroll delta.
-        delta_y: f32,
-    },
+    /// 一个未经组件或手势预判的原始指针帧。
+    Pointer(AppPointerEvent),
     /// A normalized USB-HID physical key press. The guest resolves it with its current keymap.
     KeyDown {
         /// `tela_contract::PhysicalKey` numeric value.
@@ -166,12 +252,17 @@ mod tests {
 
     #[test]
     fn event_and_status_packets_round_trip() {
-        let event = AppEvent::PointerScroll {
-            x: 10.0,
-            y: 20.0,
-            delta_x: 1.0,
-            delta_y: -2.0,
-        };
+        let event = AppEvent::Pointer(AppPointerEvent::new(
+            42,
+            AppPointerKind::Touch,
+            AppPointerPhase::Move,
+            10.0,
+            20.0,
+            1,
+            123,
+            1.0,
+            -2.0,
+        ));
         assert_eq!(
             decode_event(&encode_event(&event).expect("encode")).expect("decode"),
             event

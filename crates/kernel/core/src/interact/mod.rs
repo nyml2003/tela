@@ -8,11 +8,12 @@
 pub(crate) mod focus;
 
 use tela_contract::{
-    FocusDirection, InputEvent, KeyboardIntent, KeyboardIntentEvent, NodeId, Point, PointerEvent,
-    SemanticKey, UiAction, UiFrame, UiNode,
+    FocusDirection, GestureAxis, GestureEvent, GestureKind, GesturePhase, InputEvent,
+    KeyboardIntent, KeyboardIntentEvent, NodeId, NodeKind, Point, PointerEvent, PointerId,
+    PointerKind, PointerPhase, SemanticKey, TextInputEvent, UiAction, UiFrame, UiNode, Value,
 };
 
-use crate::state::{FocusSlot, ViewStateStore};
+use crate::state::{ActiveGesture, FocusSlot, GestureCandidate, PointerSession, ViewStateStore};
 use crate::tree::UiTree;
 use focus::{
     FocusContext, NavInput, build_focus_context, exit_target, hit_contains, next_direction,
@@ -32,6 +33,7 @@ pub fn handle_input(
     let actions = match event {
         InputEvent::Pointer(pointer) => session.handle_pointer(*pointer),
         InputEvent::Keyboard(intent) => session.handle_keyboard_intent(intent),
+        InputEvent::Text(event) => session.handle_text_input(event),
     };
     session.commit();
     actions
@@ -161,70 +163,610 @@ impl<'a> Session<'a> {
         // 焦点状态更新在 handle_* 内完成（FocusChanged 时同步 state）。
     }
 
+    // ---------- 文本输入 ----------
+
+    fn handle_text_input(&mut self, event: &TextInputEvent) -> Vec<UiAction> {
+        let Some(node_id) = self.current_focus_id() else {
+            return Vec::new();
+        };
+        let Some(interact) = self
+            .nodes
+            .get(node_id.0 as usize)
+            .and_then(|node| node.interact.as_ref())
+        else {
+            return Vec::new();
+        };
+        if interact.input.is_none() {
+            return Vec::new();
+        }
+
+        self.actions.push(UiAction::TextInput {
+            node_id,
+            event: event.clone(),
+        });
+        if let (Some(bind_id), Some(value)) = (interact.bind_id.as_ref(), event.value()) {
+            self.actions.push(UiAction::ValueChange {
+                bind_id: bind_id.clone(),
+                value: Value::String(value.to_owned()),
+            });
+        }
+        std::mem::take(&mut self.actions)
+    }
+
     // ---------- 指针 ----------
 
     fn handle_pointer(&mut self, event: PointerEvent) -> Vec<UiAction> {
-        match event {
-            PointerEvent::Down { position } => {
-                let hit = self.hit_test(position);
-                // 命中 portal 外部区域 → 抛 TeleportClickOutside（关闭逻辑宿主实现，见 008-3）。
-                if let Some((node_id, node)) = &hit {
-                    let interact = node.interact.as_ref();
-                    if interact.is_some_and(|i| i.clickable) {
-                        self.actions.push(UiAction::Click { node_id: *node_id });
-                    }
-                    if interact.is_some_and(|i| i.focusable) {
-                        self.request_focus(*node_id);
-                    }
-                }
-                if let Some(teleport_id) = self.teleport_hit_outside(&hit) {
-                    self.actions.push(UiAction::TeleportClickOutside {
-                        teleport_node_id: teleport_id,
-                    });
-                }
-            }
-            PointerEvent::Up { .. } => {}
-            PointerEvent::Move { position } => {
-                let hit = self.hit_test(position);
-                let new_hover = hit.and_then(|(node_id, node)| {
-                    node.interact
-                        .as_ref()
-                        .is_some_and(|i| i.hoverable)
-                        .then_some(node_id)
-                });
-                // 进入/离开事件：悬停目标变化时先发离开再发进入（见 008-1）。
-                let new_key = new_hover.and_then(|id| self.keys.get(id.0 as usize).cloned());
-                let old_key = self.state.hover_key().cloned();
-                if old_key != new_key {
-                    if let Some(old_key) = old_key
-                        && let Some(idx) = self.keys.iter().position(|k| *k == old_key)
-                    {
-                        self.actions.push(UiAction::Hover {
-                            node_id: self.ids[idx],
-                            entered: false,
-                        });
-                    }
-                    if let Some(node_id) = new_hover {
-                        self.actions.push(UiAction::Hover {
-                            node_id,
-                            entered: true,
-                        });
-                    }
-                    self.state.set_hover(new_key);
-                }
-            }
-            PointerEvent::Scroll { position, delta } => {
-                if let Some((node_id, _node)) = self.hit_test(position)
-                    && let Some(scroll_id) = self.nearest_scroll_target(node_id)
-                {
-                    self.actions.push(UiAction::Scroll {
-                        node_id: scroll_id,
-                        delta,
-                    });
-                }
-            }
+        match event.phase {
+            PointerPhase::Down => self.handle_pointer_down(event),
+            PointerPhase::Move => self.handle_pointer_move(event),
+            PointerPhase::Up => self.handle_pointer_end(event, GesturePhase::End),
+            PointerPhase::Cancel => self.handle_pointer_end(event, GesturePhase::Cancel),
+            PointerPhase::Scroll => self.handle_pointer_scroll(event),
         }
         std::mem::take(&mut self.actions)
+    }
+
+    fn handle_pointer_down(&mut self, event: PointerEvent) {
+        let hit = self.hit_test(event.position);
+        let (target_key, capture_key, focusable, target_id, candidates) = match hit.as_ref() {
+            Some((node_id, node)) => {
+                let interact = node.interact.as_ref();
+                let key = self.key_for_node_id(*node_id);
+                let capture = interact
+                    .is_some_and(|interact| interact.pointer_capture)
+                    .then(|| key.clone());
+                let candidates = self.gesture_candidates(*node_id);
+                (
+                    Some(key),
+                    capture,
+                    interact.is_some_and(|interact| interact.focusable),
+                    Some(*node_id),
+                    candidates,
+                )
+            }
+            None => (None, None, false, None, Vec::new()),
+        };
+        self.state.begin_pointer(
+            event.pointer_id,
+            PointerSession {
+                target_key,
+                capture_key,
+                start: event.position,
+                last: event.position,
+                started_at_micros: event.timestamp_micros,
+                kind: event.kind,
+                candidates,
+                active_gesture: None,
+                long_press_started: false,
+            },
+        );
+        if let Some(node_id) = target_id {
+            self.actions.push(UiAction::Pointer { node_id, event });
+            if focusable {
+                self.request_focus(node_id);
+            }
+        }
+        self.try_begin_pinch(event.pointer_id, event.position);
+        // 命中 portal 外部区域 → 抛 TeleportClickOutside（关闭逻辑由 Headless/Application 决定）。
+        if let Some(teleport_id) = self.teleport_hit_outside(&hit) {
+            self.actions.push(UiAction::TeleportClickOutside {
+                teleport_node_id: teleport_id,
+            });
+        }
+    }
+
+    fn handle_pointer_move(&mut self, event: PointerEvent) {
+        let session = self.state.pointer(event.pointer_id).cloned();
+        if let Some(node_id) = self.pointer_recipient(event.pointer_id, event.position) {
+            self.actions.push(UiAction::Pointer { node_id, event });
+        }
+
+        let captured = self.state.captured_pointer_key(event.pointer_id).is_some();
+        if event.kind == PointerKind::Mouse && !captured {
+            self.update_hover(event.position);
+        }
+
+        let Some(session) = session else {
+            return;
+        };
+        if let Some(active) = session.active_gesture.clone() {
+            self.update_active_gesture(event, &session, active);
+            return;
+        }
+
+        let translation = point_delta(event.position, session.start);
+        if !session.long_press_started
+            && translation.x.hypot(translation.y) < GESTURE_TOUCH_SLOP
+            && event
+                .timestamp_micros
+                .saturating_sub(session.started_at_micros)
+                >= LONG_PRESS_DELAY_MICROS
+            && let Some(candidate) =
+                best_candidate(&session.candidates, &[GestureKind::LongPress], None)
+        {
+            self.start_gesture(event, &session, candidate, None, 1.0, false);
+            return;
+        }
+
+        if translation.x.hypot(translation.y) >= GESTURE_TOUCH_SLOP
+            && let Some(candidate) = best_candidate(
+                &session.candidates,
+                &[GestureKind::Pan, GestureKind::Swipe],
+                Some(translation),
+            )
+        {
+            self.start_gesture(event, &session, candidate, None, 1.0, true);
+            return;
+        }
+        if let Some(current) = self.state.pointer_mut(event.pointer_id) {
+            current.last = event.position;
+        }
+    }
+
+    fn handle_pointer_end(&mut self, event: PointerEvent, phase: GesturePhase) {
+        let session = self.state.pointer(event.pointer_id).cloned();
+        if let Some(node_id) = self.pointer_recipient(event.pointer_id, event.position) {
+            self.actions.push(UiAction::Pointer { node_id, event });
+        }
+        let Some(session) = session else {
+            return;
+        };
+
+        if let Some(active) = session.active_gesture.clone() {
+            self.finish_active_gesture(event, &session, active, phase);
+        } else if phase == GesturePhase::End {
+            let translation = point_delta(event.position, session.start);
+            let long_press = (!session.long_press_started
+                && translation.x.hypot(translation.y) < GESTURE_TOUCH_SLOP
+                && event
+                    .timestamp_micros
+                    .saturating_sub(session.started_at_micros)
+                    >= LONG_PRESS_DELAY_MICROS)
+                .then(|| best_candidate(&session.candidates, &[GestureKind::LongPress], None))
+                .flatten();
+            if let Some(candidate) = long_press {
+                self.emit_gesture(
+                    &candidate.key,
+                    GestureEvent {
+                        kind: GestureKind::LongPress,
+                        phase: GesturePhase::Start,
+                        pointer_id: event.pointer_id,
+                        secondary_pointer_id: None,
+                        position: event.position,
+                        delta: Point { x: 0.0, y: 0.0 },
+                        translation,
+                        scale: 1.0,
+                    },
+                );
+                self.emit_gesture(
+                    &candidate.key,
+                    GestureEvent {
+                        kind: GestureKind::LongPress,
+                        phase: GesturePhase::End,
+                        pointer_id: event.pointer_id,
+                        secondary_pointer_id: None,
+                        position: event.position,
+                        delta: Point { x: 0.0, y: 0.0 },
+                        translation,
+                        scale: 1.0,
+                    },
+                );
+            } else if let (Some(target_key), Some((hit_id, _))) =
+                (session.target_key.as_ref(), self.hit_test(event.position))
+                && self.key_for_node_id(hit_id) == *target_key
+                && self
+                    .nodes
+                    .get(hit_id.0 as usize)
+                    .and_then(|node| node.interact.as_ref())
+                    .is_some_and(|interact| interact.clickable)
+            {
+                self.actions.push(UiAction::Click { node_id: hit_id });
+            }
+        }
+        self.state.end_pointer(event.pointer_id);
+    }
+
+    fn handle_pointer_scroll(&mut self, event: PointerEvent) {
+        if let Some((node_id, _node)) = self.hit_test(event.position)
+            && let Some(scroll_id) = self.nearest_scroll_target(node_id)
+        {
+            self.actions.push(UiAction::Scroll {
+                node_id: scroll_id,
+                delta: event.delta,
+            });
+        }
+    }
+
+    fn pointer_recipient(&self, pointer_id: PointerId, position: Point) -> Option<NodeId> {
+        if let Some(key) = self.state.captured_pointer_key(pointer_id)
+            && let Some(node_id) = self.node_id_for_key(key)
+        {
+            return Some(node_id);
+        }
+        self.hit_test(position).map(|(node_id, _)| node_id)
+    }
+
+    fn key_for_node_id(&self, node_id: NodeId) -> SemanticKey {
+        self.keys
+            .get(node_id.0 as usize)
+            .cloned()
+            .expect("命中区 node id 必须和当前 key 表对齐")
+    }
+
+    fn node_id_for_key(&self, key: &SemanticKey) -> Option<NodeId> {
+        self.keys
+            .iter()
+            .position(|candidate| candidate == key)
+            .and_then(|index| self.ids.get(index).copied())
+    }
+
+    fn gesture_candidates(&self, node_id: NodeId) -> Vec<GestureCandidate> {
+        let Some(focus) = self.focus.as_ref() else {
+            return Vec::new();
+        };
+        let mut path = Vec::new();
+        let mut index = node_id.0 as usize;
+        loop {
+            path.push(index);
+            if index == 0 {
+                break;
+            }
+            let Some(parent) = focus.parents.get(index).copied() else {
+                break;
+            };
+            index = parent;
+        }
+        path.reverse();
+        let mut candidates = Vec::new();
+        for (depth, index) in path.into_iter().enumerate() {
+            let Some(node) = self.nodes.get(index) else {
+                continue;
+            };
+            let key = self.keys[index].clone();
+            let config = node
+                .interact
+                .as_ref()
+                .map(|interact| interact.gestures)
+                .unwrap_or_default();
+            if config.pan {
+                candidates.push(GestureCandidate {
+                    key: key.clone(),
+                    kind: GestureKind::Pan,
+                    axis: config.axis,
+                    priority: config.priority,
+                    depth,
+                    scroll_target: false,
+                });
+            }
+            if config.swipe {
+                candidates.push(GestureCandidate {
+                    key: key.clone(),
+                    kind: GestureKind::Swipe,
+                    axis: config.axis,
+                    priority: config.priority,
+                    depth,
+                    scroll_target: false,
+                });
+            }
+            if config.long_press {
+                candidates.push(GestureCandidate {
+                    key: key.clone(),
+                    kind: GestureKind::LongPress,
+                    axis: GestureAxis::Any,
+                    priority: config.priority,
+                    depth,
+                    scroll_target: false,
+                });
+            }
+            if config.pinch {
+                candidates.push(GestureCandidate {
+                    key: key.clone(),
+                    kind: GestureKind::Pinch,
+                    axis: GestureAxis::Any,
+                    priority: config.priority,
+                    depth,
+                    scroll_target: false,
+                });
+            }
+            if is_scroll_node(node) && !config.pan {
+                candidates.push(GestureCandidate {
+                    key,
+                    kind: GestureKind::Pan,
+                    axis: GestureAxis::Vertical,
+                    priority: -1,
+                    depth,
+                    scroll_target: true,
+                });
+            }
+        }
+        candidates
+    }
+
+    fn try_begin_pinch(&mut self, pointer_id: PointerId, position: Point) {
+        let Some(new_session) = self.state.pointer(pointer_id).cloned() else {
+            return;
+        };
+        if new_session.kind != PointerKind::Touch {
+            return;
+        }
+        let other_sessions: Vec<(PointerId, PointerSession)> = self
+            .state
+            .active_pointers()
+            .filter(|(candidate_id, session)| {
+                *candidate_id != pointer_id && session.kind == PointerKind::Touch
+            })
+            .map(|(candidate_id, session)| (candidate_id, session.clone()))
+            .collect();
+        let Some((other_id, other_session, candidate)) = other_sessions
+            .into_iter()
+            .filter_map(|(other_id, other)| {
+                shared_pinch_candidate(&new_session.candidates, &other.candidates)
+                    .map(|candidate| (other_id, other, candidate))
+            })
+            .max_by_key(|(_, _, candidate)| candidate_rank(candidate))
+        else {
+            return;
+        };
+        let initial_distance = point_delta(position, other_session.last)
+            .x
+            .hypot(point_delta(position, other_session.last).y);
+        if initial_distance <= f32::EPSILON {
+            return;
+        }
+        self.cancel_existing_gesture(pointer_id, &new_session, GesturePhase::Cancel);
+        self.cancel_existing_gesture(other_id, &other_session, GesturePhase::Cancel);
+        let active_for_new = ActiveGesture {
+            key: candidate.key.clone(),
+            kind: GestureKind::Pinch,
+            secondary_pointer_id: Some(other_id),
+            initial_distance,
+            scroll_target: false,
+        };
+        let active_for_other = ActiveGesture {
+            key: candidate.key.clone(),
+            kind: GestureKind::Pinch,
+            secondary_pointer_id: Some(pointer_id),
+            initial_distance,
+            scroll_target: false,
+        };
+        if let Some(session) = self.state.pointer_mut(pointer_id) {
+            session.capture_key = Some(candidate.key.clone());
+            session.active_gesture = Some(active_for_new);
+        }
+        if let Some(session) = self.state.pointer_mut(other_id) {
+            session.capture_key = Some(candidate.key.clone());
+            session.active_gesture = Some(active_for_other);
+        }
+        self.emit_gesture(
+            &candidate.key,
+            GestureEvent {
+                kind: GestureKind::Pinch,
+                phase: GesturePhase::Start,
+                pointer_id,
+                secondary_pointer_id: Some(other_id),
+                position,
+                delta: Point { x: 0.0, y: 0.0 },
+                translation: Point { x: 0.0, y: 0.0 },
+                scale: 1.0,
+            },
+        );
+    }
+
+    fn start_gesture(
+        &mut self,
+        event: PointerEvent,
+        session: &PointerSession,
+        candidate: GestureCandidate,
+        secondary_pointer_id: Option<PointerId>,
+        scale: f32,
+        emit_update: bool,
+    ) {
+        let translation = point_delta(event.position, session.start);
+        let delta = point_delta(event.position, session.last);
+        if let Some(current) = self.state.pointer_mut(event.pointer_id) {
+            current.capture_key = Some(candidate.key.clone());
+            current.long_press_started = candidate.kind == GestureKind::LongPress;
+            current.last = event.position;
+            current.active_gesture = Some(ActiveGesture {
+                key: candidate.key.clone(),
+                kind: candidate.kind,
+                secondary_pointer_id,
+                initial_distance: 0.0,
+                scroll_target: candidate.scroll_target,
+            });
+        }
+        self.emit_gesture(
+            &candidate.key,
+            GestureEvent {
+                kind: candidate.kind,
+                phase: GesturePhase::Start,
+                pointer_id: event.pointer_id,
+                secondary_pointer_id,
+                position: event.position,
+                delta: Point { x: 0.0, y: 0.0 },
+                translation,
+                scale,
+            },
+        );
+        if emit_update {
+            self.emit_gesture(
+                &candidate.key,
+                GestureEvent {
+                    kind: candidate.kind,
+                    phase: GesturePhase::Update,
+                    pointer_id: event.pointer_id,
+                    secondary_pointer_id,
+                    position: event.position,
+                    delta,
+                    translation,
+                    scale,
+                },
+            );
+            if candidate.scroll_target && candidate.kind == GestureKind::Pan {
+                self.emit_scroll_from_pan(&candidate.key, delta);
+            }
+        }
+    }
+
+    fn update_active_gesture(
+        &mut self,
+        event: PointerEvent,
+        session: &PointerSession,
+        active: ActiveGesture,
+    ) {
+        let delta = point_delta(event.position, session.last);
+        let translation = point_delta(event.position, session.start);
+        let scale = if active.kind == GestureKind::Pinch {
+            active
+                .secondary_pointer_id
+                .and_then(|other_id| self.state.pointer(other_id).map(|other| other.last))
+                .map(|other| {
+                    point_delta(event.position, other)
+                        .x
+                        .hypot(point_delta(event.position, other).y)
+                        / active.initial_distance.max(f32::EPSILON)
+                })
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        self.emit_gesture(
+            &active.key,
+            GestureEvent {
+                kind: active.kind,
+                phase: GesturePhase::Update,
+                pointer_id: event.pointer_id,
+                secondary_pointer_id: active.secondary_pointer_id,
+                position: event.position,
+                delta,
+                translation,
+                scale,
+            },
+        );
+        if active.scroll_target && active.kind == GestureKind::Pan {
+            self.emit_scroll_from_pan(&active.key, delta);
+        }
+        if let Some(current) = self.state.pointer_mut(event.pointer_id) {
+            current.last = event.position;
+        }
+    }
+
+    fn finish_active_gesture(
+        &mut self,
+        event: PointerEvent,
+        session: &PointerSession,
+        active: ActiveGesture,
+        phase: GesturePhase,
+    ) {
+        let delta = point_delta(event.position, session.last);
+        let translation = point_delta(event.position, session.start);
+        let scale = if active.kind == GestureKind::Pinch {
+            active
+                .secondary_pointer_id
+                .and_then(|other_id| self.state.pointer(other_id).map(|other| other.last))
+                .map(|other| {
+                    point_delta(event.position, other)
+                        .x
+                        .hypot(point_delta(event.position, other).y)
+                        / active.initial_distance.max(f32::EPSILON)
+                })
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        self.emit_gesture(
+            &active.key,
+            GestureEvent {
+                kind: active.kind,
+                phase,
+                pointer_id: event.pointer_id,
+                secondary_pointer_id: active.secondary_pointer_id,
+                position: event.position,
+                delta,
+                translation,
+                scale,
+            },
+        );
+        if active.scroll_target && active.kind == GestureKind::Pan && phase == GesturePhase::End {
+            self.emit_scroll_from_pan(&active.key, delta);
+        }
+        if let Some(other_id) = active.secondary_pointer_id
+            && let Some(other) = self.state.pointer_mut(other_id)
+        {
+            other.active_gesture = None;
+            other.capture_key = None;
+        }
+    }
+
+    fn cancel_existing_gesture(
+        &mut self,
+        pointer_id: PointerId,
+        session: &PointerSession,
+        phase: GesturePhase,
+    ) {
+        let Some(active) = session.active_gesture.clone() else {
+            return;
+        };
+        self.emit_gesture(
+            &active.key,
+            GestureEvent {
+                kind: active.kind,
+                phase,
+                pointer_id,
+                secondary_pointer_id: active.secondary_pointer_id,
+                position: session.last,
+                delta: Point { x: 0.0, y: 0.0 },
+                translation: point_delta(session.last, session.start),
+                scale: 1.0,
+            },
+        );
+    }
+
+    fn emit_gesture(&mut self, key: &SemanticKey, event: GestureEvent) {
+        if let Some(node_id) = self.node_id_for_key(key) {
+            self.actions.push(UiAction::Gesture { node_id, event });
+        }
+    }
+
+    fn emit_scroll_from_pan(&mut self, key: &SemanticKey, delta: Point) {
+        if let Some(node_id) = self.node_id_for_key(key) {
+            self.actions.push(UiAction::Scroll {
+                node_id,
+                delta: Point {
+                    x: -delta.x,
+                    y: -delta.y,
+                },
+            });
+        }
+    }
+
+    fn update_hover(&mut self, position: Point) {
+        let hit = self.hit_test(position);
+        let new_hover = hit.and_then(|(node_id, node)| {
+            node.interact
+                .as_ref()
+                .is_some_and(|interact| interact.hoverable)
+                .then_some(node_id)
+        });
+        let new_key = new_hover.and_then(|id| self.keys.get(id.0 as usize).cloned());
+        let old_key = self.state.hover_key().cloned();
+        if old_key != new_key {
+            if let Some(old_key) = old_key
+                && let Some(idx) = self.keys.iter().position(|key| *key == old_key)
+            {
+                self.actions.push(UiAction::Hover {
+                    node_id: self.ids[idx],
+                    entered: false,
+                });
+            }
+            if let Some(node_id) = new_hover {
+                self.actions.push(UiAction::Hover {
+                    node_id,
+                    entered: true,
+                });
+            }
+            self.state.set_hover(new_key);
+        }
     }
 
     /// 命中测试：反向遍历命中区域（后绘制在上），模态栈拦截下层（见 008-3）。
@@ -531,6 +1073,79 @@ impl<'a> Session<'a> {
             to: Some(node_id),
         });
     }
+}
+
+/// 统一手势阈值以逻辑 DIP 表达；Target 不再各自把 touch slop 解释为 tap/scroll。
+const GESTURE_TOUCH_SLOP: f32 = 8.0;
+const LONG_PRESS_DELAY_MICROS: u64 = 500_000;
+
+fn point_delta(current: Point, previous: Point) -> Point {
+    Point {
+        x: current.x - previous.x,
+        y: current.y - previous.y,
+    }
+}
+
+fn is_scroll_node(node: &UiNode) -> bool {
+    matches!(
+        node.kind,
+        NodeKind::ScrollView | NodeKind::VirtualListView(_)
+    ) || node
+        .layout
+        .as_ref()
+        .is_some_and(|layout| layout.overflow == tela_contract::Overflow::Scroll)
+}
+
+fn axis_accepts(axis: GestureAxis, delta: Point) -> bool {
+    match axis {
+        GestureAxis::Any => true,
+        GestureAxis::Horizontal => delta.x.abs() >= delta.y.abs(),
+        GestureAxis::Vertical => delta.y.abs() >= delta.x.abs(),
+    }
+}
+
+fn best_candidate(
+    candidates: &[GestureCandidate],
+    kinds: &[GestureKind],
+    delta: Option<Point>,
+) -> Option<GestureCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| kinds.contains(&candidate.kind))
+        .filter(|candidate| {
+            delta.is_none_or(|delta| {
+                !matches!(candidate.kind, GestureKind::Pan | GestureKind::Swipe)
+                    || axis_accepts(candidate.axis, delta)
+            })
+        })
+        .cloned()
+        .max_by_key(candidate_rank)
+}
+
+fn shared_pinch_candidate(
+    first: &[GestureCandidate],
+    second: &[GestureCandidate],
+) -> Option<GestureCandidate> {
+    first
+        .iter()
+        .filter(|candidate| candidate.kind == GestureKind::Pinch)
+        .filter(|candidate| {
+            second
+                .iter()
+                .any(|other| other.kind == GestureKind::Pinch && other.key == candidate.key)
+        })
+        .cloned()
+        .max_by_key(candidate_rank)
+}
+
+fn candidate_rank(candidate: &GestureCandidate) -> (i16, usize, u8) {
+    let kind = match candidate.kind {
+        GestureKind::Pinch => 3,
+        GestureKind::LongPress => 2,
+        GestureKind::Swipe => 1,
+        GestureKind::Pan => 0,
+    };
+    (candidate.priority, candidate.depth, kind)
 }
 
 fn direction_from_contract(direction: FocusDirection) -> focus::Direction {

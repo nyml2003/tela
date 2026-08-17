@@ -2,7 +2,7 @@
 
 use tela_contract::{
     Fill, IconName, IconProvider, IdentityConcern, Insets, KeymapScopeId, LayoutConcern,
-    ShortcutScopeSpec, Size, UiNode, UpdateMode, Viewport, VisualConcern,
+    SemanticKey, ShortcutScopeSpec, Size, UiNode, UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer};
 use tela_desktop_ui_kit::{
@@ -30,7 +30,7 @@ pub struct AppShellProps<'a> {
     pub search_focused: bool,
     pub operation_focused: bool,
     pub search_input: DraftInputSnapshot,
-    pub hovered_target: Option<String>,
+    pub hovered_action_key: Option<SemanticKey>,
     pub operation_input: Option<DraftInputSnapshot>,
     pub detail_scroll_y: f32,
     /// 图标由产品装配注入；业务 View 不选择具体资源实现。
@@ -88,7 +88,7 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
             model,
             session,
             shell_width,
-            props.hovered_target.as_deref(),
+            props.hovered_action_key.as_ref(),
             props.icons,
         ),
         workspace_stack(
@@ -100,7 +100,12 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
             narrow,
             props.icons,
         ),
-        status_bar(model, session, shell_width, props.hovered_target.clone()),
+        status_bar(
+            model,
+            session,
+            shell_width,
+            props.hovered_action_key.clone(),
+        ),
     ])
     .layout(LayoutConcern {
         width: Some(Size::fixed(shell_width)),
@@ -247,7 +252,7 @@ fn command_toolbar(
     model: &FileManagerModel,
     session: &FileManagerSession,
     width: f32,
-    hovered_target: Option<&str>,
+    hovered_action_key: Option<&SemanticKey>,
     icons: &dyn IconProvider,
 ) -> UiNode {
     let selected = !session.selected.is_empty();
@@ -377,7 +382,7 @@ fn command_toolbar(
                 .show_label(!compact)
                 .width(control_width),
         )
-        .hovered_target(hovered_target)
+        .hovered_action_key(hovered_action_key)
         .into_node(icons);
     LayoutContainer::frame(toolbar)
         .layout(LayoutConcern {
@@ -418,7 +423,7 @@ fn status_bar(
     model: &FileManagerModel,
     session: &FileManagerSession,
     width: f32,
-    hovered: Option<String>,
+    hovered: Option<SemanticKey>,
 ) -> UiNode {
     let left = format!(
         "{} 个项目 · 已选 {} 项",
@@ -444,7 +449,7 @@ fn status_bar(
         crate::domain::SortMode::Size => "大小",
     };
     let right = hovered
-        .map(|target| toolbar_label(&target).to_owned())
+        .map(|target| toolbar_label(&target.0).to_owned())
         .unwrap_or_else(|| format!("{scope} · 按{sort}排序 · {}", session.notice));
     LayoutContainer::row([
         text(&left, 12.0, SECONDARY),

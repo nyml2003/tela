@@ -17,7 +17,7 @@ use objc2_app_kit::{
     NSTrackingRectTag, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString};
-use tela_app_abi::{AppEvent, CursorKind};
+use tela_app_abi::{AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, CursorKind};
 use tela_contract::UiFrame;
 use tela_desktop_runtime::{
     DeviceLossAction, GuestRuntime, PlatformLaunchOptions, ShellLifecycle, ShellPhase,
@@ -115,12 +115,12 @@ define_class!(
 
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
-            self.pointer_move(event);
+            self.pointer_move(event, 0);
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            self.pointer_move(event);
+            self.pointer_move(event, 1);
         }
 
         #[unsafe(method(mouseExited:))]
@@ -243,23 +243,34 @@ impl TelaView {
     }
 
     fn pointer_down(&self, event: &NSEvent) {
-        self.dispatch_pointer(event, |x, y| AppEvent::PointerDown { x, y });
+        self.dispatch_mouse_pointer(event, AppPointerPhase::Down, 1);
     }
 
     fn pointer_up(&self, event: &NSEvent) {
-        self.dispatch_pointer(event, |x, y| AppEvent::PointerUp { x, y });
+        self.dispatch_mouse_pointer(event, AppPointerPhase::Up, 0);
     }
 
-    fn pointer_move(&self, event: &NSEvent) {
-        self.dispatch_pointer(event, |x, y| AppEvent::PointerMove { x, y });
+    fn pointer_move(&self, event: &NSEvent, buttons: u16) {
+        self.dispatch_mouse_pointer(event, AppPointerPhase::Move, buttons);
     }
 
-    fn dispatch_pointer(&self, event: &NSEvent, make_event: impl FnOnce(f32, f32) -> AppEvent) {
+    fn dispatch_mouse_pointer(&self, event: &NSEvent, phase: AppPointerPhase, buttons: u16) {
         let Some((x, y)) = self.event_point(event) else {
             return;
         };
+        let pointer = AppPointerEvent::new(
+            0,
+            AppPointerKind::Mouse,
+            phase,
+            x,
+            y,
+            buttons,
+            appkit_timestamp_micros(event),
+            0.0,
+            0.0,
+        );
         let mut state = self.ivars().state.borrow_mut();
-        if let Err(error) = state.pointer(self, make_event(x, y)) {
+        if let Err(error) = state.pointer(self, AppEvent::Pointer(pointer)) {
             state.fail_terminal(self, error);
         }
     }
@@ -276,14 +287,19 @@ impl TelaView {
         let mut state = self.ivars().state.borrow_mut();
         if let Err(error) = state.pointer(
             self,
-            AppEvent::PointerScroll {
+            AppEvent::Pointer(AppPointerEvent::new(
+                0,
+                AppPointerKind::Mouse,
+                AppPointerPhase::Scroll,
                 x,
                 y,
-                delta_x: event.scrollingDeltaX() as f32 * scale,
+                0,
+                appkit_timestamp_micros(event),
+                event.scrollingDeltaX() as f32 * scale,
                 // AppKit reports upward-positive deltas; the portable client convention matches
                 // browser/Win32 downward-positive content motion.
-                delta_y: -(event.scrollingDeltaY() as f32 * scale),
-            },
+                -(event.scrollingDeltaY() as f32 * scale),
+            )),
         ) {
             state.fail_terminal(self, error);
         }
@@ -329,6 +345,12 @@ impl TelaView {
         let mut state = self.ivars().state.borrow_mut();
         state.fail_startup(self, error);
     }
+}
+
+fn appkit_timestamp_micros(event: &NSEvent) -> u64 {
+    (event.timestamp() * 1_000_000.0)
+        .max(0.0)
+        .min(u64::MAX as f64) as u64
 }
 
 impl ViewState {
@@ -552,7 +574,20 @@ impl ViewState {
     }
 
     fn pointer_left_client(&mut self, view: &TelaView) -> Result<(), String> {
-        self.pointer(view, AppEvent::PointerMove { x: -1.0, y: -1.0 })
+        self.pointer(
+            view,
+            AppEvent::Pointer(AppPointerEvent::new(
+                0,
+                AppPointerKind::Mouse,
+                AppPointerPhase::Move,
+                -1.0,
+                -1.0,
+                0,
+                0,
+                0.0,
+                0.0,
+            )),
+        )
     }
 
     fn key_down(&mut self, view: &TelaView, event: &NSEvent) -> Result<(), String> {

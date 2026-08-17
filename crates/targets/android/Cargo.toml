@@ -9,10 +9,12 @@ description = "Tela Android GameActivity target host"
 name = "main"
 crate-type = ["cdylib", "rlib"]
 
+[dependencies]
+tela-app-abi = { path = "../../delivery/app-abi" }
+
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22.4"
 pollster = "0.4"
-tela-app-abi = { path = "../../delivery/app-abi" }
 tela-contract = { path = "../../kernel/contract" }
 tela-guest-runtime = { path = "../../delivery/guest-runtime" }
 tela-log = { path = "../../support/log" }

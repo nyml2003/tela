@@ -1,6 +1,8 @@
 //! `Input` / `InputNumber` 组件（AntD 简化）：文本/数字输入框，受控值 + 占位符。
 
-use tela_contract::{BindId, Color, InteractConcern, LayoutConcern, UiNode};
+use tela_contract::{
+    BindId, Color, InteractConcern, LayoutConcern, TextInputKind, TextInputSpec, UiNode,
+};
 use tela_core::LayoutContainer;
 
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
@@ -97,7 +99,7 @@ impl Input {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                text_input: true,
+                input: Some(TextInputSpec::new(TextInputKind::Text)),
                 bind_id: self.bind_id,
                 ..InteractConcern::default()
             });
@@ -219,7 +221,7 @@ impl InputNumber {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                text_input: true,
+                input: Some(TextInputSpec::new(TextInputKind::Number)),
                 bind_id: self.bind_id,
                 ..InteractConcern::default()
             });

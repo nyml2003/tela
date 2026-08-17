@@ -13,7 +13,8 @@ mod frame;
 
 pub use error::FrameCodecError;
 pub use event::{
-    AppEvent, AppStatus, CursorKind, decode_event, decode_status, encode_event, encode_status,
+    AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, AppStatus, CursorKind,
+    decode_event, decode_status, encode_event, encode_status,
 };
 pub use frame::{WireFrame, decode_frame, encode_frame};
 
@@ -168,6 +169,6 @@ macro_rules! export_guest {
 
 /// ABI version expected by the current development bundle runtime.
 ///
-/// Version 2 adds explicit IME composition lifetime events and runtime keymap replacement. Hosts
+/// Version 3 replaces preclassified pointer variants with one complete raw pointer packet. Hosts
 /// must reject a bundle whose declared version does not exactly match this value.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;

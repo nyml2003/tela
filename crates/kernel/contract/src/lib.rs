@@ -43,19 +43,22 @@ pub use icon::{
 };
 pub use identity::{IdentityConcern, KeyStrategy, SemanticKey, UpdateMode};
 pub use interaction::{
-    BindId, ClipboardOp, FocusAppearance, FocusDirection, HostPorts, ImeUpdate, InputEvent,
-    KeyCombo, KeyState, KeyboardIntent, KeyboardIntentEvent, KeymapScopeId, Modifiers, PhysicalKey,
-    PointerEvent, RawKeyboardEvent, ShortcutId, UiAction, Value,
+    BindId, ClipboardOp, FocusAppearance, FocusDirection, GestureAxis, GestureConfig, GestureEvent,
+    GestureKind, GesturePhase, HostPorts, ImeUpdate, InputEvent, KeyCombo, KeyState,
+    KeyboardIntent, KeyboardIntentEvent, KeymapScopeId, Modifiers, PhysicalKey, PointerButtons,
+    PointerEvent, PointerId, PointerKind, PointerPhase, RawKeyboardEvent, ShortcutId,
+    TextInputEvent, TextInputKind, TextInputSpec, TextSelection, UiAction, Value,
 };
 pub use layout::{
-    BaseSize, Constraints, CrossAlign, LayoutBox, MinMax, Overflow, ScrollState, Size, StackAlign,
+    BaseSize, Constraints, CrossAlign, GridAlign, GridItemPlacement, GridSpec, GridTrack,
+    LayoutBox, MinMax, Overflow, ScrollState, Size, StackAlign, TextConstraint, TextOverflow,
     Viewport,
 };
 pub use node::{
-    ContentConcern, DrawOrder, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec,
-    ImageContent, InteractConcern, LayoutConcern, NinePatchContent, NodeId, NodeKind, OverlaySpec,
-    ShortcutScopeSpec, TeleportSource, TeleportSpec, TextContent, UiNode, VirtualListSpec,
-    VisualConcern,
+    AnchorAlign, AnchorSide, AnchoredPlacement, ContentConcern, DrawOrder, FocusEdge, FocusGraph,
+    FocusPort, FocusRef, FocusScopeSpec, ImageContent, InteractConcern, LayoutConcern,
+    NinePatchContent, NodeId, NodeKind, OverlaySpec, ShortcutScopeSpec, TeleportSource,
+    TeleportSpec, TextContent, UiNode, VirtualListSpec, VisualConcern,
 };
 pub use paint::{ColorStop, Fill, Gradient, GradientKind, ShadowSpec};
 pub use resource::{TextStyleRef, TextureId, TextureRef};

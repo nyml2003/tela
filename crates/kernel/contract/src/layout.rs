@@ -170,6 +170,62 @@ pub enum Overflow {
     Scroll,
 }
 
+/// 文本超出声明行数时的绘制策略。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextOverflow {
+    /// 保留原文本，由文本盒裁剪超出的行或字形。
+    #[default]
+    Clip,
+    /// 在最后可见边界前插入 ASCII 省略号；实际字数由 TextMeasurer 决定。
+    Ellipsis,
+}
+
+/// 文本的行数和截断约束。
+///
+/// 这是布局约束而不是 renderer 的临时样式：Kernel 按相同 TextMeasurer 计算可见前缀，
+/// 再将已投影的文字交给任何 Renderer，避免 Canvas/WGPU/Native 各自做不同的截断。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextConstraint {
+    /// 最多绘制的逻辑行数；`None` 表示不限制行数。
+    pub max_lines: Option<u16>,
+    /// 超出时使用裁剪还是省略号。
+    pub overflow: TextOverflow,
+}
+
+impl TextConstraint {
+    /// 创建单行省略约束。
+    pub const fn single_line_ellipsis() -> Self {
+        Self {
+            max_lines: Some(1),
+            overflow: TextOverflow::Ellipsis,
+        }
+    }
+
+    /// 创建指定最大行数的省略约束。
+    pub const fn ellipsis(max_lines: u16) -> Self {
+        Self {
+            max_lines: Some(max_lines),
+            overflow: TextOverflow::Ellipsis,
+        }
+    }
+
+    /// 创建指定最大行数的裁剪约束。
+    pub const fn clip(max_lines: u16) -> Self {
+        Self {
+            max_lines: Some(max_lines),
+            overflow: TextOverflow::Clip,
+        }
+    }
+
+    /// 是否是可执行的截断约束。
+    pub const fn is_valid(self) -> bool {
+        match self.max_lines {
+            Some(lines) => lines > 0,
+            None => matches!(self.overflow, TextOverflow::Clip),
+        }
+    }
+}
+
 /// Stack `Overlay` 浮层的对齐规则（见 006-布局引擎 4）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StackAlign {
@@ -192,4 +248,105 @@ pub enum StackAlign {
     BottomCenter,
     /// 右下。
     BottomRight,
+}
+
+/// Grid 轨道尺寸。
+///
+/// `Fixed` 始终占用指定逻辑像素；`Flex` 在同轴的固定轨道与轨道间距扣除后，
+/// 按权重分配剩余空间。Grid 不提供隐式内容轨道，因为那会要求对子树进行修正性重测。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GridTrack {
+    /// 固定逻辑像素轨道。
+    Fixed(f32),
+    /// 弹性轨道权重。
+    Flex(f32),
+}
+
+/// Grid 容器的行列与间距声明。
+///
+/// Grid 只有固定与弹性轨道。容器自身未声明某轴尺寸但该轴含弹性轨道时，
+/// 会使用父约束的有限最大值；没有有限最大值时弹性轨道的可分配空间为零。
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridSpec {
+    /// 从左到右的列轨道。
+    pub columns: Vec<GridTrack>,
+    /// 从上到下的行轨道。
+    pub rows: Vec<GridTrack>,
+    /// 相邻列之间的间距。
+    pub column_gap: f32,
+    /// 相邻行之间的间距。
+    pub row_gap: f32,
+}
+
+impl GridSpec {
+    /// 用零间距创建一个 Grid 轨道声明。
+    pub fn new(columns: impl Into<Vec<GridTrack>>, rows: impl Into<Vec<GridTrack>>) -> Self {
+        Self {
+            columns: columns.into(),
+            rows: rows.into(),
+            column_gap: 0.0,
+            row_gap: 0.0,
+        }
+    }
+}
+
+/// Grid 单元格内的项目对齐策略。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GridAlign {
+    /// 项目位于单元格起点，保留其自然尺寸。
+    Start,
+    /// 项目在单元格内居中，保留其自然尺寸。
+    Center,
+    /// 项目位于单元格终点，保留其自然尺寸。
+    End,
+    /// 项目沿该轴填满单元格可用区。
+    #[default]
+    Stretch,
+}
+
+/// Grid 直接子项的显式位置与跨度。
+///
+/// 未声明此值的直接子项按从左到右、从上到下的顺序填入首个可用单元格。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridItemPlacement {
+    /// 起始列，从零开始。
+    pub column: u16,
+    /// 起始行，从零开始。
+    pub row: u16,
+    /// 横跨的列数，必须大于零。
+    pub column_span: u16,
+    /// 横跨的行数，必须大于零。
+    pub row_span: u16,
+    /// 水平方向在单元格内的对齐。
+    pub justify_self: GridAlign,
+    /// 垂直方向在单元格内的对齐。
+    pub align_self: GridAlign,
+}
+
+impl GridItemPlacement {
+    /// 创建占一个单元格的显式位置。
+    pub const fn at(column: u16, row: u16) -> Self {
+        Self {
+            column,
+            row,
+            column_span: 1,
+            row_span: 1,
+            justify_self: GridAlign::Stretch,
+            align_self: GridAlign::Stretch,
+        }
+    }
+
+    /// 设置横纵跨度。
+    pub const fn span(mut self, column_span: u16, row_span: u16) -> Self {
+        self.column_span = column_span;
+        self.row_span = row_span;
+        self
+    }
+
+    /// 设置单元格内对齐。
+    pub const fn align(mut self, justify_self: GridAlign, align_self: GridAlign) -> Self {
+        self.justify_self = justify_self;
+        self.align_self = align_self;
+        self
+    }
 }
