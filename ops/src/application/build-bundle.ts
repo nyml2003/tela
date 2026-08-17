@@ -16,7 +16,7 @@ export interface BuildBundleResult {
 }
 
 /**
- * 生成 `dist/tela-dev/tela-demo.tela` 与 `latest.json`。
+ * 生成 product guest archive 与 `latest.json`。
  *
  * 压缩包先写临时路径，索引最后原子替换；原生 SDK 因此只会看见完整 archive。
  */

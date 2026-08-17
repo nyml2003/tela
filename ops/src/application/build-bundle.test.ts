@@ -49,11 +49,11 @@ test('bundle 在索引发布前先原子替换 archive', async () => {
 
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls.slice(-3), [
-    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-dev/tela-demo.tela.tmp',
-    'rename:/repo/dist/tela-dev/tela-demo.tela.tmp->/repo/dist/tela-dev/tela-demo.tela',
+    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-dev/tela-desktop-guest.tela.tmp',
+    'rename:/repo/dist/tela-dev/tela-desktop-guest.tela.tmp->/repo/dist/tela-dev/tela-desktop-guest.tela',
     'rename:/repo/dist/tela-dev/latest.json.tmp->/repo/dist/tela-dev/latest.json',
   ]);
-  assert.deepEqual(wasmBuilds, [['tela-demo', 'release', ['app-wasm']]]);
+  assert.deepEqual(wasmBuilds, [['tela-product-desktop-guest', 'release', []]]);
 });
 
 test('mobile channel uses an independent guest and archive root', async () => {
@@ -88,9 +88,9 @@ test('mobile channel uses an independent guest and archive root', async () => {
   }, 'mobile');
 
   assert.deepEqual(result, { ok: true });
-  assert.deepEqual(wasmBuilds, [['tela-mobile-demo', 'release', ['app-wasm']]]);
-  assert.ok(calls.some((call) => call.includes('/repo/dist/tela-mobile/tela-mobile-demo.tela.tmp')));
-  assert.ok(calls.some((call) => call.includes('/tela-mobile/tela-mobile-demo.tela')));
+  assert.deepEqual(wasmBuilds, [['tela-product-mobile-guest', 'release', []]]);
+  assert.ok(calls.some((call) => call.includes('/repo/dist/tela-mobile/tela-mobile-guest.tela.tmp')));
+  assert.ok(calls.some((call) => call.includes('/tela-mobile/tela-mobile-guest.tela')));
 });
 
 test('guest 初始化校验失败时不发布临时 archive 或索引', async () => {

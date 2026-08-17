@@ -4,7 +4,7 @@
   `fonts/variablefont/MaterialSymbolsRounded[FILL,GRAD,opsz,wght].ttf`。
 - 许可证：Apache-2.0，完整文本见同目录 `LICENSE-MaterialSymbols.txt`。
 - 本仓库文件：`MaterialSymbolsRounded-subset.ttf`，只含
-  `tela-widgets::IconName` 当前映射到的字形。
+  `tela_contract::IconName` 当前映射到的字形。
 - 固定实例轴：`FILL=0`、`wght=400`、`GRAD=0`、`opsz=24`。
 
 在 `nix develop` 环境中可用 `fonttools` 重新生成子集；更新图标映射时必须同时更新码位列表与

@@ -19,6 +19,11 @@ node_modules/
 /android/app/src/main/jniLibs/
 /android/local.properties
 /ios/build/
+/products/android/.gradle/
+/products/android/app/build/
+/products/android/app/src/main/jniLibs/
+/products/android/local.properties
+/products/ios/build/
 
 # 编辑器 / 系统
 .vscode/
@@ -43,3 +48,5 @@ node_modules/
 # Xcode 用户状态（Team 选择等留在本机，不上库）
 /ios/TelaMobile.xcodeproj/xcuserdata/
 /ios/TelaMobile.xcodeproj/project.xcworkspace/
+/products/ios/TelaMobile.xcodeproj/xcuserdata/
+/products/ios/TelaMobile.xcodeproj/project.xcworkspace/

@@ -1,9 +1,0 @@
-[package]
-name = "tela-fonts"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-description = "tela 内嵌 UI 与图标字体资源"
-
-[lints]
-workspace = true

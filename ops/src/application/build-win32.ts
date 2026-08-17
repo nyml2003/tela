@@ -1,9 +1,7 @@
 // 应用层：交叉构建并发布 Win32 开发壳；应用内容仍在 tela-dev bundle 中按启动时加载。
 import type { FsPort, Reporter } from '../domain/ports.ts';
-import type { BuildProfile, WorkspacePaths } from '../domain/workspace.ts';
+import { WIN32_TARGET_CRATE, type BuildProfile, type WorkspacePaths } from '../domain/workspace.ts';
 import type { CargoPort } from '../infrastructure/cargo.ts';
-
-const WIN32_SDK_CRATE = 'tela-win32-sdk';
 
 export interface BuildWin32Deps {
   cargo: CargoPort;
@@ -23,7 +21,7 @@ export async function runBuildWin32(
 ): Promise<BuildWin32Result> {
   const { cargo, fs, reporter, workspace } = deps;
   reporter.section(`构建 Win32 开发壳（${profile}）`);
-  const build = await cargo.buildWin32(WIN32_SDK_CRATE, profile);
+  const build = await cargo.buildWin32(WIN32_TARGET_CRATE, profile);
   if (!build.passed) {
     reporter.fail('Win32 GNU 交叉构建失败');
     if (build.detail) reporter.info(build.detail);

@@ -49,13 +49,13 @@ test('Android build publishes an ARM64 host APK and configures the strict localh
   });
 
   assert.deepEqual(result, { ok: true });
-  assert.deepEqual(wasmBuilds, [['tela-mobile-demo', 'release', ['app-wasm']]]);
-  assert.ok(calls.includes('reset:/repo/android/app/src/main/jniLibs'));
-  assert.ok(calls.some((call) => call === 'tela-android-cargo:build --target aarch64-linux-android --release -p tela-android-sdk@/repo'));
-  assert.ok(calls.includes('dir:/repo/android/app/src/main/jniLibs/arm64-v8a'));
-  assert.ok(calls.includes('copy:/repo/target/aarch64-linux-android/release/libmain.so->/repo/android/app/src/main/jniLibs/arm64-v8a/libmain.so'));
-  assert.ok(calls.some((call) => call === 'tela-android-gradle:--no-daemon :app:assembleDebug -PtelaBundleIndex=http://127.0.0.1:8000/tela-mobile/latest.json@/repo/android'));
-  assert.ok(calls.includes('copy:/repo/android/app/build/outputs/apk/debug/app-debug.apk->/repo/dist/android/tela-mobile-debug.apk'));
+  assert.deepEqual(wasmBuilds, [['tela-product-mobile-guest', 'release', []]]);
+  assert.ok(calls.includes('reset:/repo/products/android/app/src/main/jniLibs'));
+  assert.ok(calls.some((call) => call === 'tela-android-cargo:build --target aarch64-linux-android --release -p tela-target-android@/repo'));
+  assert.ok(calls.includes('dir:/repo/products/android/app/src/main/jniLibs/arm64-v8a'));
+  assert.ok(calls.includes('copy:/repo/target/aarch64-linux-android/release/libmain.so->/repo/products/android/app/src/main/jniLibs/arm64-v8a/libmain.so'));
+  assert.ok(calls.some((call) => call === 'tela-android-gradle:--no-daemon :app:assembleDebug -PtelaBundleIndex=http://127.0.0.1:8000/tela-mobile/latest.json@/repo/products/android'));
+  assert.ok(calls.includes('copy:/repo/products/android/app/build/outputs/apk/debug/app-debug.apk->/repo/dist/android/tela-mobile-debug.apk'));
 });
 
 test('native build failure stops Gradle and does not publish an APK', async () => {

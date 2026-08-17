@@ -18,8 +18,8 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
   const mobileBundle = workspace.bundle('mobile');
   const hasDesktopSdkBundle = await fs.exists(desktopBundle.indexPath());
   const hasMobileSdkBundle = await fs.exists(mobileBundle.indexPath());
-  const hasWebviewShell = (await fs.exists(workspace.webviewSdkGluePath()))
-    && (await fs.exists(workspace.webviewSdkWasmPath()));
+  const hasWebviewShell = (await fs.exists(workspace.webviewHostGluePath()))
+    && (await fs.exists(workspace.webviewHostWasmPath()));
   if (!hasBrowserPage && !hasDesktopSdkBundle && !hasMobileSdkBundle) {
     reporter.fail(`缺少 ${workspace.distDir}/index.html、${desktopBundle.indexPath()} 和 ${mobileBundle.indexPath()}`);
     reporter.info('请先运行: ops build（浏览器）或 ops build bundle（原生 SDK）');
@@ -35,8 +35,8 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
     reporter.warn('浏览器页面构建不完整：还需要 WebView shell 与 tela-dev bundle；运行 ops build。');
   }
   if (hasDesktopSdkBundle) {
-    reporter.info(`桌面 SDK bundle（本机）: http://127.0.0.1:${result.port}/tela-dev/latest.json`);
-    reporter.info('跨机器请以开发机可达的局域网 IP 替换 127.0.0.1，并传给 SDK 的 --bundle-index。');
+    reporter.info(`桌面 guest bundle（本机）: http://127.0.0.1:${result.port}/tela-dev/latest.json`);
+    reporter.info('跨机器请以开发机可达的局域网 IP 替换 127.0.0.1，并传给 desktop Target 的 --bundle-index。');
   }
   if (hasMobileSdkBundle) {
     reporter.info(`Android mobile bundle（本机）: http://127.0.0.1:${result.port}/tela-mobile/latest.json`);

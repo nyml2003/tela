@@ -1,234 +1,356 @@
-// domain/architecture 纯函数单测：依赖方向规则（node:test，零依赖）。
-import { test } from 'node:test';
+// domain/architecture 纯函数单测：026 目标依赖方向。
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { checkArchitecture, type CrateInfo } from './architecture.ts';
 
-const crate = (name: string, deps: [string, string][]): CrateInfo => ({
+type Dependency = readonly [string, 'normal' | 'dev' | 'build'];
+
+const crate = (name: string, deps: readonly Dependency[] = []): CrateInfo => ({
   name,
-  deps: deps.map(([n, k]) => ({ name: n, kind: k as CrateInfo['deps'][number]['kind'] })),
+  deps: deps.map(([dependency, kind]) => ({ name: dependency, kind })),
 });
 
-/** 合法基线：全部零依赖 crate（其他用例基于它叠加违规）。 */
-const base = (): CrateInfo[] => [
-  crate('tela-contract', []),
-  crate('tela-log', []),
-  crate('tela-fonts', []),
+const zeroDependencies = (): CrateInfo[] => [
+  crate('tela-contract'),
+  crate('tela-font-resources'),
+  crate('tela-log'),
 ];
 
-test('零依赖 crate 有依赖时报违规', () => {
+test('零依赖 crate 的 normal、dev、build 依赖都被拒绝', () => {
   const violations = checkArchitecture([
-    ...base(),
-    crate('tela-contract', [['tela-core', 'normal']]),
+    ...zeroDependencies(),
+    crate('tela-contract', [['tela-core', 'build']]),
   ]);
+
   assert.equal(violations.length, 1);
   assert.match(violations[0]!.message, /零依赖/);
 });
 
-test('tela-contract 零依赖时通过', () => {
-  assert.deepEqual(checkArchitecture(base()), []);
-});
-
-test('core 依赖白名单之外的 crate 报违规', () => {
+test('Kernel Core 只依赖 Contract', () => {
   const violations = checkArchitecture([
-    ...base(),
-    crate('tela-core', [
-      ['tela-contract', 'normal'],
-      ['tela-render-raster', 'normal'], // 运行时反向依赖后端，不允许
-    ]),
-  ]);
-  assert.equal(violations.length, 1);
-  assert.match(violations[0]!.message, /tela-render-raster/);
-});
-
-test('core 的 dev 依赖仅允许测试后端', () => {
-  const ok = checkArchitecture([...base(), crate('tela-core', [['tela-render-raster', 'dev']])]);
-  assert.deepEqual(ok, []);
-  const bad = checkArchitecture([...base(), crate('tela-core', [['tela-widgets', 'dev']])]);
-  assert.equal(bad.length, 1);
-});
-
-test('render 后端禁止反向依赖 core', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-render-raster', [
-      ['tela-contract', 'normal'],
-      ['tela-text', 'normal'],
-      ['tela-core', 'dev'], // dev 也不行
-    ]),
-  ]);
-  assert.equal(violations.length, 1);
-  assert.match(violations[0]!.message, /禁止反向依赖 tela-core/);
-});
-
-test('完整合法 workspace 通过', () => {
-  const crates: CrateInfo[] = [
-    crate('tela-contract', []),
-    crate('tela-fonts', []),
-    crate('tela-resource-protocol', [['tela-contract', 'normal']]),
+    ...zeroDependencies(),
     crate('tela-core', [
       ['tela-contract', 'normal'],
       ['tela-render-raster', 'dev'],
     ]),
-    crate('tela-text', [
-      ['tela-contract', 'normal'],
-      ['tela-fonts', 'normal'],
-      ['ab_glyph', 'normal'],
-    ]),
-    crate('tela-icon', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-      ['tela-fonts', 'normal'],
-      ['tela-text', 'normal'],
-    ]),
-    crate('tela-render-raster', [
-      ['tela-contract', 'normal'],
-      ['tela-text', 'normal'],
-      ['png', 'normal'],
-      ['font8x8', 'normal'],
-    ]),
-    crate('tela-render-canvas', [['tela-contract', 'normal']]),
-    crate('tela-render-wgpu', [
-      ['tela-contract', 'normal'],
-      ['tela-log', 'normal'],
-      ['tela-text', 'normal'],
-      ['bytemuck', 'normal'],
-      ['wgpu', 'normal'],
-    ]),
-    crate('tela-webview-sdk', [
-      ['tela-app-abi', 'normal'],
-      ['tela-bundle', 'normal'],
-      ['tela-contract', 'normal'],
-      ['tela-render-wgpu', 'normal'],
-      ['serde_json', 'normal'],
-      ['wasm-bindgen', 'normal'],
-      ['wasm-bindgen-futures', 'normal'],
-      ['web-sys', 'normal'],
-      ['wgpu', 'normal'],
-    ]),
-    crate('tela-widgets', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-      ['tela-fonts', 'normal'],
-    ]),
-    crate('tela-ui', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-      ['tela-fonts', 'normal'],
-      ['tela-icon', 'normal'],
-      ['tela-text', 'normal'],
-      ['tela-widgets', 'normal'],
-    ]),
-    crate('tela-log', []),
-  ];
-  assert.deepEqual(checkArchitecture(crates), []);
-});
-
-test('tela-icon 禁止依赖 renderer、widgets 或演示宿主', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-icon', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-      ['tela-fonts', 'normal'],
-      ['tela-text', 'normal'],
-      ['tela-render-raster', 'normal'],
-    ]),
   ]);
+
   assert.equal(violations.length, 1);
   assert.match(violations[0]!.message, /tela-render-raster/);
 });
 
-test('tela-ui 禁止依赖渲染器或演示宿主', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-ui', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-      ['tela-widgets', 'normal'],
-      ['tela-render-raster', 'normal'],
-    ]),
-  ]);
-  assert.ok(violations.some((violation) => /禁止依赖 renderer/.test(violation.message)));
-});
-
-test('wgpu 后端白名单之外依赖报违规', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-render-wgpu', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'], // render 后端反向依赖 core，双违规
-    ]),
-  ]);
-  assert.ok(violations.length >= 1);
-});
-
-test('tela-text 禁止反向依赖 core 或 renderer', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-text', [
-      ['tela-contract', 'normal'],
-      ['tela-fonts', 'normal'],
-      ['tela-core', 'normal'],
-    ]),
-  ]);
-  assert.equal(violations.length, 1);
-  assert.match(violations[0]!.message, /tela-core/);
-});
-
-test('WebView SDK 不能静态依赖应用 guest', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-webview-sdk', [
-      ['tela-app-abi', 'normal'],
-      ['tela-demo', 'normal'],
-    ]),
-  ]);
-  assert.ok(violations.some((violation) => /bundle 加载 guest/.test(violation.message)));
-});
-
-test('Android SDK 不能静态依赖 desktop 或 mobile guest', () => {
-  const violations = checkArchitecture([
-    ...base(),
-    crate('tela-android-sdk', [
-      ['tela-contract', 'normal'],
-      ['tela-mobile-demo', 'normal'],
-    ]),
-  ]);
-  assert.ok(violations.some((violation) => /mobile bundle/.test(violation.message)));
-});
-
-test('iOS SDK 只静态链接 mobile app，不能接入动态 bundle runtime', () => {
+test('Renderer 仅允许通过 dev 依赖使用 Core 进行跨层验证', () => {
   const allowed = checkArchitecture([
-    ...base(),
-    crate('tela-ios-sdk', [
+    ...zeroDependencies(),
+    crate('tela-render-raster', [
+      ['font8x8', 'normal'],
+      ['png', 'normal'],
       ['tela-contract', 'normal'],
-      ['tela-mobile-demo', 'normal'],
-      ['tela-render-wgpu', 'normal'],
-      ['pollster', 'normal'],
-      ['raw-window-handle', 'normal'],
-      ['wgpu', 'normal'],
-      ['winit', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['tela-core', 'dev'],
     ]),
   ]);
   assert.deepEqual(allowed, []);
 
   const violations = checkArchitecture([
-    ...base(),
-    crate('tela-ios-sdk', [
+    ...zeroDependencies(),
+    crate('tela-render-raster', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /反向依赖 tela-core/.test(violation.message)));
+});
+
+test('UI Capability 不可直接认识具体资源或 renderer', () => {
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-ui-foundation', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-icon-resources', 'normal'],
+    ]),
+  ]);
+
+  assert.ok(violations.some((violation) => /tela-icon-resources/.test(violation.message)));
+});
+
+test('Presentation 通过 Contract 协议提供资源，不能反向依赖 UI kit', () => {
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-icon-resources', [
+      ['tela-contract', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+    ]),
+  ]);
+
+  assert.ok(violations.some((violation) => /Presentation/.test(violation.message)));
+});
+
+test('Application 可在测试中注入资源，但生产闭包不能静态耦合资源实现', () => {
+  const allowed = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-mobile-demo', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-mobile-ui-kit', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+      ['tela-icon-resources', 'dev'],
+      ['tela-text-resources', 'dev'],
+    ]),
+  ]);
+  assert.deepEqual(allowed, []);
+
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-mobile-demo', [
+      ['tela-contract', 'normal'],
+      ['tela-icon-resources', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /tela-icon-resources/.test(violation.message)));
+});
+
+test('Target 不能静态链接应用或另一个 Target', () => {
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-target-android', [
+      ['jni', 'normal'],
+      ['tela-contract', 'normal'],
       ['tela-mobile-demo', 'normal'],
+      ['tela-target-ios', 'normal'],
+    ]),
+  ]);
+
+  assert.ok(violations.some((violation) => /静态依赖 Application 或 Product/.test(violation.message)));
+  assert.ok(violations.some((violation) => /其他 Target/.test(violation.message)));
+});
+
+test('iOS Target 保持宿主边界，静态组合由 iOS Product 负责', () => {
+  const targetViolations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-target-ios', [
+      ['tela-contract', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+    ]),
+  ]);
+  assert.ok(targetViolations.some((violation) => /静态依赖 Application 或 Product/.test(violation.message)));
+
+  const productViolations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-product-ios', [
+      ['tela-contract', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+      ['tela-target-ios', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['tela-ui-foundation', 'normal'],
       ['tela-guest-runtime', 'normal'],
     ]),
   ]);
-  assert.ok(violations.some((violation) => /静态链接 mobile app/.test(violation.message)));
+  assert.ok(productViolations.some((violation) => /动态 Delivery 链路/.test(violation.message)));
 });
 
-test('Guest Runtime 不能反向依赖目标 SDK', () => {
+test('Delivery 与 Guest Runtime 不可反向持有 Target', () => {
   const violations = checkArchitecture([
-    ...base(),
+    ...zeroDependencies(),
     crate('tela-guest-runtime', [
       ['tela-app-abi', 'normal'],
-      ['tela-android-sdk', 'normal'],
+      ['tela-target-webview', 'normal'],
     ]),
   ]);
-  assert.ok(violations.some((violation) => /禁止依赖任一 Target SDK/.test(violation.message)));
+
+  assert.ok(violations.some((violation) => /Delivery 禁止依赖/.test(violation.message)));
+  assert.ok(violations.some((violation) => /Guest Runtime 禁止依赖/.test(violation.message)));
+});
+
+test('动态 Product 不能被 Target 或错误应用污染', () => {
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-product-mobile-guest', [
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-desktop-demo', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+      ['tela-target-android', 'normal'],
+    ]),
+  ]);
+
+  assert.ok(violations.some((violation) => /移动动态 Product/.test(violation.message)));
+});
+
+test('完整的 026 workspace 依赖闭包通过', () => {
+  const crates: CrateInfo[] = [
+    crate('tela-contract'),
+    crate('tela-font-resources'),
+    crate('tela-log'),
+    crate('tela-app-abi', [
+      ['postcard', 'normal'],
+      ['serde', 'normal'],
+      ['tela-contract', 'normal'],
+    ]),
+    crate('tela-bundle', [
+      ['hex', 'normal'],
+      ['serde', 'normal'],
+      ['serde_json', 'normal'],
+      ['sha2', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['zip', 'normal'],
+    ]),
+    crate('tela-core', [['tela-contract', 'normal']]),
+    crate('tela-desktop-demo', [
+      ['serde', 'normal'],
+      ['serde_json', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-desktop-ui-kit', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+      ['tela-icon-resources', 'dev'],
+      ['tela-text-resources', 'dev'],
+    ]),
+    crate('tela-desktop-runtime', [
+      ['tela-bundle', 'normal'],
+      ['tela-guest-runtime', 'normal'],
+      ['serde_json', 'dev'],
+      ['tela-app-abi', 'dev'],
+    ]),
+    crate('tela-desktop-ui-kit', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+    ]),
+    crate('tela-guest-runtime', [
+      ['serde_json', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['tela-bundle', 'normal'],
+      ['tela-contract', 'normal'],
+      ['wasmtime', 'normal'],
+    ]),
+    crate('tela-icon-resources', [
+      ['tela-contract', 'normal'],
+      ['tela-text-resources', 'normal'],
+    ]),
+    crate('tela-mobile-demo', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-mobile-ui-kit', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+      ['tela-icon-resources', 'dev'],
+      ['tela-text-resources', 'dev'],
+    ]),
+    crate('tela-mobile-ui-kit', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+    ]),
+    crate('tela-product-desktop-guest', [
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-desktop-demo', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-text-resources', 'normal'],
+    ]),
+    crate('tela-product-ios', [
+      ['tela-contract', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+      ['tela-target-ios', 'normal'],
+      ['tela-text-resources', 'normal'],
+    ]),
+    crate('tela-product-mobile-guest', [
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-mobile-demo', 'normal'],
+      ['tela-text-resources', 'normal'],
+    ]),
+    crate('tela-render-canvas', [['tela-contract', 'normal']]),
+    crate('tela-render-raster', [
+      ['font8x8', 'normal'],
+      ['png', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['tela-core', 'dev'],
+    ]),
+    crate('tela-render-wgpu', [
+      ['bytemuck', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-log', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['wgpu', 'normal'],
+      ['naga', 'dev'],
+      ['pollster', 'dev'],
+    ]),
+    crate('tela-resource-protocol', [['tela-contract', 'normal']]),
+    crate('tela-target-android', [
+      ['jni', 'normal'],
+      ['pollster', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-guest-runtime', 'normal'],
+      ['tela-log', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['ureq', 'normal'],
+      ['wgpu', 'normal'],
+      ['winit', 'normal'],
+    ]),
+    crate('tela-target-ios', [
+      ['pollster', 'normal'],
+      ['raw-window-handle', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['wgpu', 'normal'],
+      ['winit', 'normal'],
+    ]),
+    crate('tela-target-macos', [
+      ['objc2', 'normal'],
+      ['objc2-app-kit', 'normal'],
+      ['objc2-foundation', 'normal'],
+      ['pollster', 'normal'],
+      ['raw-window-handle', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-desktop-runtime', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['ureq', 'normal'],
+      ['wgpu', 'normal'],
+    ]),
+    crate('tela-target-webview', [
+      ['serde_json', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['tela-bundle', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['wasm-bindgen', 'normal'],
+      ['wasm-bindgen-futures', 'normal'],
+      ['web-sys', 'normal'],
+      ['wgpu', 'normal'],
+    ]),
+    crate('tela-target-win32', [
+      ['pollster', 'normal'],
+      ['raw-window-handle', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-desktop-runtime', 'normal'],
+      ['tela-render-wgpu', 'normal'],
+      ['ureq', 'normal'],
+      ['wgpu', 'normal'],
+      ['windows', 'normal'],
+    ]),
+    crate('tela-text-resources', [
+      ['ab_glyph', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-font-resources', 'normal'],
+    ]),
+    crate('tela-ui-foundation', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+    ]),
+  ];
+
+  assert.deepEqual(checkArchitecture(crates), []);
 });

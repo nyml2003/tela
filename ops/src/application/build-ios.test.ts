@@ -40,9 +40,9 @@ test('iOS 构建静态链接 mobile app 并以无签名 Xcode 设备目标检查
   }, 'release');
 
   assert.deepEqual(result, { ok: true });
-  assert.ok(calls.includes('dir:/repo/ios/build/rust'));
-  assert.ok(calls.includes('copy:/repo/target/aarch64-apple-ios/release/libtela_ios_sdk.a->/repo/ios/build/rust/libtela_ios_sdk.a'));
-  assert.ok(calls.some((call) => call === 'tela-ios-xcodebuild:-project /repo/ios/TelaMobile.xcodeproj -scheme TelaMobile -configuration Release -sdk iphoneos -derivedDataPath /repo/ios/build/DerivedData CODE_SIGNING_ALLOWED=NO build@/repo/ios'));
+  assert.ok(calls.includes('dir:/repo/products/ios/build/rust'));
+  assert.ok(calls.includes('copy:/repo/target/aarch64-apple-ios/release/libtela_product_ios.a->/repo/products/ios/build/rust/libtela_product_ios.a'));
+  assert.ok(calls.some((call) => call === 'tela-ios-xcodebuild:-project /repo/products/ios/TelaMobile.xcodeproj -scheme TelaMobile -configuration Release -sdk iphoneos -derivedDataPath /repo/products/ios/build/DerivedData CODE_SIGNING_ALLOWED=NO build@/repo/products/ios'));
 });
 
 test('Rust 静态库失败时不会调用 Xcode', async () => {

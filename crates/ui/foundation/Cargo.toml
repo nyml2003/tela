@@ -1,0 +1,13 @@
+[package]
+name = "tela-ui-foundation"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela UI foundation: shared controlled primitives and resource contracts"
+
+[dependencies]
+tela-contract = { path = "../../kernel/contract" }
+tela-core = { path = "../../kernel/core" }
+
+[lints]
+workspace = true

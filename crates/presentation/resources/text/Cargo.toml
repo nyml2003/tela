@@ -1,0 +1,14 @@
+[package]
+name = "tela-text-resources"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "tela 受控字体度量与字形定位"
+
+[dependencies]
+tela-contract = { path = "../../../kernel/contract" }
+tela-font-resources = { path = "../fonts" }
+ab_glyph = "0.2"
+
+[lints]
+workspace = true

@@ -41,8 +41,8 @@ test('macOS App 只发布本地壳与 Info.plist，不嵌入远程 bundle', asyn
   assert.deepEqual(calls, [
     'reset:/repo/dist/macos/Tela.app',
     'dir:/repo/dist/macos/Tela.app/Contents/MacOS',
-    'copy:/repo/crates/tela-macos-sdk/resources/Info.plist->/repo/dist/macos/Tela.app/Contents/Info.plist',
-    'copy:/repo/target/aarch64-apple-darwin/release/tela-macos-sdk->/repo/dist/macos/Tela.app/Contents/MacOS/tela-macos-sdk',
-    'mode:/repo/dist/macos/Tela.app/Contents/MacOS/tela-macos-sdk:755',
+    'copy:/repo/products/macos/resources/Info.plist->/repo/dist/macos/Tela.app/Contents/Info.plist',
+    'copy:/repo/target/aarch64-apple-darwin/release/tela-macos-host->/repo/dist/macos/Tela.app/Contents/MacOS/tela-macos-host',
+    'mode:/repo/dist/macos/Tela.app/Contents/MacOS/tela-macos-host:755',
   ]);
 });

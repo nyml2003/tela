@@ -1,0 +1,20 @@
+[package]
+name = "tela-guest-runtime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Portable Tela guest execution and strict development-bundle validation"
+
+[dependencies]
+tela-app-abi = { path = "../app-abi" }
+tela-bundle = { path = "../bundle" }
+tela-contract = { path = "../../kernel/contract" }
+serde_json = "1"
+wasmtime = { version = "47.0.3", default-features = false, features = ["cranelift", "runtime"] }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tela-guest-verify"
+path = "src/bin/tela-guest-verify.rs"

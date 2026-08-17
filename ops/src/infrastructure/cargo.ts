@@ -26,6 +26,13 @@ export class CargoPort {
     return this.gate('test', ['test']);
   }
 
+  /** 检查一个显式产品闭包的 Rust package，不借用其它产品的 target 或 SDK。 */
+  async checkPackages(packages: readonly string[]): Promise<GateResult> {
+    const args = ['check'];
+    for (const packageName of packages) args.push('-p', packageName);
+    return this.gate('build', args);
+  }
+
   /** 构建演示 wasm（wasm32-unknown-unknown，见 009 多环境集成）。 */
   async buildWasm(
     crate: string,

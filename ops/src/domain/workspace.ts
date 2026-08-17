@@ -1,140 +1,182 @@
-// 领域层：工作区模型（纯数据 + 路径推导，无 I/O）。
-// tela 仓库布局约定：源码位于 crates/、web/、ops/；dist/ 只存放可删除的构建产物。
+// 领域层：工作区与产品闭包模型（纯数据 + 路径推导，无 I/O）。
+//
+// `products/<id>` 是交付编排和原生输入的物理根；Rust crate 的目录层级不等于产品依赖
+// 层级。这里集中声明产品选择，避免构建命令从默认环境或旧 demo crate 名推断目标。
 
 import { ANDROID_NDK_ABI, ANDROID_RUST_TARGET } from './android.ts';
 
 export type BuildProfile = 'dev' | 'release';
 
-/** A separately published guest channel. Channels do not imply a shared application UI. */
+/** 独立发布的动态 guest 通道；通道不意味着共享业务视图。 */
 export type BundleChannel = 'desktop' | 'mobile';
 
-/** Paths and build identity of one dynamically delivered guest. */
+/** 六个显式产品闭包。`core` 是纯 Rust library 闭包，不是虚构的 GUI Target。 */
+export type ProductId = 'core' | 'webview' | 'android' | 'ios' | 'win32' | 'macos';
+
+export type DeliveryRoute = 'none' | 'dynamic-bundle' | 'static-link';
+
+/** 一项产品所选择的完整责任链；只用于构建与治理，不可被应用反向依赖。 */
+export interface ProductSpec {
+  id: ProductId;
+  /** `products/<id>` 物理根，可能只包含由 ops 管理的编排而无 Rust package。 */
+  root: string;
+  /** 选中的 application 或 product guest package；core 没有 UI application。 */
+  application?: string;
+  delivery: DeliveryRoute;
+  /** 最终产品选中的 renderer；core 不带 renderer。 */
+  renderer?: string;
+  /** 最终产品选中的 Target Runtime；core 不带 Target。 */
+  target?: string;
+  /** 能代表该产品闭包的 Cargo package 根，用于显式 build/check 入口。 */
+  packages: readonly string[];
+}
+
+/** 动态交付 guest 的发布路径与编译身份。 */
 export interface BundlePaths {
-  /** Delivery channel identifier used by the CLI. */
   channel: BundleChannel;
-  /** Human-readable target label used in build diagnostics. */
   label: string;
-  /** Guest crate compiled into this channel's WASM artifact. */
+  /** 由产品装配生成 ABI export 的 WASM crate，而不是业务 app crate。 */
   guestCrate: string;
-  /** Features required for its typed Guest ABI exports. */
+  /** Guest root 自己拥有 ABI export，不需要给 application 打开 feature。 */
   guestFeatures: readonly string[];
-  /** WASM artifact generated for the selected profile. */
   guestWasmArtifactPath(profile: BuildProfile): string;
-  /** Directory served as this channel's remote bundle root. */
   dir(): string;
-  /** Published `.tela` archive. */
   archivePath(): string;
-  /** Temporary archive written before the index is atomically replaced. */
   archiveTempPath(): string;
-  /** Published development manifest. */
   indexPath(): string;
-  /** Temporary manifest written before publication. */
   indexTempPath(): string;
-  /** URL stored inside the development manifest, resolved relative to its index. */
   archiveUrl: string;
-  /** Optional static assets included in this channel's archive. */
   assetsDir(): string;
 }
 
 /** 工作区路径模型：全部路径从仓库根派生，纯函数计算，禁止魔法字符串散落。 */
 export interface WorkspacePaths {
-  /** 仓库根目录。 */
   root: string;
-  /** crates 目录。 */
   cratesDir: string;
-  /** 静态发布目录（index.html / wasm / 前端 bundle；始终由构建生成）。 */
+  productsDir: string;
   distDir: string;
-  /** web 前端源码目录（TypeScript，esbuild 构建到 dist/assets/tela-web）。 */
-  webDir: string;
-  /** One independently published dynamic guest channel. */
+  /** 浏览器产品源码根（TypeScript，构建到 dist/assets/tela-web）。 */
+  webviewProductDir: string;
+  product(id: ProductId): ProductSpec;
   bundle(channel: BundleChannel): BundlePaths;
-  /** 应用 guest wasm 工件目标路径（构建输出）。 */
-  appGuestWasmArtifactPath(profile: BuildProfile): string;
-  /** 浏览器 WebView SDK wasm 工件目标路径。 */
-  webviewSdkArtifactPath(profile: BuildProfile): string;
-  /** wasm-bindgen 生成的浏览器 WebView SDK glue。 */
-  webviewSdkGluePath(): string;
-  /** wasm-bindgen 生成的浏览器 WebView SDK 背景 wasm。 */
-  webviewSdkWasmPath(): string;
-  /** 开发期平台 SDK 请求的 bundle 目录。 */
-  bundleDir(): string;
-  /** 开发期平台 SDK 请求的压缩 bundle。 */
-  bundleArchivePath(): string;
-  /** bundle 生成期间使用的临时压缩包路径。 */
-  bundleArchiveTempPath(): string;
-  /** SDK 在启动时首先请求的开发索引。 */
-  bundleIndexPath(): string;
-  /** bundle 生成期间使用的临时索引路径。 */
-  bundleIndexTempPath(): string;
-  /** 可选的 SDK 静态资源根目录。 */
-  bundleAssetsDir(): string;
-  /** Win32 开发壳的发布目录。 */
+  /** 浏览器 Target host 的 WASM 工件。 */
+  webviewTargetArtifactPath(profile: BuildProfile): string;
+  /** wasm-bindgen 生成的浏览器 host glue。 */
+  webviewHostGluePath(): string;
+  /** wasm-bindgen 生成的浏览器 host WASM。 */
+  webviewHostWasmPath(): string;
   win32DistDir(): string;
-  /** Win32 开发壳发布的可执行文件。 */
   win32DistPath(): string;
-  /** Win32 GNU target 的二进制工件位置。 */
   win32ArtifactPath(profile: BuildProfile): string;
-  /** macOS App bundle 的根目录。 */
   macosAppDir(): string;
-  /** macOS App bundle 的 Contents 目录。 */
   macosContentsDir(): string;
-  /** macOS App bundle 的可执行文件目录。 */
   macosExecutableDir(): string;
-  /** macOS App bundle 内的 Info.plist 位置。 */
   macosInfoPlistPath(): string;
-  /** macOS App bundle 内的原生壳可执行文件位置。 */
   macosExecutablePath(): string;
-  /** macOS App 的可编辑 Info.plist 源文件。 */
   macosInfoPlistSourcePath(): string;
-  /** Apple Silicon macOS target 的二进制工件位置。 */
   macosArtifactPath(profile: BuildProfile): string;
-  /** Android Gradle project root. */
   androidProjectDir(): string;
-  /** ARM64 JNI library directory consumed by the Gradle source set. */
   androidJniLibsDir(): string;
-  /** ARM64 ABI subdirectory inside the Gradle JNI source set. */
   androidJniAbiDir(): string;
-  /** Rust cross-compile output before it is copied into the Gradle source set. */
   androidRustNativeLibraryPath(): string;
-  /** Expected ARM64 native library packaged by Gradle. */
   androidNativeLibraryPath(): string;
-  /** Gradle debug APK output. */
   androidDebugApkPath(): string;
-  /** Final Android release directory under dist/. */
   androidDistDir(): string;
-  /** Published debug APK path. */
   androidDistPath(): string;
-  /** iPhone Xcode project root. */
   iosProjectDir(): string;
-  /** iPhone Xcode project consumed by xcodebuild. */
   iosXcodeProjectPath(): string;
-  /** Generated Rust static-library staging directory referenced by Xcode. */
   iosStaticLibraryDir(): string;
-  /** Rust ARM64 iPhone static library before it is staged for Xcode. */
   iosRustStaticLibraryPath(profile: BuildProfile): string;
-  /** Static library path referenced by the checked-in Xcode project. */
   iosXcodeStaticLibraryPath(): string;
-  /** Per-project Xcode DerivedData location, never committed. */
   iosDerivedDataDir(): string;
-  /** Device `.app` produced by the selected Xcode configuration. */
   iosAppPath(profile: BuildProfile): string;
 }
 
-/** 根据仓库根构造路径模型（纯函数）。 */
+export const CORE_PRODUCT_PACKAGES: readonly string[] = [
+  'tela-contract',
+  'tela-core',
+  'tela-ui-foundation',
+];
+export const DESKTOP_GUEST_CRATE = 'tela-product-desktop-guest';
+export const MOBILE_GUEST_CRATE = 'tela-product-mobile-guest';
+export const WEBVIEW_TARGET_CRATE = 'tela-target-webview';
+export const ANDROID_TARGET_CRATE = 'tela-target-android';
+export const IOS_PRODUCT_CRATE = 'tela-product-ios';
+export const WIN32_TARGET_CRATE = 'tela-target-win32';
+export const MACOS_TARGET_CRATE = 'tela-target-macos';
+
+/** 根据仓库根构造路径和产品闭包模型。 */
 export function resolveWorkspace(root: string): WorkspacePaths {
   const cratesDir = `${root}/crates`;
+  const productsDir = `${root}/products`;
   const distDir = `${root}/dist`;
-  const webDir = `${root}/web`;
+  const productRoot = (id: ProductId): string => `${productsDir}/${id}`;
+  const webviewProductDir = productRoot('webview');
+
+  const products: Record<ProductId, ProductSpec> = {
+    core: {
+      id: 'core',
+      root: productRoot('core'),
+      delivery: 'none',
+      packages: CORE_PRODUCT_PACKAGES,
+    },
+    webview: {
+      id: 'webview',
+      root: webviewProductDir,
+      application: DESKTOP_GUEST_CRATE,
+      delivery: 'dynamic-bundle',
+      renderer: 'tela-render-wgpu',
+      target: WEBVIEW_TARGET_CRATE,
+      packages: [DESKTOP_GUEST_CRATE, WEBVIEW_TARGET_CRATE],
+    },
+    android: {
+      id: 'android',
+      root: productRoot('android'),
+      application: MOBILE_GUEST_CRATE,
+      delivery: 'dynamic-bundle',
+      renderer: 'tela-render-wgpu',
+      target: ANDROID_TARGET_CRATE,
+      packages: [MOBILE_GUEST_CRATE, ANDROID_TARGET_CRATE],
+    },
+    ios: {
+      id: 'ios',
+      root: productRoot('ios'),
+      application: IOS_PRODUCT_CRATE,
+      delivery: 'static-link',
+      renderer: 'tela-render-wgpu',
+      target: 'tela-target-ios',
+      packages: [IOS_PRODUCT_CRATE],
+    },
+    win32: {
+      id: 'win32',
+      root: productRoot('win32'),
+      application: DESKTOP_GUEST_CRATE,
+      delivery: 'dynamic-bundle',
+      renderer: 'tela-render-wgpu',
+      target: WIN32_TARGET_CRATE,
+      packages: [DESKTOP_GUEST_CRATE, WIN32_TARGET_CRATE],
+    },
+    macos: {
+      id: 'macos',
+      root: productRoot('macos'),
+      application: DESKTOP_GUEST_CRATE,
+      delivery: 'dynamic-bundle',
+      renderer: 'tela-render-wgpu',
+      target: MACOS_TARGET_CRATE,
+      packages: [DESKTOP_GUEST_CRATE, MACOS_TARGET_CRATE],
+    },
+  };
+
   const bundle = (channel: BundleChannel): BundlePaths => {
     const mobile = channel === 'mobile';
     const directory = mobile ? `${distDir}/tela-mobile` : `${distDir}/tela-dev`;
-    const archiveName = mobile ? 'tela-mobile-demo.tela' : 'tela-demo.tela';
-    const guestName = mobile ? 'tela_mobile_demo' : 'tela_demo';
+    const archiveName = mobile ? 'tela-mobile-guest.tela' : 'tela-desktop-guest.tela';
+    const guestName = mobile ? 'tela_product_mobile_guest' : 'tela_product_desktop_guest';
     return {
       channel,
-      label: mobile ? 'Android mobile' : 'desktop platform SDK',
-      guestCrate: mobile ? MOBILE_DEMO_CRATE : DEMO_CRATE,
-      guestFeatures: ['app-wasm'],
+      label: mobile ? 'Android mobile product guest' : 'desktop product guest',
+      guestCrate: mobile ? MOBILE_GUEST_CRATE : DESKTOP_GUEST_CRATE,
+      guestFeatures: [],
       guestWasmArtifactPath(profile) {
         const profileDir = profile === 'release' ? 'release' : 'debug';
         return `${root}/target/wasm32-unknown-unknown/${profileDir}/${guestName}.wasm`;
@@ -160,52 +202,36 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       },
     };
   };
+
   return {
     root,
     cratesDir,
+    productsDir,
     distDir,
-    webDir,
+    webviewProductDir,
+    product(id) {
+      return products[id];
+    },
     bundle,
-    appGuestWasmArtifactPath(profile) {
-      return bundle('desktop').guestWasmArtifactPath(profile);
-    },
-    webviewSdkArtifactPath(profile) {
+    webviewTargetArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
-      return `${root}/target/wasm32-unknown-unknown/${dir}/tela_webview_sdk.wasm`;
+      return `${root}/target/wasm32-unknown-unknown/${dir}/tela_target_webview.wasm`;
     },
-    webviewSdkGluePath() {
-      return `${distDir}/tela_webview_sdk.js`;
+    webviewHostGluePath() {
+      return `${distDir}/tela_webview_host.js`;
     },
-    webviewSdkWasmPath() {
-      return `${distDir}/tela_webview_sdk_bg.wasm`;
-    },
-    bundleDir() {
-      return bundle('desktop').dir();
-    },
-    bundleArchivePath() {
-      return bundle('desktop').archivePath();
-    },
-    bundleArchiveTempPath() {
-      return bundle('desktop').archiveTempPath();
-    },
-    bundleIndexPath() {
-      return bundle('desktop').indexPath();
-    },
-    bundleIndexTempPath() {
-      return bundle('desktop').indexTempPath();
-    },
-    bundleAssetsDir() {
-      return bundle('desktop').assetsDir();
+    webviewHostWasmPath() {
+      return `${distDir}/tela_webview_host_bg.wasm`;
     },
     win32DistDir() {
       return `${distDir}/win32`;
     },
     win32DistPath() {
-      return `${distDir}/win32/tela-win32-sdk.exe`;
+      return `${distDir}/win32/tela-win32-host.exe`;
     },
     win32ArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
-      return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-win32-sdk.exe`;
+      return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-win32-host.exe`;
     },
     macosAppDir() {
       return `${distDir}/macos/Tela.app`;
@@ -220,32 +246,32 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       return `${distDir}/macos/Tela.app/Contents/Info.plist`;
     },
     macosExecutablePath() {
-      return `${distDir}/macos/Tela.app/Contents/MacOS/tela-macos-sdk`;
+      return `${distDir}/macos/Tela.app/Contents/MacOS/tela-macos-host`;
     },
     macosInfoPlistSourcePath() {
-      return `${cratesDir}/tela-macos-sdk/resources/Info.plist`;
+      return `${productRoot('macos')}/resources/Info.plist`;
     },
     macosArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
-      return `${root}/target/aarch64-apple-darwin/${dir}/tela-macos-sdk`;
+      return `${root}/target/aarch64-apple-darwin/${dir}/tela-macos-host`;
     },
     androidProjectDir() {
-      return `${root}/android`;
+      return productRoot('android');
     },
     androidJniLibsDir() {
-      return `${root}/android/app/src/main/jniLibs`;
+      return `${productRoot('android')}/app/src/main/jniLibs`;
     },
     androidJniAbiDir() {
-      return `${root}/android/app/src/main/jniLibs/${ANDROID_NDK_ABI}`;
+      return `${productRoot('android')}/app/src/main/jniLibs/${ANDROID_NDK_ABI}`;
     },
     androidRustNativeLibraryPath() {
       return `${root}/target/${ANDROID_RUST_TARGET}/release/libmain.so`;
     },
     androidNativeLibraryPath() {
-      return `${root}/android/app/src/main/jniLibs/${ANDROID_NDK_ABI}/libmain.so`;
+      return `${productRoot('android')}/app/src/main/jniLibs/${ANDROID_NDK_ABI}/libmain.so`;
     },
     androidDebugApkPath() {
-      return `${root}/android/app/build/outputs/apk/debug/app-debug.apk`;
+      return `${productRoot('android')}/app/build/outputs/apk/debug/app-debug.apk`;
     },
     androidDistDir() {
       return `${distDir}/android`;
@@ -254,34 +280,27 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       return `${distDir}/android/tela-mobile-debug.apk`;
     },
     iosProjectDir() {
-      return `${root}/ios`;
+      return productRoot('ios');
     },
     iosXcodeProjectPath() {
-      return `${root}/ios/TelaMobile.xcodeproj`;
+      return `${productRoot('ios')}/TelaMobile.xcodeproj`;
     },
     iosStaticLibraryDir() {
-      return `${root}/ios/build/rust`;
+      return `${productRoot('ios')}/build/rust`;
     },
     iosRustStaticLibraryPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
-      return `${root}/target/aarch64-apple-ios/${dir}/libtela_ios_sdk.a`;
+      return `${root}/target/aarch64-apple-ios/${dir}/libtela_product_ios.a`;
     },
     iosXcodeStaticLibraryPath() {
-      return `${root}/ios/build/rust/libtela_ios_sdk.a`;
+      return `${productRoot('ios')}/build/rust/libtela_product_ios.a`;
     },
     iosDerivedDataDir() {
-      return `${root}/ios/build/DerivedData`;
+      return `${productRoot('ios')}/build/DerivedData`;
     },
     iosAppPath(profile) {
       const configuration = profile === 'release' ? 'Release' : 'Debug';
-      return `${root}/ios/build/DerivedData/Build/Products/${configuration}-iphoneos/TelaMobile.app`;
+      return `${productRoot('ios')}/build/DerivedData/Build/Products/${configuration}-iphoneos/TelaMobile.app`;
     },
   };
 }
-
-/** demo 演示二进制所属 crate。 */
-export const DEMO_CRATE = 'tela-demo';
-/** First-party mobile Guest crate; it deliberately has an independent domain and presentation. */
-export const MOBILE_DEMO_CRATE = 'tela-mobile-demo';
-/** 浏览器 WebView 壳所属 crate。 */
-export const WEBVIEW_SDK_CRATE = 'tela-webview-sdk';

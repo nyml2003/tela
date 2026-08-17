@@ -1,0 +1,12 @@
+[package]
+name = "tela-render-canvas"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "tela 浏览器 canvas 后端（wasm，基于画布完整渲染页面，见 007-6）"
+
+[dependencies]
+tela-contract = { path = "../../../kernel/contract" }
+
+[lints]
+workspace = true

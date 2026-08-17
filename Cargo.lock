@@ -2301,22 +2301,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
-name = "tela-android-sdk"
-version = "0.1.0"
-dependencies = [
- "jni",
- "pollster",
- "tela-app-abi",
- "tela-contract",
- "tela-guest-runtime",
- "tela-log",
- "tela-render-wgpu",
- "ureq",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "tela-app-abi"
 version = "0.1.0"
 dependencies = [
@@ -2346,27 +2330,43 @@ name = "tela-core"
 version = "0.1.0"
 dependencies = [
  "tela-contract",
- "tela-render-raster",
 ]
 
 [[package]]
-name = "tela-demo"
+name = "tela-desktop-demo"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "tela-app-abi",
  "tela-contract",
  "tela-core",
- "tela-fonts",
- "tela-icon",
- "tela-text",
- "tela-ui",
- "tela-widgets",
+ "tela-desktop-ui-kit",
+ "tela-icon-resources",
+ "tela-text-resources",
+ "tela-ui-foundation",
 ]
 
 [[package]]
-name = "tela-fonts"
+name = "tela-desktop-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tela-app-abi",
+ "tela-bundle",
+ "tela-guest-runtime",
+]
+
+[[package]]
+name = "tela-desktop-ui-kit"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
+ "tela-ui-foundation",
+]
+
+[[package]]
+name = "tela-font-resources"
 version = "0.1.0"
 
 [[package]]
@@ -2381,26 +2381,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "tela-icon"
+name = "tela-icon-resources"
 version = "0.1.0"
 dependencies = [
  "tela-contract",
- "tela-core",
- "tela-fonts",
- "tela-text",
-]
-
-[[package]]
-name = "tela-ios-sdk"
-version = "0.1.0"
-dependencies = [
- "pollster",
- "raw-window-handle",
- "tela-contract",
- "tela-mobile-demo",
- "tela-render-wgpu",
- "wgpu",
- "winit",
+ "tela-text-resources",
 ]
 
 [[package]]
@@ -2408,42 +2393,57 @@ name = "tela-log"
 version = "0.1.0"
 
 [[package]]
-name = "tela-macos-sdk"
-version = "0.1.0"
-dependencies = [
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "pollster",
- "raw-window-handle",
- "tela-app-abi",
- "tela-contract",
- "tela-native-sdk-runtime",
- "tela-render-wgpu",
- "ureq",
- "wgpu",
-]
-
-[[package]]
 name = "tela-mobile-demo"
 version = "0.1.0"
 dependencies = [
- "tela-app-abi",
  "tela-contract",
  "tela-core",
- "tela-fonts",
- "tela-icon",
- "tela-text",
+ "tela-icon-resources",
+ "tela-mobile-ui-kit",
+ "tela-text-resources",
+ "tela-ui-foundation",
 ]
 
 [[package]]
-name = "tela-native-sdk-runtime"
+name = "tela-mobile-ui-kit"
 version = "0.1.0"
 dependencies = [
- "serde_json",
+ "tela-contract",
+ "tela-core",
+ "tela-ui-foundation",
+]
+
+[[package]]
+name = "tela-product-desktop-guest"
+version = "0.1.0"
+dependencies = [
  "tela-app-abi",
- "tela-bundle",
- "tela-guest-runtime",
+ "tela-contract",
+ "tela-desktop-demo",
+ "tela-icon-resources",
+ "tela-text-resources",
+]
+
+[[package]]
+name = "tela-product-ios"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-mobile-demo",
+ "tela-target-ios",
+ "tela-text-resources",
+]
+
+[[package]]
+name = "tela-product-mobile-guest"
+version = "0.1.0"
+dependencies = [
+ "tela-app-abi",
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-mobile-demo",
+ "tela-text-resources",
 ]
 
 [[package]]
@@ -2460,8 +2460,8 @@ dependencies = [
  "font8x8",
  "png",
  "tela-contract",
- "tela-fonts",
- "tela-text",
+ "tela-core",
+ "tela-text-resources",
 ]
 
 [[package]]
@@ -2472,9 +2472,8 @@ dependencies = [
  "naga 26.0.0",
  "pollster",
  "tela-contract",
- "tela-fonts",
  "tela-log",
- "tela-text",
+ "tela-text-resources",
  "wgpu",
 ]
 
@@ -2486,28 +2485,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "tela-text"
+name = "tela-target-android"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
+ "jni",
+ "pollster",
+ "tela-app-abi",
  "tela-contract",
- "tela-fonts",
+ "tela-guest-runtime",
+ "tela-log",
+ "tela-render-wgpu",
+ "ureq",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
-name = "tela-ui"
+name = "tela-target-ios"
 version = "0.1.0"
 dependencies = [
+ "pollster",
+ "raw-window-handle",
  "tela-contract",
- "tela-core",
- "tela-fonts",
- "tela-icon",
- "tela-text",
- "tela-widgets",
+ "tela-render-wgpu",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
-name = "tela-webview-sdk"
+name = "tela-target-macos"
+version = "0.1.0"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "pollster",
+ "raw-window-handle",
+ "tela-app-abi",
+ "tela-contract",
+ "tela-desktop-runtime",
+ "tela-render-wgpu",
+ "ureq",
+ "wgpu",
+]
+
+[[package]]
+name = "tela-target-webview"
 version = "0.1.0"
 dependencies = [
  "serde_json",
@@ -2522,27 +2545,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "tela-widgets"
-version = "0.1.0"
-dependencies = [
- "tela-contract",
- "tela-core",
- "tela-fonts",
-]
-
-[[package]]
-name = "tela-win32-sdk"
+name = "tela-target-win32"
 version = "0.1.0"
 dependencies = [
  "pollster",
  "raw-window-handle",
  "tela-app-abi",
  "tela-contract",
- "tela-native-sdk-runtime",
+ "tela-desktop-runtime",
  "tela-render-wgpu",
  "ureq",
  "wgpu",
  "windows",
+]
+
+[[package]]
+name = "tela-text-resources"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "tela-contract",
+ "tela-font-resources",
+]
+
+[[package]]
+name = "tela-ui-foundation"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
 ]
 
 [[package]]

@@ -42,6 +42,7 @@
 | [026-架构迭代方案](docs/026-架构迭代方案.md) | 一级/二级/三级能力目录如何和 Target、Profile、delivery 正交组织？ | 评审跨端、插件化、游戏或 TUI 边界时 |
 | [027-Android移动端实施](docs/027-Android移动端实施.md) | Android 为什么是独立移动 Guest + GameActivity Target？strict bundle、Vulkan、IME 和 Back 如何落地？ | 构建、验收或扩展 Android 移动端时 |
 | [028-iOS开发SDK实施](docs/028-iOS开发SDK实施.md) | iPhone 为什么静态链接独立移动应用？UIKit/Metal、安全区、签名与真机验收如何收口？ | 在 Apple Silicon Mac 构建或验收 iPhone 开发态时 |
+| [029-迁移记录](docs/029-迁移记录.md) | 026 的目录、产品根、资源协议与工具链闭包如何实际迁移？哪些目录没有机械创建？ | 对照当前 workspace、评审迁移边界时 |
 
 ## 开发工作流（ops）
 
@@ -51,7 +52,8 @@
 
 ```bash
 ops check                # 四道验证门（fmt/clippy/test/依赖方向）
-ops build                # 重建 dist/，构建 WebView WGPU 壳、前端与 tela-dev 开发包
+ops build core           # 只检查 contract、core 与 ui-foundation 的纯 Rust 产品闭包
+ops build webview        # 构建 desktop guest、WebView Target host 与浏览器静态资产
 ops build win32          # 在 WSL 交叉构建 Win32 开发壳到 dist/win32/
 ops build macos          # 在 Apple Silicon macOS 本机构建 Tela.app 到 dist/macos/
 ops build bundle mobile  # 构建独立的 tela-mobile guest bundle
@@ -75,11 +77,11 @@ ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
 
 `dist/` 是浏览器、动态包与既有平台工件的发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包、
 `tela-mobile` WASM 包、Win32 壳、macOS `Tela.app` 和 Android APK 都必须由受控 `ops` 命令生成。iPhone
-App 则由 Xcode 在已忽略的 `ios/build/` 生成，以便直接签名和安装。浏览器页面模板与宿主代码保留在 `web/`，
-desktop/mobile Rust 演示逻辑分别保留在 `crates/tela-demo/`、`crates/tela-mobile-demo/`，原生壳与包协议不存放
-手写内容到 `dist/`。
+App 则由 Xcode 在已忽略的 `products/ios/build/` 生成，以便直接签名和安装。浏览器页面模板与宿主代码位于
+`products/webview/`，desktop/mobile Rust 业务应用分别位于 `apps/desktop-demo/`、`apps/mobile-demo/`；动态
+guest、Target Runtime 和原生工程分别由 `products/`、`crates/targets/` 管理，手写内容不进入 `dist/`。
 
-浏览器是 `tela-webview-sdk` 的一个开发态壳：页面先加载固定的 WebView SDK，再以
+浏览器是 `tela-target-webview` 的一个开发态壳：页面先加载固定的 Target host，再以
 `cache: "no-store"` 请求 `/tela-dev/latest.json` 和 `.tela` archive，校验后实例化其中的
 `app.wasm`。产品页面只走 WGPU；`rawgpu.html` 仍保留为不经过 tela renderer 的浏览器环境诊断页。
 desktop 应用 guest、Win32 壳、macOS 壳和浏览器壳共享同一份应用 ABI 与 bundle 协议；Android 使用独立

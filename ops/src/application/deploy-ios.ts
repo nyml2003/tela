@@ -54,7 +54,7 @@ export async function runDeployIos(
   if (build.code !== 0) {
     reporter.fail('签名 iPhone App 构建失败');
     reporter.info((build.stderr || build.stdout).trim().slice(0, 2000));
-    reporter.info('在 Xcode 打开 ios/TelaMobile.xcodeproj，为 TelaMobile 选择可用的 Apple Development Team。');
+    reporter.info('在 Xcode 打开 products/ios/TelaMobile.xcodeproj，为 TelaMobile 选择可用的 Apple Development Team。');
     return false;
   }
 

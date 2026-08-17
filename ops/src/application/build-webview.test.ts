@@ -48,9 +48,9 @@ test('release WGPU 壳经 wasm-bindgen 发布到静态根', async () => {
   });
 
   assert.deepEqual(result, { ok: true });
-  assert.deepEqual(builds, [['tela-webview-sdk', 'release']]);
+  assert.deepEqual(builds, [['tela-target-webview', 'release']]);
   assert.deepEqual(calls, [
     'dir:/repo/dist',
-    'wasm-bindgen:--target web --out-dir /repo/dist --out-name tela_webview_sdk /repo/target/wasm32-unknown-unknown/release/tela_webview_sdk.wasm',
+    'wasm-bindgen:--target web --out-dir /repo/dist --out-name tela_webview_host /repo/target/wasm32-unknown-unknown/release/tela_target_webview.wasm',
   ]);
 });

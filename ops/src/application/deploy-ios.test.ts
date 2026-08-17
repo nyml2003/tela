@@ -42,8 +42,8 @@ test('iOS 部署使用 Xcode 签名后通过 devicectl 安装和启动', async (
   assert.equal(ok, true);
   assert.equal(calls.length, 3);
   assert.ok(calls[0]!.includes('-allowProvisioningUpdates build'));
-  assert.equal(calls[1], 'tela-ios-xcrun:devicectl device install app --device 00008110-TEST /repo/ios/build/DerivedData/Build/Products/Debug-iphoneos/TelaMobile.app@/repo/ios');
-  assert.equal(calls[2], 'tela-ios-xcrun:devicectl device process launch --device 00008110-TEST dev.tela.mobile@/repo/ios');
+  assert.equal(calls[1], 'tela-ios-xcrun:devicectl device install app --device 00008110-TEST /repo/products/ios/build/DerivedData/Build/Products/Debug-iphoneos/TelaMobile.app@/repo/products/ios');
+  assert.equal(calls[2], 'tela-ios-xcrun:devicectl device process launch --device 00008110-TEST dev.tela.mobile@/repo/products/ios');
 });
 
 test('iOS 部署拒绝空 UDID，且不运行外部命令', async () => {

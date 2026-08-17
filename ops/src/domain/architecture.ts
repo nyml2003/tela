@@ -1,7 +1,6 @@
-// 领域层：依赖方向规则（把 scripts/check-architecture.sh 的规则模型化，纯函数可测）。
-// 规则来源：002-架构总览与分层 §5 + 007-绘制与渲染后端 §7.1。
-// 与旧 bash 脚本等价但更严格：用 cargo metadata 的真实依赖（含 feature/构建依赖），
-// 不再用正则解析 Cargo.toml。
+// 领域层：以 cargo metadata 的真实依赖校验 026 迁移后的分层。
+// 这里刻意约束职责，而不是旧目录名：Product 负责选择完整链路，Target 只承载本地平台，
+// Kernel 与 UI Capability 不可反向认识 Presentation、Delivery 或 Target。
 
 export type DepKind = 'normal' | 'dev' | 'build';
 
@@ -20,121 +19,371 @@ export interface ArchViolation {
   message: string;
 }
 
-/** 零依赖 crate（含 dev/build 依赖都算）。 */
-const ZERO_DEP_CRATES: readonly string[] = ['tela-contract', 'tela-log', 'tela-fonts'];
+type AllowedDeps = Readonly<Record<string, readonly string[]>>;
 
-/** 允许的普通依赖白名单：<crate> 只允许依赖 <列出的包>。 */
-const ALLOWED_NORMAL: readonly (readonly [string, readonly string[]])[] = [
-  ['tela-resource-protocol', ['tela-contract']],
-  ['tela-core', ['tela-contract']],
-  ['tela-text', ['tela-contract', 'tela-fonts', 'ab_glyph']],
-  ['tela-icon', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-text']],
-  ['tela-render-raster', ['tela-contract', 'tela-text', 'png', 'font8x8']],
-  ['tela-render-canvas', ['tela-contract']],
-  ['tela-render-wgpu', ['tela-contract', 'tela-log', 'tela-text', 'bytemuck', 'wgpu']],
-  ['tela-guest-runtime', ['tela-app-abi', 'tela-bundle', 'tela-contract', 'serde_json', 'wasmtime']],
-  ['tela-native-sdk-runtime', ['tela-bundle', 'tela-guest-runtime']],
-  ['tela-mobile-demo', ['tela-app-abi', 'tela-contract', 'tela-core', 'tela-fonts', 'tela-icon', 'tela-text']],
-  ['tela-android-sdk', [
-    'jni', 'pollster', 'tela-app-abi', 'tela-contract', 'tela-guest-runtime', 'tela-log',
-    'tela-render-wgpu', 'ureq', 'wgpu', 'winit',
-  ]],
-  ['tela-ios-sdk', [
-    'pollster', 'raw-window-handle', 'tela-contract', 'tela-mobile-demo', 'tela-render-wgpu',
-    'wgpu', 'winit',
-  ]],
-  ['tela-webview-sdk', [
-    'tela-app-abi', 'tela-bundle', 'tela-contract', 'tela-render-wgpu',
-    'serde_json', 'wasm-bindgen', 'wasm-bindgen-futures', 'web-sys', 'wgpu',
-  ]],
-  ['tela-widgets', ['tela-contract', 'tela-core', 'tela-fonts']],
-  ['tela-ui', ['tela-contract', 'tela-core', 'tela-fonts', 'tela-icon', 'tela-text', 'tela-widgets']],
-];
+/** Contract、纯日志 facade 与嵌入字体数据必须保持可独立复用。 */
+const ZERO_DEP_CRATES = new Set([
+  'tela-contract',
+  'tela-log',
+  'tela-font-resources',
+]);
 
-/** dev-dependencies 白名单：core 的 dev 依赖仅限测试专用后端（集成测试，不进入运行时）。 */
-const ALLOWED_DEV: readonly (readonly [string, readonly string[]])[] = [
-  ['tela-core', ['tela-render-raster']],
-  ['tela-native-sdk-runtime', ['serde_json', 'tela-app-abi']],
-];
+/**
+ * 所有工作区 crate 的普通依赖闭包。外部库也列入其中，避免只校验内部 crate 时让
+ * 新增的技术依赖悄悄跨越分层。由 Product 选择 application、resource provider 与 target。
+ */
+const ALLOWED_NORMAL: AllowedDeps = {
+  'tela-app-abi': ['postcard', 'serde', 'tela-contract'],
+  'tela-bundle': ['hex', 'serde', 'serde_json', 'sha2', 'tela-app-abi', 'zip'],
+  'tela-core': ['tela-contract'],
+  'tela-desktop-demo': [
+    'serde',
+    'serde_json',
+    'tela-contract',
+    'tela-core',
+    'tela-desktop-ui-kit',
+    'tela-ui-foundation',
+  ],
+  'tela-desktop-runtime': ['tela-bundle', 'tela-guest-runtime'],
+  'tela-desktop-ui-kit': ['tela-contract', 'tela-core', 'tela-ui-foundation'],
+  'tela-guest-runtime': [
+    'serde_json',
+    'tela-app-abi',
+    'tela-bundle',
+    'tela-contract',
+    'wasmtime',
+  ],
+  'tela-icon-resources': ['tela-contract', 'tela-text-resources'],
+  'tela-mobile-demo': [
+    'tela-contract',
+    'tela-core',
+    'tela-mobile-ui-kit',
+    'tela-ui-foundation',
+  ],
+  'tela-mobile-ui-kit': ['tela-contract', 'tela-core', 'tela-ui-foundation'],
+  'tela-product-desktop-guest': [
+    'tela-app-abi',
+    'tela-contract',
+    'tela-desktop-demo',
+    'tela-icon-resources',
+    'tela-text-resources',
+  ],
+  'tela-product-ios': [
+    'tela-contract',
+    'tela-icon-resources',
+    'tela-mobile-demo',
+    'tela-target-ios',
+    'tela-text-resources',
+  ],
+  'tela-product-mobile-guest': [
+    'tela-app-abi',
+    'tela-contract',
+    'tela-icon-resources',
+    'tela-mobile-demo',
+    'tela-text-resources',
+  ],
+  'tela-render-canvas': ['tela-contract'],
+  'tela-render-raster': ['font8x8', 'png', 'tela-contract', 'tela-text-resources'],
+  'tela-render-wgpu': [
+    'bytemuck',
+    'tela-contract',
+    'tela-log',
+    'tela-text-resources',
+    'wgpu',
+  ],
+  'tela-resource-protocol': ['tela-contract'],
+  'tela-target-android': [
+    'jni',
+    'pollster',
+    'tela-app-abi',
+    'tela-contract',
+    'tela-guest-runtime',
+    'tela-log',
+    'tela-render-wgpu',
+    'ureq',
+    'wgpu',
+    'winit',
+  ],
+  'tela-target-ios': [
+    'pollster',
+    'raw-window-handle',
+    'tela-contract',
+    'tela-render-wgpu',
+    'wgpu',
+    'winit',
+  ],
+  'tela-target-macos': [
+    'objc2',
+    'objc2-app-kit',
+    'objc2-foundation',
+    'pollster',
+    'raw-window-handle',
+    'tela-app-abi',
+    'tela-contract',
+    'tela-desktop-runtime',
+    'tela-render-wgpu',
+    'ureq',
+    'wgpu',
+  ],
+  'tela-target-webview': [
+    'serde_json',
+    'tela-app-abi',
+    'tela-bundle',
+    'tela-contract',
+    'tela-render-wgpu',
+    'wasm-bindgen',
+    'wasm-bindgen-futures',
+    'web-sys',
+    'wgpu',
+  ],
+  'tela-target-win32': [
+    'pollster',
+    'raw-window-handle',
+    'tela-app-abi',
+    'tela-contract',
+    'tela-desktop-runtime',
+    'tela-render-wgpu',
+    'ureq',
+    'wgpu',
+    'windows',
+  ],
+  'tela-text-resources': ['ab_glyph', 'tela-contract', 'tela-font-resources'],
+  'tela-ui-foundation': ['tela-contract', 'tela-core'],
+};
 
-/** 校验依赖方向，返回违规列表（空 = 通过）。 */
+/** 单元/像素测试可在边界外读取下层实现，但不能扩大生产依赖闭包。 */
+const ALLOWED_DEV: AllowedDeps = {
+  'tela-desktop-demo': ['tela-icon-resources', 'tela-text-resources'],
+  'tela-desktop-runtime': ['serde_json', 'tela-app-abi'],
+  'tela-mobile-demo': ['tela-icon-resources', 'tela-text-resources'],
+  'tela-render-raster': ['tela-core'],
+  'tela-render-wgpu': ['naga', 'pollster'],
+};
+
+const TARGET_CRATES = new Set([
+  'tela-target-android',
+  'tela-target-ios',
+  'tela-target-macos',
+  'tela-target-webview',
+  'tela-target-win32',
+]);
+
+const APPLICATION_CRATES = new Set(['tela-desktop-demo', 'tela-mobile-demo']);
+const PRODUCT_CRATES = new Set([
+  'tela-product-desktop-guest',
+  'tela-product-ios',
+  'tela-product-mobile-guest',
+]);
+const DELIVERY_CRATES = new Set([
+  'tela-app-abi',
+  'tela-bundle',
+  'tela-desktop-runtime',
+  'tela-guest-runtime',
+]);
+const RENDERER_CRATES = new Set([
+  'tela-render-canvas',
+  'tela-render-raster',
+  'tela-render-wgpu',
+]);
+const PRESENTATION_CRATES = new Set([
+  'tela-font-resources',
+  'tela-icon-resources',
+  'tela-resource-protocol',
+  'tela-text-resources',
+  ...RENDERER_CRATES,
+]);
+const UI_CRATES = new Set([
+  'tela-ui-foundation',
+  'tela-desktop-ui-kit',
+  'tela-mobile-ui-kit',
+]);
+
+const MANAGED_CRATES = new Set([
+  ...ZERO_DEP_CRATES,
+  ...Object.keys(ALLOWED_NORMAL),
+]);
+
+function formatAllowed(allowed: readonly string[]): string {
+  return allowed.length === 0 ? '无' : allowed.join(' ');
+}
+
+function dependenciesOf(info: CrateInfo, kind: DepKind): readonly string[] {
+  return info.deps.filter((dep) => dep.kind === kind).map((dep) => dep.name);
+}
+
+function reportForbiddenDependencies(
+  violations: ArchViolation[],
+  info: CrateInfo,
+  forbidden: ReadonlySet<string>,
+  message: string,
+): void {
+  const found = info.deps.filter((dep) => forbidden.has(dep.name));
+  if (found.length > 0) {
+    violations.push({
+      crate: info.name,
+      message: `${message}: ${found.map((dep) => dep.name).join(', ')}`,
+    });
+  }
+}
+
+/** 校验 026 目标架构，返回违规列表（空 = 通过）。 */
 export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[] {
   const violations: ArchViolation[] = [];
-  const byName = new Map(crates.map((c) => [c.name, c]));
 
-  // 1. 零依赖 crate。
-  for (const name of ZERO_DEP_CRATES) {
-    const info = byName.get(name);
-    if (!info) {
-      violations.push({ crate: name, message: '缺少 crate 定义（cargo metadata 未包含）' });
+  for (const info of crates) {
+    if (!MANAGED_CRATES.has(info.name)) {
+      violations.push({ crate: info.name, message: '未在 026 架构依赖表中登记的 crate' });
       continue;
     }
-    if (info.deps.length > 0) {
-      violations.push({
-        crate: name,
-        message: `必须零依赖，实际依赖: ${info.deps.map((d) => d.name).join(', ')}`,
-      });
-    }
-  }
 
-  // 2. 白名单依赖（normal 与 dev 分开校验）。
-  const checkList = (list: readonly (readonly [string, readonly string[]])[], kind: DepKind) => {
-    for (const [crate, allowed] of list) {
-      const info = byName.get(crate);
-      if (!info) continue;
-      for (const dep of info.deps.filter((d) => d.kind === kind)) {
-        if (!allowed.includes(dep.name)) {
+    if (ZERO_DEP_CRATES.has(info.name)) {
+      if (info.deps.length > 0) {
+        violations.push({
+          crate: info.name,
+          message: `必须零依赖，实际依赖: ${info.deps.map((dep) => dep.name).join(', ')}`,
+        });
+      }
+      continue;
+    }
+
+    const allowedNormal = ALLOWED_NORMAL[info.name] ?? [];
+    const allowedDev = ALLOWED_DEV[info.name] ?? [];
+    const allowedByKind: Readonly<Record<DepKind, readonly string[]>> = {
+      normal: allowedNormal,
+      dev: allowedDev,
+      build: [],
+    };
+
+    for (const kind of ['normal', 'dev', 'build'] as const) {
+      for (const dep of dependenciesOf(info, kind)) {
+        const allowed = allowedByKind[kind];
+        if (!allowed.includes(dep)) {
           violations.push({
-            crate,
-            message: `[${kind}] 依赖了未允许的 crate: ${dep.name}（允许: ${allowed.join(' ')}）`,
+            crate: info.name,
+            message: `[${kind}] 依赖了未允许的 crate: ${dep}（允许: ${formatAllowed(allowed)}）`,
           });
         }
       }
     }
-  };
-  checkList(ALLOWED_NORMAL, 'normal');
-  checkList(ALLOWED_DEV, 'dev');
+  }
 
-  // 3. render 后端禁止反向依赖 tela-core（含 dev/build）。
   for (const info of crates) {
-    if (info.name.startsWith('tela-render-') && info.deps.some((d) => d.name === 'tela-core')) {
-      violations.push({ crate: info.name, message: 'render 后端禁止反向依赖 tela-core' });
+    if (RENDERER_CRATES.has(info.name)) {
+      const productionCore = info.deps.some(
+        (dep) => dep.name === 'tela-core' && dep.kind !== 'dev',
+      );
+      if (productionCore) {
+        violations.push({ crate: info.name, message: 'Renderer 生产闭包禁止反向依赖 tela-core' });
+      }
+    }
+
+    if (UI_CRATES.has(info.name)) {
+      reportForbiddenDependencies(
+        violations,
+        info,
+        new Set([...RENDERER_CRATES, ...DELIVERY_CRATES, ...TARGET_CRATES, ...APPLICATION_CRATES, ...PRODUCT_CRATES]),
+        'UI Capability 禁止依赖 Renderer、Delivery、Target、Application 或 Product',
+      );
+    }
+
+    if (PRESENTATION_CRATES.has(info.name)) {
+      reportForbiddenDependencies(
+        violations,
+        info,
+        new Set([
+          ...UI_CRATES,
+          ...APPLICATION_CRATES,
+          ...DELIVERY_CRATES,
+          ...TARGET_CRATES,
+          ...PRODUCT_CRATES,
+        ]),
+        'Presentation 禁止依赖 UI、Application、Delivery、Target 或 Product',
+      );
+    }
+
+    if (DELIVERY_CRATES.has(info.name)) {
+      reportForbiddenDependencies(
+        violations,
+        info,
+        new Set([...TARGET_CRATES, ...APPLICATION_CRATES, ...PRODUCT_CRATES]),
+        'Delivery 禁止依赖 Target、Application 或 Product',
+      );
+    }
+
+    if (TARGET_CRATES.has(info.name)) {
+      reportForbiddenDependencies(
+        violations,
+        info,
+        new Set([...APPLICATION_CRATES, ...PRODUCT_CRATES]),
+        'Target 只承载本地宿主，禁止静态依赖 Application 或 Product',
+      );
+      const foreignTarget = info.deps.find(
+        (dep) => TARGET_CRATES.has(dep.name) && dep.name !== info.name,
+      );
+      if (foreignTarget) {
+        violations.push({ crate: info.name, message: `Target 禁止依赖其他 Target: ${foreignTarget.name}` });
+      }
     }
   }
 
-  // 4. 上层组件只能向 core/contract 方向依赖；不得通过组件层耦合渲染器、宿主或业务 demo。
-  const ui = byName.get('tela-ui');
-  if (ui && ui.deps.some((d) => d.name.startsWith('tela-render-') || d.name === 'tela-demo')) {
-    violations.push({ crate: 'tela-ui', message: '分子组件层禁止依赖 renderer 或 tela-demo' });
+  const guestRuntime = crates.find((info) => info.name === 'tela-guest-runtime');
+  if (guestRuntime) {
+    reportForbiddenDependencies(
+      violations,
+      guestRuntime,
+      TARGET_CRATES,
+      'Guest Runtime 禁止依赖任一 Target',
+    );
   }
 
-  // 5. 浏览器 WebView 壳只消费协议与 renderer；应用 guest 必须继续来自经过验证的
-  // bundle，不能把 tela-demo 重新静态链接进壳。
-  const webview = byName.get('tela-webview-sdk');
-  if (webview && webview.deps.some((d) => d.name === 'tela-demo')) {
-    violations.push({ crate: 'tela-webview-sdk', message: 'WebView SDK 必须通过 bundle 加载 guest，禁止依赖 tela-demo' });
+  const desktopGuest = crates.find((info) => info.name === 'tela-product-desktop-guest');
+  if (desktopGuest) {
+    reportForbiddenDependencies(
+      violations,
+      desktopGuest,
+      new Set([
+        'tela-mobile-demo',
+        ...TARGET_CRATES,
+        'tela-bundle',
+        'tela-desktop-runtime',
+        'tela-guest-runtime',
+      ]),
+      '桌面动态 Product 只能装配桌面应用与资源，不得认识 Target 或 Delivery Runtime',
+    );
   }
 
-  // 6. Android is a target host, not a static application shell. Its selected mobile Guest stays
-  // in a separate dynamic bundle so future game or TUI guests cannot leak into the host closure.
-  const android = byName.get('tela-android-sdk');
-  if (android && android.deps.some((d) => d.name === 'tela-mobile-demo' || d.name === 'tela-demo')) {
-    violations.push({ crate: 'tela-android-sdk', message: 'Android SDK 必须通过 mobile bundle 加载 guest，禁止静态依赖业务应用' });
+  const mobileGuest = crates.find((info) => info.name === 'tela-product-mobile-guest');
+  if (mobileGuest) {
+    reportForbiddenDependencies(
+      violations,
+      mobileGuest,
+      new Set([
+        'tela-desktop-demo',
+        ...TARGET_CRATES,
+        'tela-bundle',
+        'tela-desktop-runtime',
+        'tela-guest-runtime',
+      ]),
+      '移动动态 Product 只能装配移动应用与资源，不得认识 Target 或 Delivery Runtime',
+    );
   }
 
-  // 7. iPhone links the separate mobile application statically. It intentionally has no bundle
-  // delivery or desktop-runtime dependency: its App Store-compatible code closure is local.
-  const ios = byName.get('tela-ios-sdk');
-  if (ios && ios.deps.some((d) => [
-    'tela-demo', 'tela-app-abi', 'tela-bundle', 'tela-guest-runtime', 'tela-native-sdk-runtime',
-  ].includes(d.name))) {
-    violations.push({ crate: 'tela-ios-sdk', message: 'iOS SDK 静态链接 mobile app，禁止依赖 desktop guest、WASM ABI、bundle 或动态 guest runtime' });
-  }
-
-  // 8. The neutral guest runtime has no GUI loop, surface, or platform SDK dependency.
-  const guestRuntime = byName.get('tela-guest-runtime');
-  if (guestRuntime && guestRuntime.deps.some((d) => d.name === 'tela-android-sdk' || d.name === 'tela-ios-sdk' || d.name === 'tela-webview-sdk' || d.name === 'tela-win32-sdk' || d.name === 'tela-macos-sdk')) {
-    violations.push({ crate: 'tela-guest-runtime', message: 'Guest Runtime 禁止依赖任一 Target SDK' });
+  const iosProduct = crates.find((info) => info.name === 'tela-product-ios');
+  if (iosProduct) {
+    reportForbiddenDependencies(
+      violations,
+      iosProduct,
+      new Set([
+        'tela-desktop-demo',
+        'tela-app-abi',
+        'tela-bundle',
+        'tela-desktop-runtime',
+        'tela-guest-runtime',
+        'tela-product-desktop-guest',
+        'tela-product-mobile-guest',
+      ]),
+      'iOS 静态 Product 禁止进入动态 Delivery 链路或桌面应用',
+    );
   }
 
   return violations;

@@ -1,9 +1,8 @@
 // 应用层：构建 macOS 原生开发壳并打成最小 App bundle；应用内容仍启动时从 tela-dev 获取。
 import type { FsPort, Reporter } from '../domain/ports.ts';
-import type { BuildProfile, WorkspacePaths } from '../domain/workspace.ts';
+import { MACOS_TARGET_CRATE, type BuildProfile, type WorkspacePaths } from '../domain/workspace.ts';
 import type { CargoPort } from '../infrastructure/cargo.ts';
 
-const MACOS_SDK_CRATE = 'tela-macos-sdk';
 const EXECUTABLE_MODE = 0o755;
 
 export interface BuildMacosDeps {
@@ -29,7 +28,7 @@ export async function runBuildMacos(
 ): Promise<BuildMacosResult> {
   const { cargo, fs, reporter, workspace } = deps;
   reporter.section(`构建 macOS 开发壳（${profile}，aarch64）`);
-  const build = await cargo.buildMacos(MACOS_SDK_CRATE, profile);
+  const build = await cargo.buildMacos(MACOS_TARGET_CRATE, profile);
   if (!build.passed) {
     reporter.fail('macOS Apple Silicon 构建失败');
     if (build.detail) reporter.info(build.detail);

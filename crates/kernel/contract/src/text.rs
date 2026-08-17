@@ -1,0 +1,43 @@
+//! 文字度量：`TextMeasurer` trait 与度量结果（见 007-绘制与渲染后端 4）。
+
+use crate::TextStyleRef;
+
+/// 文本度量结果（见 003-场景树与节点模型 6）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextMetrics {
+    /// 文本宽度。
+    pub width: f32,
+    /// 文本高度。
+    pub height: f32,
+    /// 行数。
+    pub line_count: u32,
+    /// 从文本布局盒上边缘到首行字形基线的逻辑距离。
+    ///
+    /// 度量器必须根据 `TextStyleRef` 对应的真实排版资源返回它；无字形的确定性回退也必须给出
+    /// 有限值，避免布局和 renderer 各自猜测垂直原点。
+    pub first_baseline: f32,
+}
+
+/// 文本度量请求。
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextMeasureRequest<'a> {
+    /// 文本内容。
+    pub text: &'a str,
+    /// 不透明排版样式 token（由 Presentation 解析）。
+    pub text_style: &'a TextStyleRef,
+    /// 字号。
+    pub font_size: f32,
+    /// 行间距（行高）。
+    pub line_height: f32,
+    /// 最大宽度，`Some` 时按此换行，`None` 不换行。
+    pub max_width: Option<f32>,
+}
+
+/// 不可变文本度量接口。
+///
+/// **必须是纯函数**——相同输入（字符串、字号、排版样式参数）输出固定 `TextMetrics`，
+/// 不持有可变运行时状态；软件光栅、wgpu、宿主各自实现该 trait（见 007-绘制与渲染后端 4.0）。
+pub trait TextMeasurer {
+    /// 度量文本。
+    fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics;
+}

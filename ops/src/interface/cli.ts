@@ -3,7 +3,7 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build [webview|frontend|bundle|android|ios|win32|macos|all] [--release]  构建发布物到 dist/
+//   ops build <core|webview|frontend|bundle|android|ios|win32|macos> [--release]  构建显式产品闭包
 //   ops verify bundle [desktop|mobile] [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
@@ -18,6 +18,7 @@ import { CargoPort } from '../infrastructure/cargo.ts';
 import { HttpServerPort } from '../infrastructure/server.ts';
 import { runCheck } from '../application/check.ts';
 import { runBuildWebview } from '../application/build-webview.ts';
+import { runBuildCore } from '../application/build-core.ts';
 import { runBuildFrontend } from '../application/build-frontend.ts';
 import { runBuildBundle } from '../application/build-bundle.ts';
 import { runBuildWin32 } from '../application/build-win32.ts';
@@ -37,9 +38,9 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   四道验证门（fmt / clippy / test / arch）
-  ops build [webview|frontend|bundle [desktop|mobile]|android|ios|win32|macos|all] [--release]
-                              构建发布物到 dist/；默认 all，会先重建目录。bundle desktop/mobile 是
-                              两个独立 Guest；android 先构建 mobile bundle，再构建 ARM64 Vulkan APK，固定使用 ADB reverse localhost index。
+  ops build <core|webview|frontend|bundle [desktop|mobile]|android|ios|win32|macos> [--release]
+                              每次显式选择一个产品或其受控子产物。bundle desktop/mobile 是
+                              两个独立 product guest；webview/win32/macos 先构建 desktop guest，android 先构建 mobile guest，
                               ios 静态链接独立 mobile app，构建无签名 iPhone ARM64 UIKit/Metal App。
   ops android serve           仅监听 127.0.0.1:8000，供 USB adb reverse 的 Android mobile bundle 使用
   ops android deploy [--serial SERIAL]
@@ -98,26 +99,36 @@ async function main(): Promise<number> {
       return result.passed ? 0 : 1;
     }
     case 'build': {
-      const buildAll = target === undefined || target === 'all';
-      const targets = buildAll ? ['webview', 'frontend', 'bundle'] : [target];
+      if (target === undefined || target === 'all') {
+        reporter.fail('ops build 需要显式产品目标（core | webview | android | ios | win32 | macos）。');
+        reporter.info('浏览器产品使用 ops build webview；交付 guest 可单独使用 ops build bundle [desktop|mobile]。');
+        return 1;
+      }
+      const targets = [target];
       if (variantArg && target !== 'bundle') {
         reporter.fail(`构建目标 ${target ?? 'all'} 不接受额外参数: ${variantArg}`);
         return 1;
       }
       const processPort = new NodeProcessPort();
       const fs = new NodeFsPort();
-      if (buildAll) {
-        reporter.section('准备发布目录（dist/）');
-        await fs.resetDir(workspace.distDir);
-        reporter.ok(`已重建 ${workspace.distDir}`);
-      }
       for (const t of targets) {
-        if (t === 'webview') {
+        if (t === 'core') {
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildCore({ cargo, reporter, workspace });
+          if (!result.ok) return 1;
+        } else if (t === 'webview') {
           const cargo = new CargoPort(new NodeProcessPort(), workspace);
+          const bundle = await runBuildBundle(
+            { cargo, process: processPort, fs, reporter, workspace },
+            'desktop',
+          );
+          if (!bundle.ok) return 1;
           const result = await runBuildWebview(
             { cargo, process: processPort, fs, reporter, workspace },
           );
           if (!result.ok) return 1;
+          const frontend = await runBuildFrontend({ process: processPort, reporter, workspace });
+          if (!frontend.ok) return 1;
         } else if (t === 'frontend') {
           const result = await runBuildFrontend({ process: processPort, reporter, workspace });
           if (!result.ok) return 1;
@@ -163,6 +174,11 @@ async function main(): Promise<number> {
           if (!result.ok) return 1;
         } else if (t === 'win32') {
           const cargo = new CargoPort(processPort, workspace);
+          const bundle = await runBuildBundle(
+            { cargo, process: processPort, fs, reporter, workspace },
+            'desktop',
+          );
+          if (!bundle.ok) return 1;
           const result = await runBuildWin32(
             { cargo, fs, reporter, workspace },
             values.release ? 'release' : 'dev',
@@ -175,13 +191,18 @@ async function main(): Promise<number> {
             return 1;
           }
           const cargo = new CargoPort(processPort, workspace);
+          const bundle = await runBuildBundle(
+            { cargo, process: processPort, fs, reporter, workspace },
+            'desktop',
+          );
+          if (!bundle.ok) return 1;
           const result = await runBuildMacos(
             { cargo, fs, reporter, workspace },
             values.release ? 'release' : 'dev',
           );
           if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（webview | frontend | bundle | android | ios | win32 | macos | all）`);
+          reporter.fail(`未知构建目标: ${t}（core | webview | frontend | bundle | android | ios | win32 | macos）`);
           return 1;
         }
       }

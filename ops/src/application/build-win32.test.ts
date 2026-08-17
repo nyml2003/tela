@@ -38,6 +38,6 @@ test('Win32 壳只复制原生二进制，应用内容保持在远程 bundle', a
 
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(copied, [
-    '/repo/target/x86_64-pc-windows-gnu/debug/tela-win32-sdk.exe->/repo/dist/win32/tela-win32-sdk.exe',
+    '/repo/target/x86_64-pc-windows-gnu/debug/tela-win32-host.exe->/repo/dist/win32/tela-win32-host.exe',
   ]);
 });

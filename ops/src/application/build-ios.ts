@@ -1,10 +1,9 @@
 // 应用层：构建 iPhone ARM64 静态库，并以无签名方式编译最小 UIKit App 供本机检查。
 
 import type { FsPort, ProcessPort, Reporter } from '../domain/ports.ts';
-import type { BuildProfile, WorkspacePaths } from '../domain/workspace.ts';
+import { IOS_PRODUCT_CRATE, type BuildProfile, type WorkspacePaths } from '../domain/workspace.ts';
 import type { CargoPort } from '../infrastructure/cargo.ts';
 
-const IOS_SDK_CRATE = 'tela-ios-sdk';
 const IOS_XCODE_TARGET = 'TelaMobile';
 
 export interface BuildIosDeps {
@@ -28,7 +27,7 @@ export async function runBuildIos(
   const configuration = profile === 'release' ? 'Release' : 'Debug';
 
   reporter.section(`构建 iPhone UIKit/Metal 开发壳（${configuration}，arm64）`);
-  const rust = await cargo.buildIos(IOS_SDK_CRATE, profile);
+  const rust = await cargo.buildIos(IOS_PRODUCT_CRATE, profile);
   if (!rust.passed) {
     reporter.fail('iPhone ARM64 Rust 静态库构建失败');
     if (rust.detail) reporter.info(rust.detail);

@@ -57,8 +57,8 @@ nix develop .#ios --command ops build ios       # 无签名静态 UIKit/Metal Ap
 nix develop .#ios --command ops ios deploy --device <UDID>
 ```
 
-`ops build ios` 直接静态链接 `tela-mobile-demo`，不会构建或下载 mobile WASM bundle。它将 Rust 静态库放到
-`ios/build/rust/`，再以 `CODE_SIGNING_ALLOWED=NO` 生成设备 App。`ops ios deploy` 要求明确 UDID，使用 Xcode
+`ops build ios` 通过 `tela-product-ios` 静态链接移动 application，不会构建或下载 mobile WASM bundle。它将
+Rust 静态库放到 `products/ios/build/rust/`，再以 `CODE_SIGNING_ALLOWED=NO` 生成设备 App。`ops ios deploy` 要求明确 UDID，使用 Xcode
 当前 Team 的签名结果安装并启动；它不猜测 Team、不创建证书，也不处理设备信任。
 
 ## 七条命令
@@ -66,18 +66,19 @@ nix develop .#ios --command ops ios deploy --device <UDID>
 | 命令 | 做什么 | 对应旧方式 |
 |---|---|---|
 | `ops check` | 四道验证门：fmt / clippy / test / **依赖方向检查**（TS 版，cargo metadata 真实依赖树，替代 bash 正则） | flake `check` + check-architecture.sh |
-| `ops build [webview\|frontend\|bundle [desktop\|mobile]\|android\|ios\|win32\|macos\|all] [--release]` | `bundle` 可构建独立 desktop/mobile release Guest；`android` 先校验 mobile bundle，再构建 `arm64-v8a` Vulkan GameActivity APK；`ios` 静态链接移动应用并构建无签名 iPhone App；`webview`/`win32`/`macos` 保持各自壳职责，`all` 先重建目录 | 手工多步 |
+| `ops build <core\|webview\|frontend\|bundle [desktop\|mobile]\|android\|ios\|win32\|macos> [--release]` | 每次显式选择产品。`core` 只检查 Kernel + foundation；`bundle` 构建独立 desktop/mobile release Guest；`android` 先校验 mobile bundle，再构建 `arm64-v8a` Vulkan GameActivity APK；`ios` 静态链接移动应用并构建无签名 iPhone App；`webview`/`win32`/`macos` 保持各自 Target 壳职责 | 手工多步 |
 | `ops verify [bundle [desktop\|mobile]\|gpu] [--build]` | 默认 desktop `bundle`：验证 `.tela` 的 archive/ABI/guest 首帧；可显式验证 mobile；`gpu`：服务原生 JS WebGPU 回读诊断页，不经过 tela renderer | 外部 smoke 脚本 |
 | `ops serve [port]` | 开发静态服务器（默认 8000，端口占用自动递增，MIME/防穿越同旧脚本） | serve-demo.mjs |
 | `ops android serve` | 只监听 `127.0.0.1:8000`；端口被占用立即失败，不自动改端口 | Android USB bundle 服务 |
 | `ops android deploy [--serial SERIAL]` | 经 Windows `adb.exe` 验证单个 ARM64 设备、建立 reverse、安装并启动 APK | 手工 adb reverse/install/am start |
 | `ops ios deploy --device UDID` | 以 Xcode 配置的 Apple Development Team 签名，安装并启动明确的 iPhone | 手工 xcodebuild/devicectl |
 
-`ops build`（等同 `ops build all`）是默认 desktop/WebView 发布组合：它先重建 `dist/`，再生成 WebView
-WGPU shell、浏览器 bundle 和 `tela-dev` 应用开发包。`tela-mobile` 是独立 channel，只有 `ops build bundle mobile`
-或 `ops build android` 才会生成。Android command 不嵌入 guest archive，且通过 `tela-android-cargo` 使用 Rust
+`ops build` 必须给出明确目标，不会从当前 shell 或旧 app crate 名猜测目的地。`ops build webview` 依次生成
+desktop dynamic guest、WebView Target host 与浏览器静态资产；`ops build core` 只触及 Kernel 与 Foundation。
+`tela-mobile` 是独立 channel，只有 `ops build bundle mobile` 或 `ops build android` 才会生成。Android command
+不嵌入 guest archive，且通过 `tela-android-cargo` 使用 Rust
 `aarch64-linux-android` target、Windows NDK r27b linker、API 36、Linux JDK 17 与 Gradle；它不会让日常浏览器构建被平台工具链阻塞。`ops build win32`
-与 `ops build macos` 同样保持显式。`ops build ios` 是 Apple Silicon macOS 专用静态构建，输出在 `ios/build/` 而
+与 `ops build macos` 同样保持显式。`ops build ios` 是 Apple Silicon macOS 专用静态构建，输出在 `products/ios/build/` 而
 非 `dist/`，并不触碰动态 mobile channel。单目标构建只更新自己拥有的工件，不清除其他输出。
 
 ## DDD 分层
@@ -119,6 +120,5 @@ pnpm dev -- stress    # 直接跑命令
 ## 与 tela 的边界
 
 - ops 只碰**宿主侧开发流程**，不依赖 tela 的 Rust crate，也不被它们依赖；
-- `ops check` 的依赖方向检查与旧 `scripts/check-architecture.sh` 规则等价
-  （零依赖 crate / 白名单 / render 禁止反向依赖 core），数据源从 TOML 正则改为
-  `cargo metadata --no-deps`（真实声明依赖，含 build/dev）；
+- `ops check` 的依赖方向检查以 026 的 Kernel、UI、Presentation、Delivery、Target 与 Product
+  闭包为准，数据源为 `cargo metadata --no-deps` 的真实声明依赖（含 build/dev）；

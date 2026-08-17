@@ -1,0 +1,20 @@
+[package]
+name = "tela-product-desktop-guest"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela desktop dynamic guest product assembly"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tela-app-abi = { path = "../../crates/delivery/app-abi" }
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-desktop-demo = { path = "../../apps/desktop-demo", features = ["app-runtime"] }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+
+[lints.rust]
+# `export_guest!` locally allows its audited extern "C" exports; handwritten product code is denied.
+unsafe_code = "deny"

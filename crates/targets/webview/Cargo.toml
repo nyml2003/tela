@@ -1,0 +1,23 @@
+[package]
+name = "tela-target-webview"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela browser WebView target host"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tela-app-abi = { path = "../../delivery/app-abi" }
+tela-bundle = { path = "../../delivery/bundle" }
+tela-contract = { path = "../../kernel/contract" }
+tela-render-wgpu = { path = "../../presentation/renderers/wgpu" }
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
+wgpu = "30"
+
+[lints]
+workspace = true

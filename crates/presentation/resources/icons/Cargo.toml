@@ -1,0 +1,13 @@
+[package]
+name = "tela-icon-resources"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela concrete icon resources and Material optical metrics"
+
+[dependencies]
+tela-contract = { path = "../../../kernel/contract" }
+tela-text-resources = { path = "../text" }
+
+[lints]
+workspace = true

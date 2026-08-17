@@ -1,0 +1,245 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10100010000000000000001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = A10200010000000000000001 /* main.m */; };
+		A10100020000000000000001 /* SafeArea.m in Sources */ = {isa = PBXBuildFile; fileRef = A10200020000000000000001 /* SafeArea.m */; };
+		A10100030000000000000001 /* libtela_product_ios.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A10200050000000000000001 /* libtela_product_ios.a */; };
+		A10100040000000000000001 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10200060000000000000001 /* UIKit.framework */; };
+		A10100050000000000000001 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10200070000000000000001 /* Metal.framework */; };
+		A10100060000000000000001 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10200080000000000000001 /* QuartzCore.framework */; };
+		A10100070000000000000001 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10200090000000000000001 /* Foundation.framework */; };
+		A10100080000000000000001 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A102000A0000000000000001 /* CoreGraphics.framework */; };
+		A10100090000000000000001 /* CoreText.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A102000B0000000000000001 /* CoreText.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10200010000000000000001 /* main.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		A10200020000000000000001 /* SafeArea.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SafeArea.m; sourceTree = "<group>"; };
+		A10200030000000000000001 /* SafeArea.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SafeArea.h; sourceTree = "<group>"; };
+		A10200040000000000000001 /* tela_product_ios.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = tela_product_ios.h; sourceTree = "<group>"; };
+		A10200050000000000000001 /* libtela_product_ios.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libtela_product_ios.a; path = build/rust/libtela_product_ios.a; sourceTree = "<group>"; };
+		A10200060000000000000001 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		A10200070000000000000001 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		A10200080000000000000001 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		A10200090000000000000001 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		A102000A0000000000000001 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		A102000B0000000000000001 /* CoreText.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreText.framework; path = System/Library/Frameworks/CoreText.framework; sourceTree = SDKROOT; };
+		A102000C0000000000000001 /* TelaMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TelaMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10300010000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10100030000000000000001 /* libtela_product_ios.a in Frameworks */,
+				A10100040000000000000001 /* UIKit.framework in Frameworks */,
+				A10100050000000000000001 /* Metal.framework in Frameworks */,
+				A10100060000000000000001 /* QuartzCore.framework in Frameworks */,
+				A10100070000000000000001 /* Foundation.framework in Frameworks */,
+				A10100080000000000000001 /* CoreGraphics.framework in Frameworks */,
+				A10100090000000000000001 /* CoreText.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10400010000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A10400020000000000000001 /* TelaMobile */,
+				A10400030000000000000001 /* Frameworks */,
+				A10400040000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10400020000000000000001 /* TelaMobile */ = {
+			isa = PBXGroup;
+			children = (
+				A10200010000000000000001 /* main.m */,
+				A10200020000000000000001 /* SafeArea.m */,
+				A10200030000000000000001 /* SafeArea.h */,
+				A10200040000000000000001 /* tela_product_ios.h */,
+			);
+			path = TelaMobile;
+			sourceTree = "<group>";
+		};
+		A10400030000000000000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A10200050000000000000001 /* libtela_product_ios.a */,
+				A10200060000000000000001 /* UIKit.framework */,
+				A10200070000000000000001 /* Metal.framework */,
+				A10200080000000000000001 /* QuartzCore.framework */,
+				A10200090000000000000001 /* Foundation.framework */,
+				A102000A0000000000000001 /* CoreGraphics.framework */,
+				A102000B0000000000000001 /* CoreText.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A10400040000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A102000C0000000000000001 /* TelaMobile.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10500010000000000000001 /* TelaMobile */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10600020000000000000001 /* Build configuration list for PBXNativeTarget "TelaMobile" */;
+			buildPhases = (
+				A10300020000000000000001 /* Sources */,
+				A10300010000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TelaMobile;
+			productName = TelaMobile;
+			productReference = A102000C0000000000000001 /* TelaMobile.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10700010000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2600;
+			};
+			buildConfigurationList = A10600010000000000000001 /* Build configuration list for PBXProject "TelaMobile" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10400010000000000000001;
+			productRefGroup = A10400040000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10500010000000000000001 /* TelaMobile */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10300020000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10100010000000000000001 /* main.m in Sources */,
+				A10100020000000000000001 /* SafeArea.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10800010000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+			};
+			name = Debug;
+		};
+		A10800020000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+			};
+			name = Release;
+		};
+		A10800030000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = D2XC2Z9A2P;
+				ENABLE_BITCODE = NO;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				INFOPLIST_FILE = TelaMobile/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/build/rust",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tela.mobile;
+				PRODUCT_NAME = TelaMobile;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A10800040000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = D2XC2Z9A2P;
+				ENABLE_BITCODE = NO;
+				INFOPLIST_FILE = TelaMobile/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/build/rust",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tela.mobile;
+				PRODUCT_NAME = TelaMobile;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10600010000000000000001 /* Build configuration list for PBXProject "TelaMobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10800010000000000000001 /* Debug */,
+				A10800020000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10600020000000000000001 /* Build configuration list for PBXNativeTarget "TelaMobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10800030000000000000001 /* Debug */,
+				A10800040000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10700010000000000000001 /* Project object */;
+}

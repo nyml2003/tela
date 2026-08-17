@@ -14,6 +14,9 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          # nixpkgs revision is the single Rust release source for every product shell and
+          # for the private rustup toolchains used by Android/iOS wrappers.
+          rustToolchain = pkgs.rustc.version;
           opsCommand = pkgs.writeShellApplication {
             name = "ops";
             runtimeInputs = [ pkgs.bash pkgs.nodejs ];
@@ -40,19 +43,14 @@
               exit 1
             '';
           };
-          commonPackages = with pkgs; [
+          # 所有产品共享同一套 Rust/ops 基线；专属工具必须在各 Product shell 中显式加入。
+          basePackages = with pkgs; [
             cargo
             clippy
-            python3Packages.fonttools
-            git
-            nixd
             nodejs
-            pnpm
             rust-analyzer
             rustc
             rustfmt
-            # wasm-bindgen-cli must match the Rust wasm-bindgen schema in Cargo.lock.
-            wasm-bindgen-cli_0_2_126
             opsCommand
           ];
           checkCommand = pkgs.writeShellApplication {
@@ -65,6 +63,14 @@
               exec ${opsCommand}/bin/ops check
             '';
           };
+          corePackages = basePackages ++ [ checkCommand ];
+          webviewPackages = corePackages ++ (with pkgs; [
+            pnpm
+            # wasm-bindgen-cli must match the Rust wasm-bindgen schema in Cargo.lock.
+            wasm-bindgen-cli_0_2_126
+            lld
+          ]);
+          assetsPackages = corePackages ++ [ pkgs.python3Packages.fonttools ];
           # Android 开发不从当前 nixpkgs pin 拉 Android SDK/NDK：这些包会回退到
           # dl.google.com，且该 pin 的交叉 Rust 不能命中二进制缓存。工具链保存在
           # 项目专属缓存；Windows Android Studio 提供平台和 NDK，Linux build-tools 单独缓存。
@@ -116,13 +122,21 @@
                 CARGO_HOME="$cargo_home" \
                 RUSTUP_DIST_SERVER="https://rsproxy.cn" \
                 RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup" \
-                "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
+                "$installer" -y --profile minimal --default-toolchain ${rustToolchain} --no-modify-path
+            fi
+            if ! RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
+              "$cargo_home/bin/rustup" run ${rustToolchain} rustc --version >/dev/null 2>&1; then
+              RUSTUP_HOME="$rustup_home" \
+                CARGO_HOME="$cargo_home" \
+                RUSTUP_DIST_SERVER="https://rsproxy.cn" \
+                RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup" \
+                "$cargo_home/bin/rustup" toolchain install ${rustToolchain} --profile minimal
             fi
             RUSTUP_HOME="$rustup_home" \
               CARGO_HOME="$cargo_home" \
               RUSTUP_DIST_SERVER="https://rsproxy.cn" \
               RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup" \
-              "$cargo_home/bin/rustup" target add aarch64-linux-android
+              "$cargo_home/bin/rustup" target add aarch64-linux-android --toolchain ${rustToolchain}
 
             if [ ! -x "$jdk_home/bin/java" ]; then
               archive="$toolchain_root/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20_8.tar.gz"
@@ -230,6 +244,7 @@
             export CC_aarch64_linux_android="$android_clang"
             export CXX_aarch64_linux_android="$android_clang++"
             export AR_aarch64_linux_android="$android_bin_dir/llvm-ar.exe"
+            export RUSTUP_TOOLCHAIN="${rustToolchain}"
             export PATH="$cargo_home/bin:$PATH"
             exec "$cargo_home/bin/cargo" "$@"
           '';
@@ -303,12 +318,20 @@
               RUSTUP_HOME="$rustup_home" \
                 CARGO_HOME="$cargo_home" \
                 env "''${rustup_env[@]}" \
-                "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
+                "$installer" -y --profile minimal --default-toolchain ${rustToolchain} --no-modify-path
+            fi
+            if ! RUSTUP_HOME="$rustup_home" CARGO_HOME="$cargo_home" \
+              env "''${rustup_env[@]}" \
+              "$cargo_home/bin/rustup" run ${rustToolchain} rustc --version >/dev/null 2>&1; then
+              RUSTUP_HOME="$rustup_home" \
+                CARGO_HOME="$cargo_home" \
+                env "''${rustup_env[@]}" \
+                "$cargo_home/bin/rustup" toolchain install ${rustToolchain} --profile minimal
             fi
             RUSTUP_HOME="$rustup_home" \
               CARGO_HOME="$cargo_home" \
               env "''${rustup_env[@]}" \
-              "$cargo_home/bin/rustup" target add aarch64-apple-ios
+              "$cargo_home/bin/rustup" target add aarch64-apple-ios --toolchain ${rustToolchain}
 
             printf '%s\n' 'Tela iOS bootstrap complete.'
           '';
@@ -316,14 +339,14 @@
             set -euo pipefail
 
             toolchain_root="''${TELA_IOS_TOOLCHAIN_ROOT:-''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios}"
-            # Prefer the user's global rustup toolchain; the project-private one (installed by
-            # tela-ios-bootstrap) is used only when TELA_IOS_CARGO_HOME points at it explicitly.
+            # Prefer the pinned toolchain from the user's rustup installation; the project-private
+            # one installed by tela-ios-bootstrap remains an explicit fallback.
             if [ -n "''${TELA_IOS_CARGO_HOME:-}" ]; then
               cargo_home="$TELA_IOS_CARGO_HOME"
-            elif global_cargo="$(command -v rustup >/dev/null 2>&1 && rustup which cargo 2>/dev/null)"; then
+            elif global_cargo="$(command -v rustup >/dev/null 2>&1 && rustup which cargo --toolchain ${rustToolchain} 2>/dev/null)"; then
               cargo_home="$(dirname "$(dirname "$global_cargo")")"
-            elif [ -x "$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo" ]; then
-              cargo_home="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin"
+            elif [ -x "$HOME/.rustup/toolchains/${rustToolchain}-aarch64-apple-darwin/bin/cargo" ]; then
+              cargo_home="$HOME/.rustup/toolchains/${rustToolchain}-aarch64-apple-darwin"
             else
               cargo_home="$toolchain_root/cargo"
             fi
@@ -334,7 +357,7 @@
               xcrun=/usr/bin/xcrun
             fi
             if [ ! -x "$cargo_home/bin/cargo" ]; then
-              printf '%s\n' 'iOS Rust toolchain is absent. Run: rustup target add aarch64-apple-ios (or nix develop .#ios --command tela-ios-bootstrap for a project-private one)' >&2
+              printf '%s\n' 'Pinned iOS Rust toolchain is absent. Run: nix develop .#ios --command tela-ios-bootstrap' >&2
               exit 1
             fi
             if [ ! -x "$developer_dir/usr/bin/xcodebuild" ] || [ ! -x "$xcrun" ]; then
@@ -356,9 +379,10 @@
             export CXX_aarch64_apple_ios="$clang++"
             export AR_aarch64_apple_ios="$ar"
             export CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$clang"
-            # Rustup shims must resolve the toolchain through the global ~/.rustup; a leftover
-            # RUSTUP_HOME from the nix shell would redirect them to a stale project-private one.
+            # Rustup shims must select the release pinned by this flake rather than a moving
+            # global stable channel. A leftover RUSTUP_HOME would redirect them to stale state.
             unset RUSTUP_HOME
+            export RUSTUP_TOOLCHAIN="${rustToolchain}"
             export PATH="$cargo_home/bin:$PATH"
             exec "$cargo_home/bin/cargo" "$@"
           '';
@@ -399,13 +423,51 @@
             unset LD CC CXX AR CPP LDFLAGS CFLAGS CXXFLAGS
             exec "$xcrun" "$@"
           '';
-          commonShellHook = ''
+          baseShellHook = ''
             # nix-direnv 会保留宿主 PATH 的顺序；显式前置项目级 ops，避免命中其他仓库的同名命令。
             export PATH="${opsCommand}/bin:$PATH"
-            echo "tela dev shell ready (cargo $(cargo --version | cut -d' ' -f2), node $(node --version), pnpm $(pnpm --version))"
+            echo "tela product shell ready (cargo $(cargo --version | cut -d' ' -f2), node $(node --version))"
           '';
+          coreShell = pkgs.mkShell {
+            packages = corePackages;
+            shellHook = baseShellHook + ''
+              echo "tela core shell ready (pure Kernel + UI foundation)"
+            '';
+            RUST_BACKTRACE = "1";
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
+          webviewShell = pkgs.mkShell {
+            packages = webviewPackages;
+            shellHook = baseShellHook + ''
+              echo "tela WebView shell ready (WASM + wasm-bindgen + pnpm)"
+            '';
+            RUST_BACKTRACE = "1";
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
+          assetsShell = pkgs.mkShell {
+            packages = assetsPackages;
+            shellHook = baseShellHook + ''
+              echo "tela assets capability shell ready"
+            '';
+            RUST_BACKTRACE = "1";
+          };
+          unsupportedShell = product: pkgs.mkShell {
+            packages = corePackages;
+            shellHook = ''
+              printf '%s\n' "tela ${product} is not supported on ${system}; select a supported product host." >&2
+              exit 1
+            '';
+          };
         in {
-          default = if pkgs.stdenv.isLinux then
+          default = coreShell;
+          core = coreShell;
+          webview = webviewShell;
+          assets = assetsShell;
+          android = unsupportedShell "android";
+          ios = unsupportedShell "ios";
+          macos = unsupportedShell "macos";
+          "render-wgpu" = unsupportedShell "render-wgpu";
+          win32 = if pkgs.stdenv.isLinux then
             let
               win32Cargo = pkgs.pkgsCross.mingwW64.buildPackages.cargo;
               win32Clippy = pkgs.pkgsCross.mingwW64.buildPackages.clippy;
@@ -426,50 +488,29 @@
                 '';
               };
             in pkgs.mkShell {
-              packages = commonPackages ++ (with pkgs; [
-                lld
-                mesa
-                vulkan-loader
+              packages = webviewPackages ++ (with pkgs; [
                 # Win32 开发壳：在 WSL 中交叉链接 x86_64-pc-windows-gnu 工件。
                 pkgsCross.mingwW64.stdenv.cc
                 cargoWin32
-                checkCommand
               ]);
 
-              shellHook = commonShellHook + ''
-                # lavapipe（llvmpipe Vulkan）：wgpu 离屏渲染测试（tela-render-wgpu/tests/render_test.rs）
-                export VK_DRIVER_FILES="${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json"
-                export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib:''${LD_LIBRARY_PATH:-}"
+              shellHook = baseShellHook + ''
+                echo "tela Win32 shell ready (x86_64-pc-windows-gnu)"
               '';
 
               RUST_BACKTRACE = "1";
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
             }
-          else pkgs.mkShell {
-            packages = commonPackages ++ [
-              checkCommand
-              # wasm32 目标链接器（wasm-ld）：与 Linux 壳保持同源，保证跨平台 bundle 一致。
-              pkgs.lld
-            ];
-
-            # AppKit/Metal 与 aarch64-apple-darwin stdlib/SDK 由本机 macOS 和 Xcode Command
-            # Line Tools 提供。开发壳只在本机链接，不把 Apple SDK 伪装成 Nix 交叉工具链。
-            shellHook = commonShellHook;
-
-            MACOSX_DEPLOYMENT_TARGET = "14.0";
-            RUST_BACKTRACE = "1";
-            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-          };
+          else unsupportedShell "win32";
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           android = pkgs.mkShell {
-            packages = commonPackages ++ [
-              checkCommand
+            packages = webviewPackages ++ [
               androidBootstrap
               androidCargo
               androidGradle
             ];
 
-            shellHook = commonShellHook + ''
+            shellHook = baseShellHook + ''
               export TELA_ANDROID_TOOLCHAIN_ROOT="''${XDG_CACHE_HOME:-$HOME/.cache}/tela/android"
               export RUSTUP_HOME="$TELA_ANDROID_TOOLCHAIN_ROOT/rustup"
               export TELA_ANDROID_CARGO_HOME="$TELA_ANDROID_TOOLCHAIN_ROOT/cargo"
@@ -511,20 +552,48 @@
 
             RUST_BACKTRACE = "1";
           };
+          "render-wgpu" = pkgs.mkShell {
+            packages = corePackages ++ (with pkgs; [ lld mesa vulkan-loader ]);
+            shellHook = baseShellHook + ''
+              export VK_DRIVER_FILES="${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json"
+              export LD_LIBRARY_PATH="${pkgs.vulkan-loader}/lib:''${LD_LIBRARY_PATH:-}"
+              echo "tela WGPU renderer capability shell ready (lavapipe)"
+            '';
+            RUST_BACKTRACE = "1";
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          macos = pkgs.mkShell {
+            packages = webviewPackages;
+            # AppKit/Metal 与 aarch64-apple-darwin stdlib/SDK 由本机 macOS 和 Xcode Command
+            # Line Tools 提供；这里不携带 iPhoneOS/Xcode device 工具。
+            shellHook = baseShellHook + ''
+              echo "tela macOS shell ready (AppKit + Metal)"
+            '';
+            MACOSX_DEPLOYMENT_TARGET = "14.0";
+            RUST_BACKTRACE = "1";
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
+          "render-wgpu" = pkgs.mkShell {
+            packages = corePackages ++ [ pkgs.lld ];
+            shellHook = baseShellHook + ''
+              echo "tela WGPU renderer capability shell ready (Metal)"
+            '';
+            RUST_BACKTRACE = "1";
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          };
           ios = pkgs.mkShell {
-            packages = commonPackages ++ [
-              checkCommand
+            packages = corePackages ++ [
               iosBootstrap
               iosCargo
               iosXcodebuild
               iosXcrun
             ];
 
-            shellHook = commonShellHook + ''
+            shellHook = baseShellHook + ''
               export TELA_IOS_TOOLCHAIN_ROOT="''${XDG_CACHE_HOME:-$HOME/.cache}/tela/ios"
-              # Global rustup by default; TELA_IOS_CARGO_HOME/RUSTUP_HOME may be overridden to
-              # point at the project-private toolchain installed by tela-ios-bootstrap.
+              # The wrapper selects the flake-pinned rustup release; TELA_IOS_CARGO_HOME may point
+              # at the project-private toolchain installed by tela-ios-bootstrap.
               export RUSTUP_HOME="''${RUSTUP_HOME:-$HOME/.rustup}"
               export TELA_IOS_CARGO_HOME="''${TELA_IOS_CARGO_HOME:-}"
               export TELA_IOS_DEVELOPER_DIR="''${TELA_IOS_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
@@ -534,7 +603,7 @@
               export IPHONEOS_DEPLOYMENT_TARGET=16.0
               echo "tela iOS shell ready (iPhone arm64, iOS 16.0)"
               if [ ! -x "$TELA_IOS_CARGO_HOME/bin/cargo" ] && ! command -v rustup >/dev/null 2>&1; then
-                echo "Run once: rustup target add aarch64-apple-ios (or tela-ios-bootstrap for a project-private toolchain)"
+                echo "Run once: tela-ios-bootstrap"
               fi
               if [ ! -x "$TELA_IOS_DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
                 echo "Complete Xcode was not found at $TELA_IOS_DEVELOPER_DIR"

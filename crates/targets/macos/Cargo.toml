@@ -1,0 +1,53 @@
+[package]
+name = "tela-target-macos"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela macOS AppKit and Metal target host"
+
+[dependencies]
+tela-desktop-runtime = { path = "../../delivery/desktop-runtime" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSColor",
+    "NSControl",
+    "NSCursor",
+    "NSEvent",
+    "NSFont",
+    "NSGraphics",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSText",
+    "NSTextField",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSDate",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSString",
+    "NSTimer",
+] }
+pollster = "0.4"
+raw-window-handle = "0.6"
+tela-app-abi = { path = "../../delivery/app-abi" }
+tela-contract = { path = "../../kernel/contract" }
+tela-render-wgpu = { path = "../../presentation/renderers/wgpu" }
+ureq = { version = "3.3", default-features = false }
+wgpu = "30"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[[bin]]
+name = "tela-macos-host"
+path = "src/main.rs"

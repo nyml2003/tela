@@ -1,0 +1,20 @@
+[package]
+name = "tela-product-ios"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela iPhone static product assembly"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-target-ios = { path = "../../crates/targets/ios" }
+tela-mobile-demo = { path = "../../apps/mobile-demo", features = ["native-app"] }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"

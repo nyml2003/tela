@@ -43,7 +43,7 @@ test('对发布 archive 调用 SDK 验证器', async () => {
   });
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(calls, [
-    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-dev/tela-demo.tela',
+    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-dev/tela-desktop-guest.tela',
   ]);
 });
 
@@ -62,7 +62,7 @@ test('mobile archive uses the same neutral verifier without selecting the deskto
   }, 'mobile');
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [
-    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-mobile/tela-mobile-demo.tela',
+    'cargo:run --quiet -p tela-guest-runtime --bin tela-guest-verify -- /repo/dist/tela-mobile/tela-mobile-guest.tela',
   ]);
 });
 

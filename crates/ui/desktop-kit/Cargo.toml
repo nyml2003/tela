@@ -1,0 +1,14 @@
+[package]
+name = "tela-desktop-ui-kit"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela desktop UI kit: keyboard and information-dense composite patterns"
+
+[dependencies]
+tela-contract = { path = "../../kernel/contract" }
+tela-core = { path = "../../kernel/core" }
+tela-ui-foundation = { path = "../foundation" }
+
+[lints]
+workspace = true

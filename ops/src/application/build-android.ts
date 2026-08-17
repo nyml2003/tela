@@ -2,11 +2,10 @@
 
 import type { FsPort, ProcessPort, ProcessResult, Reporter } from '../domain/ports.ts';
 import { ANDROID_BUNDLE_INDEX_URL, ANDROID_NDK_ABI, ANDROID_RUST_TARGET } from '../domain/android.ts';
+import { ANDROID_TARGET_CRATE } from '../domain/workspace.ts';
 import type { WorkspacePaths } from '../domain/workspace.ts';
 import { runBuildBundle } from './build-bundle.ts';
 import type { CargoPort } from '../infrastructure/cargo.ts';
-
-const ANDROID_SDK_CRATE = 'tela-android-sdk';
 
 export interface BuildAndroidDeps {
   cargo: CargoPort;
@@ -49,7 +48,7 @@ export async function runBuildAndroid(
     process,
     'tela-android-cargo',
     [
-      'build', '--target', ANDROID_RUST_TARGET, '--release', '-p', ANDROID_SDK_CRATE,
+      'build', '--target', ANDROID_RUST_TARGET, '--release', '-p', ANDROID_TARGET_CRATE,
     ],
     workspace.root,
     reporter,
