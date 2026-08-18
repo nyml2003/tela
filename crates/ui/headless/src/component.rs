@@ -1397,7 +1397,8 @@ impl ComponentPart {
 /// 一个不包含视觉节点的组件 Root。
 ///
 /// kit 使用它的受控状态和具名部件生成不同形态的视觉树；Application 使用路径和部件
-/// key 连接 Signal 与 EventRegistry。
+/// key 连接 Root/Part 语义与 EventRegistry。Application 的 Signal watch 属于
+/// `tela-ui-dsl`，并以 Kernel `SemanticKey` 建立订阅。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComponentRoot {
     spec: &'static ComponentSpec,

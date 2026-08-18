@@ -3,19 +3,16 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    BindId, FocusAppearance, InputEvent, Insets, NodeId, NodeKind, PhysicalKey, PointerEvent,
-    ScrollState, SemanticKey, TextInputEvent, TextSelection, UiAction, UiFrame, UiNode,
+    FocusAppearance, InputEvent, Insets, NodeId, NodeKind, PhysicalKey, PointerEvent, ScrollState,
+    SemanticKey, TextInputEvent, TextSelection, UiAction, UiFrame, UiLayoutError, UiNode,
     UiResources, Value, Viewport,
 };
-use tela_core::{DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore};
-use tela_ui_headless::{
-    ActionTrigger, ComponentPartPath, ComponentPartRole, EventFrame, EventRegistry, HeadlessEvent,
-    RoutedEvent, components,
-};
+use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
+use tela_ui_dsl::{FrameCoordinator, FrameToken, FramedUiAction, Signal, ViewOutput};
 
 use crate::{
     domain::{Entry, EntryKind, MobileWorkspace},
-    presentation::{MobileViewProps, render},
+    presentation::{MobileViewProps, render, render_browse_dsl},
 };
 
 /// Initial mobile logical size before a target host reports its real content area.
@@ -33,28 +30,40 @@ const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
 
 #[cfg_attr(test, allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Route {
+pub(crate) enum Route {
     Browse(Option<String>),
     Preview(String),
+}
+
+/// Mobile browse 的纯数据 Application action。
+///
+/// 这个枚举由 DSL `ActionTarget` 产生；它不进入 Kernel tree，也不依赖 Headless 组件事件。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MobileAction {
+    /// 返回上一层或清除当前搜索。
+    GoBack,
+    /// 打开一个可见 workspace 条目。
+    OpenEntry(String),
+    /// 更新受控搜索条件。
+    Search(String),
+    /// 取消输入时清空当前搜索。
+    ClearSearch,
 }
 
 /// A complete mobile application session. It does not share desktop page or domain state.
 pub struct App {
     resources: &'static dyn UiResources,
     workspace: MobileWorkspace,
-    route: Route,
+    route: Signal<Route>,
     history: Vec<Route>,
-    query: String,
+    query: Signal<String>,
     viewport: Viewport,
     safe_area: Insets,
-    frame: Option<UiFrame>,
-    tree: Option<UiTree>,
     profile: DefaultApplicationProfile,
-    identity_allocator: IdentityAllocator,
     view_state: ViewStateStore,
     scroll_key: Option<SemanticKey>,
-    event_registry: EventRegistry,
-    event_frame: Option<EventFrame>,
+    frames: FrameCoordinator<MobileAction>,
+    projection_invalidated: bool,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -64,19 +73,16 @@ impl App {
         Self {
             resources,
             workspace: MobileWorkspace::sample(),
-            route: Route::Browse(None),
+            route: Signal::new(Route::Browse(None)),
             history: Vec::new(),
-            query: String::new(),
+            query: Signal::new(String::new()),
             viewport: DEFAULT_VIEWPORT,
             safe_area: Insets::all(0.0),
-            frame: None,
-            tree: None,
             profile: DefaultApplicationProfile::new(),
-            identity_allocator: IdentityAllocator::new(),
             view_state: ViewStateStore::new(),
             scroll_key: None,
-            event_registry: EventRegistry::new(),
-            event_frame: None,
+            frames: FrameCoordinator::new(),
+            projection_invalidated: true,
         }
     }
 
@@ -112,291 +118,489 @@ impl App {
     }
 
     /// Ensures the current mobile projection and frame exist.
+    ///
+    /// A failed candidate leaves the previously published tree, frame, watch graph, action map,
+    /// view state, and frame token untouched. The candidate path intentionally uses the profile's
+    /// pure resolve operation so the active dirty-layout cache is never cloned or polluted.
     pub fn ensure_frame(&mut self) -> bool {
-        if self.frame.is_some() {
+        if self.frames.active().is_some()
+            && !self.projection_invalidated
+            && !self.frames.runtime().has_dirty()
+        {
             return false;
         }
-        let focused_before = self.input_focused();
-        let mut tree = self.build_tree(focused_before);
-        self.profile.reconcile_tree(&tree, &mut self.view_state);
-        self.profile.ensure_modal_focus(&tree, &mut self.view_state);
-        let focused_after = self.input_focused();
+
+        self.frames.runtime().begin_frame();
+        let dirty = self.frames.runtime().take_dirty();
+        let mut candidate_state = self.view_state.clone();
+        let focused_before = search_is_focused(&candidate_state);
+        let mut prepared = match self.prepare_projection(focused_before) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                eprintln!(
+                    "tela-mobile-demo: retain previous frame after view build failure: {error}"
+                );
+                self.frames.runtime().restore_dirty(dirty);
+                return false;
+            }
+        };
+
+        self.profile
+            .reconcile_tree(prepared.tree(), &mut candidate_state);
+        self.profile
+            .ensure_modal_focus(prepared.tree(), &mut candidate_state);
+        let focused_after = search_is_focused(&candidate_state);
         if focused_before != focused_after {
-            tree = self.build_tree(focused_after);
-            self.profile.reconcile_tree(&tree, &mut self.view_state);
-            self.profile.ensure_modal_focus(&tree, &mut self.view_state);
+            prepared = match self.prepare_projection(focused_after) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    eprintln!(
+                        "tela-mobile-demo: retain previous frame after focused view build failure: {error}"
+                    );
+                    self.frames.runtime().restore_dirty(dirty);
+                    return false;
+                }
+            };
+            self.profile
+                .reconcile_tree(prepared.tree(), &mut candidate_state);
+            self.profile
+                .ensure_modal_focus(prepared.tree(), &mut candidate_state);
         }
-        let scroll_inputs = self.active_scroll_inputs();
-        let frame = self
-            .profile
-            .resolve(
-                &tree,
+
+        let scroll_key = discover_scroll_key(prepared.tree());
+        let mut scroll_inputs = scroll_inputs_for(&candidate_state, scroll_key.as_ref());
+        let mut frame = match self.profile.resolve_candidate(
+            prepared.tree(),
+            self.viewport,
+            self.resources.text_measurer(),
+            &scroll_inputs,
+            &candidate_state,
+            Some(FOCUS_APPEARANCE),
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                eprintln!(
+                    "tela-mobile-demo: retain previous frame after candidate resolve failure: {error:?}"
+                );
+                self.frames.runtime().restore_dirty(dirty);
+                return false;
+            }
+        };
+        if clamp_scroll_states(&mut candidate_state, &frame) {
+            scroll_inputs = scroll_inputs_for(&candidate_state, scroll_key.as_ref());
+            frame = match self.profile.resolve_candidate(
+                prepared.tree(),
                 self.viewport,
                 self.resources.text_measurer(),
                 &scroll_inputs,
-                &self.view_state,
+                &candidate_state,
                 Some(FOCUS_APPEARANCE),
-            )
-            .expect("mobile scene must be valid");
-        if self.clamp_scroll_states(&frame) {
-            self.invalidate_frame();
-            return self.ensure_frame();
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    eprintln!(
+                        "tela-mobile-demo: retain previous frame after clamped candidate resolve failure: {error:?}"
+                    );
+                    self.frames.runtime().restore_dirty(dirty);
+                    return false;
+                }
+            };
         }
-        self.scroll_key = discover_scroll_key(&tree);
-        self.event_registry = EventRegistry::new();
-        register_mobile_event_routes(&mut self.event_registry, &tree);
-        self.event_frame = Some(self.event_registry.begin_frame(&tree));
-        self.tree = Some(tree);
-        self.frame = Some(frame);
+
+        let resolved = prepared
+            .resolve(|_| Ok::<_, UiLayoutError>(frame))
+            .expect("an already resolved mobile candidate cannot fail a second time");
+        let view_state = &mut self.view_state;
+        let active_scroll_key = &mut self.scroll_key;
+        let projection_invalidated = &mut self.projection_invalidated;
+        self.frames.commit_with(resolved, |_| {
+            *view_state = candidate_state;
+            *active_scroll_key = scroll_key;
+            *projection_invalidated = false;
+        });
         true
     }
 
     /// Returns the resolved Tela frame for the current mobile screen.
     pub fn frame(&self) -> &UiFrame {
-        self.frame.as_ref().expect("mobile frame must be ensured")
+        self.frames
+            .active()
+            .expect("mobile frame must be ensured")
+            .frame()
     }
 
-    /// Delivers a normalized pointer event from a mobile target adapter.
+    /// Returns the currently published frame token, or `0` before the first successful frame.
+    pub fn active_frame_token(&self) -> u64 {
+        self.frames.active().map_or(0, |frame| frame.token().get())
+    }
+
+    /// Delivers a normalized pointer event for the currently active frame.
+    ///
+    /// This direct convenience method exists for synchronous in-process tests and legacy guest
+    /// calls. Target adapters must instead call [`Self::handle_pointer_for_frame`] with the token
+    /// saved alongside the frame they actually presented.
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
-        self.ensure_frame();
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.handle_pointer_for_frame(token.get(), event)
+    }
+
+    /// Delivers a normalized pointer event with the token of the source frame.
+    pub fn handle_pointer_for_frame(&mut self, frame_token: u64, event: PointerEvent) -> u32 {
+        let Some(token) = self.accept_frame_token(frame_token) else {
+            return 0;
+        };
         let frame = self.frame().clone();
-        let tree = self.tree.as_ref().expect("mobile tree must be ensured");
+        let tree = self
+            .frames
+            .active()
+            .expect("accepted token requires an active frame")
+            .tree();
         let actions = self.profile.dispatch_input(
             tree,
             &frame,
             &mut self.view_state,
             &InputEvent::Pointer(event),
         );
-        let changed = self.handle_actions(&actions);
+        let changed = self.handle_framed_actions(token, &actions);
         if changed {
             self.invalidate_frame();
         }
         actions.len() as u32
     }
 
-    /// Handles the small platform key vocabulary used by mobile target adapters.
+    /// Handles the small platform key vocabulary for the currently active frame.
     pub fn handle_key(&mut self, physical_key: u16) -> u32 {
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.handle_key_for_frame(token.get(), physical_key)
+    }
+
+    /// Handles a platform key with the token of the frame that owned input focus.
+    pub fn handle_key_for_frame(&mut self, frame_token: u64, physical_key: u16) -> u32 {
+        let Some(token) = self.accept_frame_token(frame_token) else {
+            return 0;
+        };
         match PhysicalKey::from_code(physical_key) {
+            Some(PhysicalKey::Escape) if self.input_focused() => {
+                self.input_cancel_for_frame(token.get())
+            }
             Some(PhysicalKey::Escape) => u32::from(self.go_back()),
-            Some(PhysicalKey::Enter) if self.input_focused() => u32::from(self.blur_input()),
+            Some(PhysicalKey::Enter) => self.input_enter_for_frame(token.get()),
             _ => 0,
         }
     }
 
-    /// Replaces the controlled query value supplied by the native text channel.
+    /// Replaces the controlled query value for the currently active frame.
     pub fn set_input_value(&mut self, value: String) -> u32 {
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.set_input_value_for_frame(token.get(), value)
+    }
+
+    /// Replaces the controlled query value with the token of the focused native text channel.
+    ///
+    /// A native editor that does not correspond to the current focused DSL input is rejected. This
+    /// keeps every accepted edit on the `TextInput -> ActionFrame -> MobileAction` route instead of
+    /// retaining a legacy direct state-write bypass.
+    pub fn set_input_value_for_frame(&mut self, frame_token: u64, value: String) -> u32 {
+        let Some(token) = self.accept_frame_token(frame_token) else {
+            return 0;
+        };
         if !self.input_focused() {
-            if self.query == value {
-                return 0;
-            }
-            self.query = value;
-            self.reset_scroll();
-            self.invalidate_frame();
-            return 1;
+            return 0;
         }
-        u32::from(self.dispatch_text_input(TextInputEvent::Edit {
-            selection: TextSelection::collapsed(value.len() as u32),
-            value,
-            composing: false,
-        }))
-    }
-
-    /// The platform text channel became focused. The core click already owns focus state.
-    pub fn input_focus(&mut self) -> u32 {
-        u32::from(self.input_focused())
-    }
-
-    /// The platform text channel lost focus.
-    pub fn input_blur(&mut self) -> u32 {
-        u32::from(self.blur_input())
-    }
-
-    /// Commits the current search interaction by hiding the text channel but retaining the query.
-    pub fn input_enter(&mut self) -> u32 {
-        let committed = if self.input_focused() {
-            let value = self.query.clone();
-            self.dispatch_text_input(TextInputEvent::Commit {
+        u32::from(self.dispatch_text_input(
+            token,
+            TextInputEvent::Edit {
                 selection: TextSelection::collapsed(value.len() as u32),
                 value,
-            })
+                composing: false,
+            },
+        ))
+    }
+
+    /// The platform text channel became focused for the currently active frame.
+    pub fn input_focus(&mut self) -> u32 {
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.input_focus_for_frame(token.get())
+    }
+
+    /// The platform text channel became focused for a particular rendered frame.
+    pub fn input_focus_for_frame(&mut self, frame_token: u64) -> u32 {
+        u32::from(self.accept_frame_token(frame_token).is_some() && self.input_focused())
+    }
+
+    /// The platform text channel lost focus for the currently active frame.
+    pub fn input_blur(&mut self) -> u32 {
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.input_blur_for_frame(token.get())
+    }
+
+    /// The platform text channel lost focus for a particular rendered frame.
+    pub fn input_blur_for_frame(&mut self, frame_token: u64) -> u32 {
+        u32::from(self.accept_frame_token(frame_token).is_some() && self.blur_input())
+    }
+
+    /// Commits the current search interaction for the currently active frame.
+    pub fn input_enter(&mut self) -> u32 {
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.input_enter_for_frame(token.get())
+    }
+
+    /// Commits the current search interaction with its source frame token.
+    pub fn input_enter_for_frame(&mut self, frame_token: u64) -> u32 {
+        let Some(token) = self.accept_frame_token(frame_token) else {
+            return 0;
+        };
+        let committed = if self.input_focused() {
+            let value = self.query.get();
+            self.dispatch_text_input(
+                token,
+                TextInputEvent::Commit {
+                    selection: TextSelection::collapsed(value.len() as u32),
+                    value,
+                },
+            )
         } else {
             false
         };
         u32::from(committed || self.blur_input())
     }
 
-    /// Cancels the current search interaction and clears its value.
+    /// Cancels the current search interaction for the currently active frame.
     pub fn input_cancel(&mut self) -> u32 {
-        let canceled = if self.input_focused() {
-            self.dispatch_text_input(TextInputEvent::Cancel {
-                selection: TextSelection::collapsed(self.query.len() as u32),
-            })
-        } else {
-            let had_value = !self.query.is_empty();
-            self.query.clear();
-            had_value
+        let Some(token) = self.current_frame_token() else {
+            return 0;
         };
-        let blurred = self.blur_input();
-        if canceled || blurred {
-            self.reset_scroll();
-            self.invalidate_frame();
-            1
-        } else {
-            0
-        }
+        self.input_cancel_for_frame(token.get())
     }
 
-    /// Composition markers are accepted so the host can preserve the ABI contract. The complete
-    /// controlled value arrives separately through [`Self::set_input_value`].
+    /// Cancels the current search interaction with its source frame token.
+    pub fn input_cancel_for_frame(&mut self, frame_token: u64) -> u32 {
+        let Some(token) = self.accept_frame_token(frame_token) else {
+            return 0;
+        };
+        if !self.input_focused() {
+            return 0;
+        }
+        let canceled = self.dispatch_text_input(
+            token,
+            TextInputEvent::Cancel {
+                selection: TextSelection::collapsed(self.query.get().len() as u32),
+            },
+        );
+        let blurred = self.blur_input();
+        u32::from(canceled || blurred)
+    }
+
+    /// Composition markers are accepted only for the frame that owns the active native editor.
     pub fn composition_changed(&mut self) -> u32 {
-        u32::from(self.input_focused())
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        self.composition_changed_for_frame(token.get())
+    }
+
+    /// Records a composition transition with the source frame token.
+    pub fn composition_changed_for_frame(&mut self, frame_token: u64) -> u32 {
+        u32::from(self.accept_frame_token(frame_token).is_some() && self.input_focused())
     }
 
     /// Whether the native text channel should be attached.
     pub fn input_focused(&self) -> bool {
-        self.view_state
-            .current_focus_key()
-            .is_some_and(|key| key.0 == SEARCH_KEY)
+        search_is_focused(&self.view_state)
     }
 
     /// Current controlled search value.
     pub fn input_value(&self) -> String {
-        self.query.clone()
+        self.query.get()
     }
 
-    fn build_tree(&mut self, search_focused: bool) -> UiTree {
-        let title = self.title().to_owned();
+    fn prepare_projection(
+        &self,
+        search_focused: bool,
+    ) -> Result<tela_ui_dsl::PreparedFrame<MobileAction>, String> {
+        let title = self.title();
+        let query = self.query.get();
         let entries = self.visible_entries();
         let preview = self.preview_entry();
-        let root = render(MobileViewProps {
+        let is_browse = preview.is_none();
+        let props = MobileViewProps {
             viewport: self.viewport,
             title: &title,
             can_go_back: self.can_go_back(),
-            query: &self.query,
+            query: &query,
             search_focused,
             safe_area: self.safe_area,
             entries,
             preview,
             icons: self.resources.icon_provider(),
-        });
-        UiTree::new_with_allocator(root, &mut self.identity_allocator)
-            .expect("mobile view must construct a valid tree")
+        };
+        let mut build = self.frames.begin_build();
+        let root = if is_browse {
+            render_browse_dsl(&mut build, props, &self.route, &self.query)
+                .map_err(|error| error.to_string())?
+        } else {
+            ViewOutput::opaque(render(props))
+        };
+        self.frames.prepare(root).map_err(|error| error.to_string())
     }
 
-    fn title(&self) -> &str {
-        match &self.route {
-            Route::Browse(folder) => self.workspace.folder_title(folder.as_deref()),
+    fn current_frame_token(&mut self) -> Option<FrameToken> {
+        self.ensure_frame();
+        self.frames.active().map(|frame| frame.token())
+    }
+
+    fn accept_frame_token(&mut self, raw: u64) -> Option<FrameToken> {
+        self.ensure_frame();
+        let token = FrameToken::from_raw(raw)?;
+        self.frames
+            .active()
+            .is_some_and(|active| active.token() == token)
+            .then_some(token)
+    }
+
+    fn title(&self) -> String {
+        match self.route.get() {
+            Route::Browse(folder) => self.workspace.folder_title(folder.as_deref()).to_owned(),
             Route::Preview(entry) => self
                 .workspace
-                .entry(entry)
-                .map(|entry| entry.name)
-                .unwrap_or("文件预览"),
+                .entry(&entry)
+                .map(|entry| entry.name.to_owned())
+                .unwrap_or_else(|| "文件预览".to_owned()),
         }
     }
 
     fn visible_entries(&self) -> Vec<&Entry> {
-        if !self.query.trim().is_empty() {
-            return self.workspace.search(&self.query);
+        let query = self.query.get();
+        if !query.trim().is_empty() {
+            return self.workspace.search(&query);
         }
-        match &self.route {
+        match self.route.get() {
             Route::Browse(folder) => self.workspace.children(folder.as_deref()),
             Route::Preview(_) => Vec::new(),
         }
     }
 
     fn preview_entry(&self) -> Option<&Entry> {
-        match &self.route {
-            Route::Preview(id) => self.workspace.entry(id),
+        match self.route.get() {
+            Route::Preview(id) => self.workspace.entry(&id),
             Route::Browse(_) => None,
         }
     }
 
     fn can_go_back(&self) -> bool {
-        !self.query.is_empty() || !self.history.is_empty()
+        !self.query.get().is_empty() || !self.history.is_empty()
     }
 
-    fn handle_actions(&mut self, actions: &[UiAction]) -> bool {
+    fn handle_framed_actions(&mut self, token: FrameToken, actions: &[UiAction]) -> bool {
         let mut changed = false;
-        for action in actions {
-            let routed = self
-                .event_frame
-                .as_ref()
-                .and_then(|frame| self.event_registry.dispatch(frame, action));
-            if let Some(routed) = routed {
-                changed |= self.handle_routed_event(routed);
+        for action in actions.iter().cloned() {
+            let framed = FramedUiAction::new(token, action);
+            if !self.frames.accepts(&framed) {
                 continue;
             }
-            match action {
+            if let Some(action) = self.frames.dispatch(&framed) {
+                changed |= self.handle_application_action(action);
+                continue;
+            }
+            match framed.into_parts().1 {
                 UiAction::Scroll { node_id, delta } => {
-                    changed |= self.handle_scroll(*node_id, delta.y)
+                    changed |= self.handle_scroll(node_id, delta.y)
                 }
                 UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
+                // Preview is intentionally still a direct-Rust island in this vertical slice.
+                // Its legacy controls keep their existing Kernel contract without reintroducing a
+                // Headless event registry into the mobile application.
+                UiAction::Click { node_id } => changed |= self.handle_legacy_preview_click(node_id),
+                UiAction::ValueChange { bind_id, value } => {
+                    changed |= self.handle_legacy_field_value_change(bind_id.0, value)
+                }
                 _ => {}
             }
         }
         changed
     }
 
-    fn handle_routed_event(&mut self, routed: RoutedEvent) -> bool {
-        match (routed.part.as_ref(), routed.event) {
-            (Some(part), HeadlessEvent::Activate) if component_part_key(part) == "mobile.back" => {
-                self.go_back()
-            }
-            (Some(part), HeadlessEvent::Activate | HeadlessEvent::Select { .. }) => {
-                component_part_key(part)
-                    .strip_prefix("mobile.entry.")
-                    .is_some_and(|entry_id| self.open_entry(entry_id))
-            }
-            (
-                Some(part),
-                HeadlessEvent::TextInput {
-                    event: TextInputEvent::Cancel { .. },
-                },
-            ) if component_part_key(part) == SEARCH_KEY => {
-                if self.query.is_empty() {
-                    false
-                } else {
-                    self.query.clear();
-                    self.reset_scroll();
-                    true
-                }
-            }
-            (None, HeadlessEvent::ValueChange { bind_id, value }) => {
-                self.handle_field_value_change(bind_id, value)
-            }
-            _ => false,
+    fn handle_application_action(&mut self, action: MobileAction) -> bool {
+        match action {
+            MobileAction::GoBack => self.go_back(),
+            MobileAction::OpenEntry(entry_id) => self.open_entry(&entry_id),
+            MobileAction::Search(value) => self.set_query(value),
+            MobileAction::ClearSearch => self.clear_query(),
         }
     }
 
-    fn handle_field_value_change(&mut self, bind_id: BindId, value: Value) -> bool {
-        if bind_id.0 != SEARCH_KEY {
+    fn handle_legacy_preview_click(&mut self, node_id: NodeId) -> bool {
+        if !matches!(self.route.get(), Route::Preview(_)) {
+            return false;
+        }
+        let is_back = self
+            .frames
+            .active()
+            .and_then(|frame| frame.tree().key_for_node_id(node_id))
+            .is_some_and(|key| key.0 == "mobile.back");
+        is_back && self.go_back()
+    }
+
+    fn handle_legacy_field_value_change(&mut self, bind_id: String, value: Value) -> bool {
+        if bind_id != SEARCH_KEY {
             return false;
         }
         let Value::String(value) = value else {
             return false;
         };
-        if self.query == value {
-            return false;
-        }
-        self.query = value;
-        self.reset_scroll();
-        true
+        self.set_query(value)
     }
 
-    fn dispatch_text_input(&mut self, event: TextInputEvent) -> bool {
-        self.ensure_frame();
+    fn dispatch_text_input(&mut self, token: FrameToken, event: TextInputEvent) -> bool {
         let frame = self.frame().clone();
+        let tree = self
+            .frames
+            .active()
+            .expect("accepted token requires an active frame")
+            .tree();
         let actions = self.profile.dispatch_input(
-            self.tree.as_ref().expect("mobile tree must be ensured"),
+            tree,
             &frame,
             &mut self.view_state,
             &InputEvent::Text(event),
         );
-        let changed = self.handle_actions(&actions);
+        let changed = self.handle_framed_actions(token, &actions);
         if changed {
             self.invalidate_frame();
         }
         changed
+    }
+
+    fn set_query(&mut self, value: String) -> bool {
+        if self.query.get() == value {
+            return false;
+        }
+        self.query.set(value);
+        self.reset_scroll();
+        self.invalidate_frame();
+        true
+    }
+
+    fn clear_query(&mut self) -> bool {
+        if self.query.get().is_empty() {
+            return false;
+        }
+        self.query.set(String::new());
+        self.reset_scroll();
+        self.invalidate_frame();
+        true
     }
 
     fn open_entry(&mut self, entry_id: &str) -> bool {
@@ -405,28 +609,26 @@ impl App {
         };
         let next = match entry.kind {
             EntryKind::Folder => {
-                self.query.clear();
+                self.query.set(String::new());
                 Route::Browse(Some(entry.id.to_owned()))
             }
             EntryKind::Document | EntryKind::Asset => Route::Preview(entry.id.to_owned()),
         };
-        self.history.push(self.route.clone());
-        self.route = next;
+        self.history.push(self.route.get());
+        self.route.set(next);
         self.reset_scroll();
+        self.invalidate_frame();
         true
     }
 
     fn go_back(&mut self) -> bool {
-        if !self.query.is_empty() {
-            self.query.clear();
-            self.reset_scroll();
-            self.invalidate_frame();
-            return true;
+        if !self.query.get().is_empty() {
+            return self.clear_query();
         }
         let Some(previous) = self.history.pop() else {
             return false;
         };
-        self.route = previous;
+        self.route.set(previous);
         self.reset_scroll();
         self.invalidate_frame();
         true
@@ -442,7 +644,8 @@ impl App {
     }
 
     fn handle_scroll(&mut self, node_id: NodeId, delta_y: f32) -> bool {
-        let Some(bounds) = self.frame.as_ref().and_then(|frame| {
+        let Some(bounds) = self.frames.active().and_then(|active| {
+            let frame = active.frame();
             frame
                 .scroll_bounds
                 .iter()
@@ -460,30 +663,6 @@ impl App {
         true
     }
 
-    fn active_scroll_inputs(&self) -> HashMap<SemanticKey, ScrollState> {
-        self.scroll_key
-            .as_ref()
-            .map(|key| (key.clone(), self.view_state.scroll(key)))
-            .into_iter()
-            .collect()
-    }
-
-    fn clamp_scroll_states(&mut self, frame: &UiFrame) -> bool {
-        let mut changed = false;
-        for bounds in &frame.scroll_bounds {
-            let state = self.view_state.scroll(&bounds.key);
-            let next = ScrollState {
-                offset_x: state.offset_x.clamp(0.0, bounds.max_offset_x),
-                offset_y: state.offset_y.clamp(0.0, bounds.max_offset_y),
-            };
-            if next != state {
-                self.view_state.set_scroll(bounds.key.clone(), next);
-                changed = true;
-            }
-        }
-        changed
-    }
-
     fn reset_scroll(&mut self) {
         if let Some(key) = self.scroll_key.clone() {
             self.view_state.set_scroll(key, ScrollState::default());
@@ -491,9 +670,7 @@ impl App {
     }
 
     fn invalidate_frame(&mut self) {
-        self.frame = None;
-        self.tree = None;
-        self.event_frame = None;
+        self.projection_invalidated = true;
     }
 }
 
@@ -517,58 +694,36 @@ fn discover_scroll_key(tree: &UiTree) -> Option<SemanticKey> {
     visit(tree.root(), tree.keys(), &mut 0)
 }
 
-fn register_mobile_event_routes(registry: &mut EventRegistry, tree: &UiTree) {
-    for key in tree.keys() {
-        let Some(interact) = tree.interact_for_key(key) else {
-            continue;
-        };
-        if interact.input.is_some() {
-            let root = components::Input::compose("mobile.search")
-                .part(ComponentPartRole::Input, key.clone());
-            let part = root.parts().last().expect("search input part");
-            registry
-                .register_part(
-                    &root,
-                    part,
-                    ActionTrigger::TextInput,
-                    HeadlessEvent::TextInput {
-                        event: TextInputEvent::Cancel {
-                            selection: TextSelection::default(),
-                        },
-                    },
-                )
-                .expect("search route must satisfy the Input contract");
-        }
-        if interact.clickable && interact.input.is_none() {
-            if key.0.starts_with("mobile.entry.") {
-                let root = components::List::compose("mobile.entries")
-                    .part(ComponentPartRole::Item, key.clone());
-                let part = root.parts().last().expect("entry item part");
-                registry
-                    .register_part(
-                        &root,
-                        part,
-                        ActionTrigger::Click,
-                        HeadlessEvent::Select {
-                            value: key.0.clone(),
-                        },
-                    )
-                    .expect("entry route must satisfy the List contract");
-                continue;
-            }
-
-            let root = components::Button::compose("mobile.action")
-                .part(ComponentPartRole::Trigger, key.clone());
-            let part = root.parts().last().expect("action trigger part");
-            registry
-                .register_part(&root, part, ActionTrigger::Click, HeadlessEvent::Activate)
-                .expect("action route must satisfy the Button contract");
-        }
-    }
+fn search_is_focused(view_state: &ViewStateStore) -> bool {
+    view_state
+        .current_focus_key()
+        .is_some_and(|key| key.0 == SEARCH_KEY)
 }
 
-fn component_part_key(part: &ComponentPartPath) -> &str {
-    part.item_key().unwrap_or_else(|| part.as_str())
+fn scroll_inputs_for(
+    view_state: &ViewStateStore,
+    scroll_key: Option<&SemanticKey>,
+) -> HashMap<SemanticKey, ScrollState> {
+    scroll_key
+        .map(|key| (key.clone(), view_state.scroll(key)))
+        .into_iter()
+        .collect()
+}
+
+fn clamp_scroll_states(view_state: &mut ViewStateStore, frame: &UiFrame) -> bool {
+    let mut changed = false;
+    for bounds in &frame.scroll_bounds {
+        let state = view_state.scroll(&bounds.key);
+        let next = ScrollState {
+            offset_x: state.offset_x.clamp(0.0, bounds.max_offset_x),
+            offset_y: state.offset_y.clamp(0.0, bounds.max_offset_y),
+        };
+        if next != state {
+            view_state.set_scroll(bounds.key.clone(), next);
+            changed = true;
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -650,6 +805,22 @@ mod tests {
         }
     }
 
+    fn focus_search(app: &mut App) {
+        assert!(app.ensure_frame());
+        let key = SemanticKey(super::SEARCH_KEY.to_owned());
+        let node_id = app
+            .frames
+            .active()
+            .expect("active DSL frame")
+            .tree()
+            .node_id_for_key(&key)
+            .expect("search field must have a stable key");
+        app.view_state.set_current_focus(FocusSlot {
+            key: Some(key),
+            node_id: Some(node_id),
+        });
+    }
+
     fn catalog_fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
         for byte in bytes {
             hash ^= u64::from(*byte);
@@ -661,33 +832,49 @@ mod tests {
     #[test]
     fn search_is_controlled_and_system_back_clears_it_before_navigation() {
         let mut app = App::new(&TEST_RESOURCES);
+        focus_search(&mut app);
         assert_eq!(app.set_input_value("架构".to_owned()), 1);
         assert_eq!(app.visible_entries().len(), 1);
         assert!(app.go_back());
-        assert!(app.query.is_empty());
-        assert_eq!(app.route, Route::Browse(None));
+        assert!(app.query.get().is_empty());
+        assert_eq!(app.route.get(), Route::Browse(None));
     }
 
     #[test]
-    fn focused_search_routes_kernel_text_events_through_field_value_change() {
+    fn focused_search_routes_kernel_text_events_through_the_dsl_action_frame() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.ensure_frame());
-        let key = SemanticKey(super::SEARCH_KEY.to_owned());
-        let node_id = app
-            .tree
-            .as_ref()
-            .expect("tree")
-            .node_id_for_key(&key)
-            .expect("search field must have a stable key");
-        app.view_state.set_current_focus(FocusSlot {
-            key: Some(key),
-            node_id: Some(node_id),
-        });
+        focus_search(&mut app);
 
         assert_eq!(app.set_input_value("架构".to_owned()), 1);
         assert_eq!(app.input_value(), "架构");
         assert_eq!(app.input_cancel(), 1);
         assert_eq!(app.input_value(), "");
+    }
+
+    #[test]
+    fn unfocused_native_text_events_cannot_bypass_the_dsl_action_frame() {
+        let mut app = App::new(&TEST_RESOURCES);
+        assert!(app.ensure_frame());
+        let token = app.active_frame_token();
+
+        assert_eq!(app.set_input_value_for_frame(token, "bypass".to_owned()), 0);
+        assert_eq!(app.input_cancel_for_frame(token), 0);
+        assert_eq!(app.input_value(), "");
+    }
+
+    #[test]
+    fn focused_physical_keys_use_the_dsl_text_lifecycle() {
+        let mut app = App::new(&TEST_RESOURCES);
+        focus_search(&mut app);
+        assert_eq!(app.set_input_value("架构".to_owned()), 1);
+        assert_eq!(app.handle_key(PhysicalKey::Enter as u16), 1);
+        assert!(!app.input_focused());
+
+        focus_search(&mut app);
+        assert_eq!(app.set_input_value("缓存".to_owned()), 1);
+        assert_eq!(app.handle_key(PhysicalKey::Escape as u16), 1);
+        assert_eq!(app.input_value(), "");
+        assert!(!app.input_focused());
     }
 
     #[test]
@@ -798,18 +985,57 @@ mod tests {
     }
 
     #[test]
-    fn mobile_cell_routes_its_semantic_action_through_the_event_frame() {
+    fn mobile_cell_routes_its_semantic_action_through_the_dsl_action_frame() {
         let mut app = App::new(&TEST_RESOURCES);
         assert!(app.ensure_frame());
+        let active = app.frames.active().expect("active DSL frame");
+        let row_key = active
+            .tree()
+            .keys()
+            .iter()
+            .find(|key| key.0.contains("@for-") && key.0.ends_with("/design"))
+            .cloned()
+            .expect("the first browse item must receive a composed For key");
         let node_id = app
-            .tree
-            .as_ref()
-            .expect("tree")
-            .node_id_for_key(&SemanticKey("mobile.entry.design".to_owned()))
-            .expect("the first MobileCell must expose its semantic action key");
+            .frames
+            .active()
+            .expect("active DSL frame")
+            .tree()
+            .node_id_for_key(&row_key)
+            .expect("the item ActionTarget root must resolve to a node");
+        let token = active.token();
 
-        assert!(app.handle_actions(&[UiAction::Click { node_id }]));
-        assert_eq!(app.route, Route::Browse(Some("design".to_owned())));
+        assert!(app.handle_framed_actions(token, &[UiAction::Click { node_id }]));
+        assert_eq!(app.route.get(), Route::Browse(Some("design".to_owned())));
+    }
+
+    #[test]
+    fn stale_mobile_action_token_cannot_route_a_reused_node_id() {
+        let mut app = App::new(&TEST_RESOURCES);
+        assert!(app.ensure_frame());
+        let first = app.frames.active().expect("first active frame");
+        let stale_token = first.token();
+        let row_key = first
+            .tree()
+            .keys()
+            .iter()
+            .find(|key| key.0.contains("@for-") && key.0.ends_with("/design"))
+            .cloned()
+            .expect("design row key");
+        let node_id = first
+            .tree()
+            .node_id_for_key(&row_key)
+            .expect("design row node");
+
+        assert!(app.set_query("架构".to_owned()));
+        assert!(app.ensure_frame());
+        assert_ne!(
+            app.frames.active().expect("replacement frame").token(),
+            stale_token
+        );
+
+        assert!(!app.handle_framed_actions(stale_token, &[UiAction::Click { node_id }]));
+        assert_eq!(app.route.get(), Route::Browse(None));
     }
 
     #[test]

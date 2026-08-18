@@ -44,12 +44,14 @@ pub struct MobileSearchField {
     normal: MobileSurfaceStyle,
     focused: MobileSurfaceStyle,
     is_focused: bool,
-    bind_id: String,
+    semantic_key: SemanticKey,
+    bind_id: Option<BindId>,
 }
 
 impl MobileSearchField {
     /// 创建一个带默认 48 点触控高度的搜索字段。
     pub fn new(content: UiNode, bind_id: impl Into<String>) -> Self {
+        let bind_id = BindId(bind_id.into());
         Self {
             content,
             width: 1.0,
@@ -58,7 +60,27 @@ impl MobileSearchField {
             normal: MobileSurfaceStyle::solid(Color::WHITE),
             focused: MobileSurfaceStyle::solid(Color::WHITE),
             is_focused: false,
-            bind_id: bind_id.into(),
+            semantic_key: SemanticKey(bind_id.0.clone()),
+            bind_id: Some(bind_id),
+        }
+    }
+
+    /// 创建不声明 `BindId` 的受控搜索字段。
+    ///
+    /// 视觉与 Kernel 文本交互语义保持不变，但值生命周期由外层 Composition DSL 的
+    /// `on_input` / `on_submit` / `on_cancel` ActionTarget 接管。调用方提供的 key 是节点
+    /// 身份，不会成为 Headless `ValueChange` 的 bind id。
+    pub fn unbound(content: UiNode, semantic_key: impl Into<String>) -> Self {
+        Self {
+            content,
+            width: 1.0,
+            height: 52.0,
+            padding: Insets::all(12.0),
+            normal: MobileSurfaceStyle::solid(Color::WHITE),
+            focused: MobileSurfaceStyle::solid(Color::WHITE),
+            is_focused: false,
+            semantic_key: SemanticKey(semantic_key.into()),
+            bind_id: None,
         }
     }
 
@@ -114,13 +136,13 @@ impl MobileSearchField {
                 border_radius: surface.border_radius,
                 ..VisualConcern::default()
             })
-            .identity(semantic_identity(&self.bind_id))
+            .identity(semantic_identity(&self.semantic_key.0))
             .into();
         field.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
             input: Some(TextInputSpec::new(TextInputKind::Search)),
-            bind_id: Some(BindId(self.bind_id)),
+            bind_id: self.bind_id,
             ..InteractConcern::default()
         });
         field
@@ -133,7 +155,7 @@ pub struct MobileIconButton {
     width: f32,
     height: f32,
     surface: MobileSurfaceStyle,
-    action_key: SemanticKey,
+    semantic_key: Option<SemanticKey>,
 }
 
 impl MobileIconButton {
@@ -144,7 +166,21 @@ impl MobileIconButton {
             width: MIN_TOUCH_TARGET,
             height: MIN_TOUCH_TARGET,
             surface: MobileSurfaceStyle::solid(Color::WHITE),
-            action_key: SemanticKey(action_key.into()),
+            semantic_key: Some(SemanticKey(action_key.into())),
+        }
+    }
+
+    /// 创建由外层 Composition DSL 分配身份与动作的最小触控按钮。
+    ///
+    /// 与 [`Self::new`] 一样保留点击和焦点交互，但不预先占用一个全树 `SemanticKey`。
+    /// 适用于 `<ActionTarget>` 或 `<For>` 已经拥有该根节点身份的场景。
+    pub fn unbound(content: UiNode) -> Self {
+        Self {
+            content,
+            width: MIN_TOUCH_TARGET,
+            height: MIN_TOUCH_TARGET,
+            surface: MobileSurfaceStyle::solid(Color::WHITE),
+            semantic_key: None,
         }
     }
 
@@ -176,8 +212,10 @@ impl MobileIconButton {
                 border_radius: self.surface.border_radius,
                 ..VisualConcern::default()
             })
-            .identity(semantic_identity(&self.action_key.0))
             .into();
+        if let Some(semantic_key) = self.semantic_key {
+            node.identity = Some(semantic_identity(&semantic_key.0));
+        }
         node.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
@@ -374,6 +412,7 @@ fn semantic_identity(key: &str) -> IdentityConcern {
     IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(SemanticKey(key.to_owned())),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     }
 }
@@ -412,6 +451,34 @@ mod tests {
                 .and_then(|identity| identity.semantic_key)
                 .map(|key| key.0),
             Some("mobile.action".to_owned())
+        );
+    }
+
+    #[test]
+    fn unbound_controls_leave_identity_and_bind_routing_to_the_outer_dsl() {
+        let button = MobileIconButton::unbound(content()).into_node();
+        assert!(button.identity.is_none());
+        assert!(
+            button
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.clickable && interact.focusable)
+        );
+
+        let search = MobileSearchField::unbound(content(), "mobile.search").into_node();
+        assert_eq!(
+            search
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.semantic_key.as_ref())
+                .map(|key| key.0.as_str()),
+            Some("mobile.search")
+        );
+        assert!(
+            search
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.input.is_some() && interact.bind_id.is_none())
         );
     }
 

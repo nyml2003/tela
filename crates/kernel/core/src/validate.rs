@@ -12,8 +12,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 use tela_contract::{
-    BaseSize, ContentConcern, GridItemPlacement, GridSpec, GridTrack, KeyStrategy, MinMax, NodeId,
-    NodeKind, SemanticKey, Size, TeleportSource, UiBuildError, UiNode,
+    BaseSize, ContentConcern, GridItemPlacement, GridSpec, GridTrack, KeySegment, KeyStrategy,
+    MinMax, NodeId, NodeKind, SemanticKey, Size, TeleportSource, UiBuildError, UiNode,
 };
 
 use crate::identity::{IdentityAllocator, is_stable_scope};
@@ -38,12 +38,14 @@ pub(crate) fn validate(
         root,
         None,
         None,
+        None,
         "/",
         "/",
         &mut keys,
         &mut result,
         allocator,
     )?;
+    validate_focus_scope_references(root, &result.keys)?;
     allocator.end_frame();
     Ok(result)
 }
@@ -121,6 +123,7 @@ fn validate_node(
     node: &UiNode,
     parent_kind: Option<&NodeKind>,
     stable_scope: Option<&SemanticKey>,
+    parent_key: Option<&SemanticKey>,
     path: &str,
     relative_path: &str,
     seen_keys: &mut BTreeSet<SemanticKey>,
@@ -158,11 +161,6 @@ fn validate_node(
         }
     }
 
-    // 焦点图静态隔离：父 focus_graph 禁止引用子 FocusScope 内部 key（见 008-2.9）。
-    if let NodeKind::FocusScope(spec) = &node.kind {
-        validate_focus_scope(node, spec)?;
-    }
-
     // 虚拟列表：item 必须显式 semantic-id（见 006-布局引擎 6）。
     if matches!(node.kind, NodeKind::VirtualListView(_)) {
         let spec = match &node.kind {
@@ -175,24 +173,39 @@ fn validate_node(
             return Err(UiBuildError::InvalidVirtualListRange);
         }
         for child in &node.children {
-            let has_key = child
-                .identity
-                .as_ref()
-                .and_then(|i| i.semantic_key.as_ref())
-                .is_some();
+            let has_key = child.identity.as_ref().is_some_and(|identity| {
+                identity.semantic_key.is_some() || identity.key_segment.is_some()
+            });
             if !has_key {
                 return Err(UiBuildError::MissingVirtualItemKey);
             }
         }
     }
 
-    // 策略组合合法：SemanticId / Manual 必须提供 semantic_key。
+    // 策略组合合法：SemanticId / Manual 必须提供完整 key 或 DSL 局部 key 片段。
     if let Some(identity) = &node.identity
         && matches!(
             identity.key_strategy,
             KeyStrategy::SemanticId | KeyStrategy::Manual
         )
         && identity.semantic_key.is_none()
+        && identity.key_segment.is_none()
+    {
+        return Err(UiBuildError::InvalidStrategy);
+    }
+    if let Some(identity) = &node.identity
+        && identity.semantic_key.is_some()
+        && identity.key_segment.is_some()
+    {
+        return Err(UiBuildError::InvalidStrategy);
+    }
+    if let Some(identity) = &node.identity
+        && identity.key_segment.is_some()
+        && identity
+            .key_segment
+            .as_ref()
+            .and_then(KeySegment::collection_scope)
+            .is_none()
     {
         return Err(UiBuildError::InvalidStrategy);
     }
@@ -246,16 +259,27 @@ fn validate_node(
     // 显式 semantic_key 总是优先，即使节点位于 AutoStableIdentity 作用域内。
     // 这样 Application 可以为可交互 Part 声明跨帧稳定路由；自动分配只服务未命名的
     // 动态子项，不能吞掉组件自身的语义身份。
+    let key_segment = node
+        .identity
+        .as_ref()
+        .and_then(|identity| identity.key_segment.as_ref());
     let explicit_key = node
         .identity
         .as_ref()
         .and_then(|identity| identity.semantic_key.clone())
         .filter(|key| !key.0.is_empty());
-    let key = explicit_key.unwrap_or_else(|| {
-        stable_scope
-            .map(|scope| allocator.assign(scope, relative_path, node))
-            .unwrap_or_else(|| SemanticKey(path.to_string()))
-    });
+    let key = if let Some(segment) = key_segment {
+        let Some(parent) = parent_key else {
+            return Err(UiBuildError::InvalidStrategy);
+        };
+        compose_key_segment(parent, segment)?
+    } else {
+        explicit_key.unwrap_or_else(|| {
+            stable_scope
+                .map(|scope| allocator.assign(scope, relative_path, node))
+                .unwrap_or_else(|| SemanticKey(path.to_string()))
+        })
+    };
     if !key.0.is_empty() {
         if !seen_keys.insert(key.clone()) {
             return Err(UiBuildError::DuplicateKey(key));
@@ -278,6 +302,7 @@ fn validate_node(
             child,
             Some(&node.kind),
             next_scope.as_ref(),
+            Some(&key),
             &format!("{path}{index}/"),
             &format!("{next_relative}{index}/"),
             seen_keys,
@@ -288,62 +313,101 @@ fn validate_node(
     Ok(())
 }
 
+fn compose_key_segment(
+    parent: &SemanticKey,
+    segment: &KeySegment,
+) -> Result<SemanticKey, UiBuildError> {
+    if segment.as_str().is_empty() {
+        return Err(UiBuildError::InvalidStrategy);
+    }
+    let escaped = segment.as_str().replace('%', "%25").replace('/', "%2F");
+    let Some(scope) = segment.collection_scope() else {
+        return Err(UiBuildError::InvalidStrategy);
+    };
+
+    // Parent key 必须按字节保留：`a` 与 `a/` 是两个不同的 SemanticKey，不能在合成
+    // item key 时因为路径归一化重新折叠。根 `/` 是唯一不追加第二个分隔符的特殊值。
+    // item segment 中的 `/` 和 `%` 已转义，因此追加的最后一个 `@for-<scope>/` 边界
+    // 在嵌套列表中仍保持无歧义。
+    let mut key = if parent.0 == "/" {
+        String::from("/")
+    } else {
+        format!("{}/", parent.0)
+    };
+    key.push_str("@for-");
+    key.push_str(&scope.to_string());
+    key.push('/');
+    key.push_str(&escaped);
+    Ok(SemanticKey(key))
+}
+
 /// FocusScope 焦点图校验：边端点必须存在于本 scope 子树内，且不得落入直接子 FocusScope 内部
 /// （父图仅允许连接子 scope 的方向化 entry/exit 端口，见 008-2.9）。
-fn validate_focus_scope(
-    node: &UiNode,
-    spec: &tela_contract::FocusScopeSpec,
+///
+/// `FocusRef` 指向的是最终 `SemanticKey`，因此不能在第一阶段读取
+/// `UiNode.identity.semantic_key`。AutoPath、AutoStableIdentity 与 DSL `KeySegment` 都只在
+/// identity 分配之后才有正确答案。
+fn validate_focus_scope_references(
+    root: &UiNode,
+    keys: &[SemanticKey],
 ) -> Result<(), UiBuildError> {
-    // 收集本 scope 子树全部 key。
-    let mut subtree_keys: BTreeSet<SemanticKey> = BTreeSet::new();
-    collect_keys(node, &mut subtree_keys);
-    // 收集直接子 FocusScope 内部 key（不含子 scope 自身 key——子 scope 本身是父图合法连线目标，
-    // 见 008-2.9；仅穿越到其内部节点才报错）。
-    let mut child_scope_keys: BTreeSet<SemanticKey> = BTreeSet::new();
-    for child in &node.children {
-        if matches!(child.kind, NodeKind::FocusScope(_)) {
-            collect_keys_without_self(child, &mut child_scope_keys);
+    let mut nodes = Vec::with_capacity(keys.len());
+    let mut parents = Vec::with_capacity(keys.len());
+    collect_nodes_with_parents(root, None, &mut nodes, &mut parents);
+    debug_assert_eq!(nodes.len(), keys.len());
+
+    for (scope_index, node) in nodes.iter().enumerate() {
+        let NodeKind::FocusScope(spec) = &node.kind else {
+            continue;
+        };
+        let is_in_scope =
+            |index: usize| index == scope_index || parents[index].contains(&scope_index);
+        let subtree_keys = (0..nodes.len())
+            .filter(|index| is_in_scope(*index))
+            .map(|index| keys[index].clone())
+            .collect::<BTreeSet<_>>();
+
+        // 直接子 scope 的内部节点对父 scope 不可见；子 scope 自身仍是合法的
+        // entry/exit 连线端点。递归 descendants 都要一起封闭起来。
+        let direct_child_scopes = (0..nodes.len())
+            .filter(|index| {
+                *index != scope_index
+                    && matches!(nodes[*index].kind, NodeKind::FocusScope(_))
+                    && parents[*index].last() == Some(&scope_index)
+            })
+            .collect::<Vec<_>>();
+        let child_scope_internal_keys = (0..nodes.len())
+            .filter(|index| {
+                direct_child_scopes
+                    .iter()
+                    .any(|child_scope| parents[*index].contains(child_scope))
+            })
+            .map(|index| keys[index].clone())
+            .collect::<BTreeSet<_>>();
+
+        let check = |key: &SemanticKey| -> Result<(), UiBuildError> {
+            if child_scope_internal_keys.contains(key) {
+                return Err(UiBuildError::FocusGraphCrossScope);
+            }
+            if !subtree_keys.contains(key) {
+                return Err(UiBuildError::InvalidFocusPortBinding);
+            }
+            Ok(())
+        };
+        for edge in &spec.focus_graph.edges {
+            check(&edge.from.0)?;
+            check(&edge.to.0)?;
         }
-    }
-    let check = |key: &SemanticKey| -> Result<(), UiBuildError> {
-        if child_scope_keys.contains(key) {
-            return Err(UiBuildError::FocusGraphCrossScope);
-        }
-        if !subtree_keys.contains(key) {
-            return Err(UiBuildError::InvalidFocusPortBinding);
-        }
-        Ok(())
-    };
-    for edge in &spec.focus_graph.edges {
-        check(&edge.from.0)?;
-        check(&edge.to.0)?;
-    }
-    for port in [&spec.entry, &spec.exit] {
-        for focus_ref in [&port.up, &port.down, &port.left, &port.right]
-            .into_iter()
-            .flatten()
-        {
-            check(&focus_ref.0)?;
+        for port in [&spec.entry, &spec.exit] {
+            for focus_ref in [&port.up, &port.down, &port.left, &port.right]
+                .into_iter()
+                .flatten()
+            {
+                check(&focus_ref.0)?;
+            }
         }
     }
     Ok(())
-}
-
-/// 收集节点子树内的全部 key（含自身与后代）。
-fn collect_keys(node: &UiNode, out: &mut BTreeSet<SemanticKey>) {
-    if let Some(key) = node.identity.as_ref().and_then(|i| i.semantic_key.clone()) {
-        out.insert(key);
-    }
-    for child in &node.children {
-        collect_keys(child, out);
-    }
-}
-
-/// 收集子树 key，但不含节点自身（子 scope 内部引用判定用）。
-fn collect_keys_without_self(node: &UiNode, out: &mut BTreeSet<SemanticKey>) {
-    for child in &node.children {
-        collect_keys(child, out);
-    }
 }
 
 /// 单职责布局原语的形状和父子关系。

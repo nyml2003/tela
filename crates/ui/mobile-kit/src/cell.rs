@@ -57,6 +57,7 @@ pub struct MobileCell {
     leading: Option<UiNode>,
     trailing: Option<UiNode>,
     action_key: Option<SemanticKey>,
+    interactive: bool,
     disabled: bool,
     width: f32,
     min_height: f32,
@@ -74,6 +75,7 @@ impl MobileCell {
             leading: None,
             trailing: None,
             action_key: None,
+            interactive: false,
             disabled: false,
             width: 1.0,
             min_height: 56.0,
@@ -114,6 +116,16 @@ impl MobileCell {
     /// 为可点击单元声明 Application 路由的稳定动作键。
     pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
         self.action_key = Some(SemanticKey(action_key.into()));
+        self.interactive = true;
+        self
+    }
+
+    /// 使单元可点击但不声明自身的 `SemanticKey`。
+    ///
+    /// 这条路径供 Composition DSL 的 `<ActionTarget>` 或 `<For>` 使用：外层节点拥有
+    /// 动作锚点和跨帧身份，Kit 只提供稳定的触控/焦点语义与视觉结构。
+    pub fn interactive(mut self) -> Self {
+        self.interactive = true;
         self
     }
 
@@ -204,13 +216,13 @@ impl MobileCell {
             .into();
         if let Some(action_key) = self.action_key {
             node.identity = Some(semantic_identity(action_key.0));
-            if !self.disabled {
-                node.interact = Some(InteractConcern {
-                    clickable: true,
-                    focusable: true,
-                    ..InteractConcern::default()
-                });
-            }
+        }
+        if self.interactive && !self.disabled {
+            node.interact = Some(InteractConcern {
+                clickable: true,
+                focusable: true,
+                ..InteractConcern::default()
+            });
         }
         node
     }
@@ -375,6 +387,18 @@ mod tests {
                 .and_then(|identity| identity.semantic_key.as_ref())
                 .map(|id| id.0.as_str()),
             Some("mobile.entry.design")
+        );
+    }
+
+    #[test]
+    fn dsl_owned_interactive_cell_does_not_claim_a_competing_key() {
+        let node = MobileCell::new("设计资料").interactive().into_node();
+
+        assert!(node.identity.is_none());
+        assert!(
+            node.interact
+                .as_ref()
+                .is_some_and(|interact| interact.clickable && interact.focusable)
         );
     }
 

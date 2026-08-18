@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 use tela_contract::{
-    Color, Fill, IdentityConcern, KeyStrategy, LayoutConcern, ScrollState, SemanticKey, Size,
-    TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, UiBuildError, UiNode, Viewport,
-    VirtualListSpec, VisualConcern,
+    Color, Fill, IdentityConcern, KeySegment, KeyStrategy, LayoutConcern, ScrollState, SemanticKey,
+    Size, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, UiBuildError, UiNode,
+    Viewport, VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{IdentityAllocator, UiTree, ViewStateStore};
@@ -214,6 +214,25 @@ fn keyed_item(key: &str, width: f32, height: f32) -> UiNode {
         .into_node()
 }
 
+fn segment_key_tree(parent: &str, scope: u32, segment: &str) -> UiTree {
+    let item = LogicalContainer::group()
+        .identity(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            key_segment: Some(KeySegment::new(segment).with_collection_scope(scope)),
+            ..IdentityConcern::default()
+        })
+        .into_node();
+    let root = LogicalContainer::group()
+        .identity(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            semantic_key: Some(SemanticKey(parent.to_owned())),
+            ..IdentityConcern::default()
+        })
+        .children([item])
+        .into_node();
+    UiTree::new(root).expect("a scoped KeySegment tree must validate")
+}
+
 #[test]
 fn virtual_list_missing_semantic_id_rejected() {
     // item 缺显式 semantic-id → 构建期报错。
@@ -225,6 +244,36 @@ fn virtual_list_missing_semantic_id_rejected() {
     // 带 semantic-id → 构建成功。
     let list = virtual_list(vec![keyed_item("item-1", 100.0, 30.0)]);
     assert!(UiTree::new(list).is_ok());
+}
+
+#[test]
+fn scoped_key_segments_preserve_parent_bytes_and_encode_unambiguously() {
+    let slash = segment_key_tree("/", 1, "a/b").keys()[1].clone();
+    let escaped = segment_key_tree("/", 1, "a%2Fb").keys()[1].clone();
+    let first_scope = segment_key_tree("/", 1, "23").keys()[1].clone();
+    let second_scope = segment_key_tree("/", 12, "3").keys()[1].clone();
+    let parent_without_slash = segment_key_tree("parent", 0, "item").keys()[1].clone();
+    let parent_with_slash = segment_key_tree("parent/", 0, "item").keys()[1].clone();
+
+    assert_eq!(slash, SemanticKey("/@for-1/a%2Fb".to_owned()));
+    assert_eq!(escaped, SemanticKey("/@for-1/a%252Fb".to_owned()));
+    assert_ne!(slash, escaped, "segment escaping must remain injective");
+    assert_ne!(
+        first_scope, second_scope,
+        "scope/item boundaries must remain injective"
+    );
+    assert_eq!(
+        parent_without_slash,
+        SemanticKey("parent/@for-0/item".to_owned())
+    );
+    assert_eq!(
+        parent_with_slash,
+        SemanticKey("parent//@for-0/item".to_owned())
+    );
+    assert_ne!(
+        parent_without_slash, parent_with_slash,
+        "parent SemanticKey bytes must not be normalized during composition"
+    );
 }
 
 #[test]
@@ -343,4 +392,28 @@ fn position_unchanged_content_changed_gets_new_id() {
     let old = tree.keys()[1].clone();
     tree = UiTree::new_with_allocator(stable_scope(vec![text("B")]), &mut allocator).unwrap();
     assert_ne!(tree.keys()[1], old, "内容变化 → 新 id");
+}
+
+#[test]
+fn failed_tree_build_does_not_pollute_the_identity_allocator() {
+    let mut allocator = IdentityAllocator::new();
+    let first = UiTree::new_with_allocator(stable_scope(vec![text("A")]), &mut allocator).unwrap();
+    let expected_key = first.keys()[1].clone();
+
+    // 第一个子节点已经触发 stable-id 分配，第二个节点才因策略非法失败。失败构建不得
+    // 让这个中间分配占用下一次成功构建的身份。
+    let invalid_child = LogicalContainer::group()
+        .identity(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            ..IdentityConcern::default()
+        })
+        .into_node();
+    assert!(matches!(
+        UiTree::new_with_allocator(stable_scope(vec![text("A"), invalid_child]), &mut allocator),
+        Err(UiBuildError::InvalidStrategy)
+    ));
+
+    let recovered = UiTree::new_with_allocator(stable_scope(vec![text("A")]), &mut allocator)
+        .expect("failed tree must not alter the caller allocator");
+    assert_eq!(recovered.keys()[1], expected_key);
 }

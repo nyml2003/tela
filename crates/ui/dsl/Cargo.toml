@@ -1,0 +1,17 @@
+[package]
+name = "tela-ui-dsl"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela application composition runtime: explicit context, watches, actions, and DSL support"
+
+[dependencies]
+tela-contract = { path = "../../kernel/contract" }
+tela-core = { path = "../../kernel/core" }
+tela-ui-dsl-macros = { path = "../dsl-macros" }
+
+[dev-dependencies]
+trybuild = "1"
+
+[lints]
+workspace = true

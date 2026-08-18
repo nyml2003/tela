@@ -1,0 +1,18 @@
+[package]
+name = "tela-ui-dsl-macros"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Procedural macros for Tela application composition DSL"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+proc-macro-crate = "3"
+quote = "1"
+syn = { version = "2", features = ["extra-traits", "full", "visit"] }
+
+[lints]
+workspace = true

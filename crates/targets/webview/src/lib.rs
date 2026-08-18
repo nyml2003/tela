@@ -14,8 +14,8 @@ use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use tela_app_abi::decode_frame;
 use tela_app_abi::{
-    ABI_VERSION, AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, AppStatus,
-    decode_status, encode_event,
+    ABI_VERSION, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
+    AppPointerPhase, AppStatus, decode_status, encode_event,
 };
 use tela_bundle::{BundleArchive, DevelopmentManifest, read_archive, sha256_hex};
 use wasm_bindgen::prelude::*;
@@ -114,6 +114,14 @@ impl ValidatedBundle {
 
 #[wasm_bindgen]
 impl WebAppStatus {
+    /// Frame identity eligible for input after the browser has actually presented it.
+    ///
+    /// `undefined` on the JavaScript side means the guest has not published an interactive frame.
+    #[wasm_bindgen(getter)]
+    pub fn frame_token(&self) -> Option<u64> {
+        self.status.frame_token.map(AppFrameToken::get)
+    }
+
     /// Cursor request encoded as `0 = default`, `1 = text`, `2 = pointer`.
     #[wasm_bindgen(getter)]
     pub fn cursor(&self) -> u8 {
@@ -155,6 +163,7 @@ pub fn event_viewport(width: f32, height: f32) -> Result<Vec<u8>, JsValue> {
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn event_pointer(
+    source_frame_token: u64,
     pointer_id: u64,
     kind: u8,
     phase: u8,
@@ -187,73 +196,80 @@ pub fn event_pointer(
             )));
         }
     };
-    encode_host_event(AppEvent::Pointer(AppPointerEvent::new(
-        pointer_id,
-        kind,
-        phase,
-        x,
-        y,
-        buttons,
-        timestamp_micros,
-        delta_x,
-        delta_y,
-    )))
+    encode_frame_input(
+        source_frame_token,
+        AppFrameInput::Pointer(AppPointerEvent::new(
+            pointer_id,
+            kind,
+            phase,
+            x,
+            y,
+            buttons,
+            timestamp_micros,
+            delta_x,
+            delta_y,
+        )),
+    )
 }
 
 /// Encodes a normalized physical-key event for the guest keymap.
 #[wasm_bindgen]
 pub fn event_key_down(
+    source_frame_token: u64,
     physical_key: u16,
     modifier_bits: u8,
     repeat: bool,
 ) -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::KeyDown {
-        physical_key,
-        modifier_bits,
-        repeat,
-    })
+    encode_frame_input(
+        source_frame_token,
+        AppFrameInput::KeyDown {
+            physical_key,
+            modifier_bits,
+            repeat,
+        },
+    )
 }
 
 /// Encodes a controlled text-input value replacement for the guest.
 #[wasm_bindgen]
-pub fn event_set_input_value(value: String) -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::SetInputValue(value))
+pub fn event_set_input_value(source_frame_token: u64, value: String) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::SetInputValue(value))
 }
 
 /// Encodes a platform text-channel focus event for the guest.
 #[wasm_bindgen]
-pub fn event_input_focus() -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::InputFocus)
+pub fn event_input_focus(source_frame_token: u64) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::InputFocus)
 }
 
 /// Encodes a platform text-channel blur event for the guest.
 #[wasm_bindgen]
-pub fn event_input_blur() -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::InputBlur)
+pub fn event_input_blur(source_frame_token: u64) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::InputBlur)
 }
 
 /// Encodes an explicit text-input confirmation for the guest.
 #[wasm_bindgen]
-pub fn event_input_enter() -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::InputEnter)
+pub fn event_input_enter(source_frame_token: u64) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::InputEnter)
 }
 
 /// Encodes an explicit text-input cancellation for the guest.
 #[wasm_bindgen]
-pub fn event_input_cancel() -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::InputCancel)
+pub fn event_input_cancel(source_frame_token: u64) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::InputCancel)
 }
 
 /// Encodes an IME composition-start marker for the guest.
 #[wasm_bindgen]
-pub fn event_input_composition_start() -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::InputCompositionStart)
+pub fn event_input_composition_start(source_frame_token: u64) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::InputCompositionStart)
 }
 
 /// Encodes an IME composition-end marker for the guest.
 #[wasm_bindgen]
-pub fn event_input_composition_end() -> Result<Vec<u8>, JsValue> {
-    encode_host_event(AppEvent::InputCompositionEnd)
+pub fn event_input_composition_end(source_frame_token: u64) -> Result<Vec<u8>, JsValue> {
+    encode_frame_input(source_frame_token, AppFrameInput::InputCompositionEnd)
 }
 
 /// Encodes a validated-at-guest runtime keymap replacement request.
@@ -448,6 +464,26 @@ fn encode_host_event(event: AppEvent) -> Result<Vec<u8>, JsValue> {
     encode_event(&event).map_err(|error| js_error(format!("encode host event: {error}")))
 }
 
+fn encode_frame_input(
+    raw_source_frame_token: u64,
+    input: AppFrameInput,
+) -> Result<Vec<u8>, JsValue> {
+    let event = frame_input_event(raw_source_frame_token, input).map_err(js_error)?;
+    encode_host_event(event)
+}
+
+fn frame_input_event(
+    raw_source_frame_token: u64,
+    input: AppFrameInput,
+) -> Result<AppEvent, String> {
+    let source_frame_token = AppFrameToken::new(raw_source_frame_token)
+        .ok_or_else(|| "frame-owned input requires a non-zero presented frame token".to_owned())?;
+    Ok(AppEvent::FrameInput {
+        source_frame_token,
+        input,
+    })
+}
+
 fn js_error(message: impl AsRef<str>) -> JsValue {
     JsValue::from_str(message.as_ref())
 }
@@ -496,6 +532,7 @@ fn validate_development_bundle_impl(
 mod tests {
     use std::collections::BTreeMap;
 
+    use tela_app_abi::decode_event;
     use tela_bundle::{BUNDLE_FORMAT_VERSION, BundleInput, build_archive, sha256_hex};
 
     use super::*;
@@ -540,5 +577,19 @@ mod tests {
         let mut corrupt = archive;
         corrupt.push(0);
         assert!(validate_development_bundle_impl(&index, &corrupt).is_err());
+    }
+
+    #[test]
+    fn frame_input_encoder_requires_a_non_zero_presented_token() {
+        let event = frame_input_event(7, AppFrameInput::InputCancel).expect("construct input");
+        let packet = tela_app_abi::encode_event(&event).expect("encode input");
+        assert_eq!(
+            decode_event(&packet).expect("decode input"),
+            AppEvent::FrameInput {
+                source_frame_token: AppFrameToken::new(7).expect("non-zero token"),
+                input: AppFrameInput::InputCancel,
+            }
+        );
+        assert!(frame_input_event(0, AppFrameInput::InputCancel).is_err());
     }
 }

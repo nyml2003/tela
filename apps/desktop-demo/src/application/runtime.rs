@@ -12,9 +12,10 @@ use tela_core::{
     DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore, restore_focus, save_focus,
 };
 use tela_desktop_ui_kit::LocalStateRuntime;
+use tela_ui_dsl::{ComponentRuntime, Signal};
 use tela_ui_headless::{
-    ActionTrigger, ComponentPartPath, ComponentPartRole, ComponentRuntime, EventFrame,
-    EventRegistry, HeadlessEvent, RoutedEvent, Signal, components,
+    ActionTrigger, ComponentPartPath, ComponentPartRole, EventFrame, EventRegistry, HeadlessEvent,
+    RoutedEvent, components,
 };
 
 use super::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
@@ -74,7 +75,7 @@ impl App {
     pub fn new(resources: &'static dyn UiResources) -> Self {
         let revision = Signal::new(0);
         let mut component_runtime = ComponentRuntime::new();
-        component_runtime.watch("app.shell", &revision);
+        component_runtime.watch(SemanticKey("app.shell".to_owned()), &revision);
         Self {
             resources,
             model: FileManagerModel::sample(),
@@ -116,6 +117,10 @@ impl App {
     }
 
     pub fn ensure_frame(&mut self) -> bool {
+        // Host 开始消费这次逻辑帧，允许接下来的 Signal 写入重新请求一次唤醒。
+        // 当前 desktop guest 采用轮询，但必须遵守同一协议，避免未来安装
+        // FrameInvalidator 后把第二次变更永久折叠在已确认的旧请求里。
+        self.component_runtime.begin_frame();
         if !self.component_runtime.take_dirty().is_empty() {
             self.invalidate_frame();
         }
@@ -226,7 +231,7 @@ impl App {
     pub fn frame_trace(&self) -> &[u8] {
         &self.frame_trace
     }
-    #[cfg(all(feature = "app-runtime", target_arch = "wasm32"))]
+    #[cfg(feature = "app-runtime")]
     pub fn pointer_cursor(&self) -> u32 {
         if self.input_is_focused() {
             1

@@ -360,6 +360,7 @@ fn action_identity(action_key: SemanticKey) -> IdentityConcern {
     IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(action_key),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     }
 }

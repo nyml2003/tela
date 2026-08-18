@@ -41,7 +41,7 @@ pub use icon::{
     IconKey, IconName, IconOpticalMetrics, IconProvider, IconRequest, IconResolveError, IconVisual,
     UiResourceSet, UiResources,
 };
-pub use identity::{IdentityConcern, KeyStrategy, SemanticKey, UpdateMode};
+pub use identity::{IdentityConcern, KeySegment, KeyStrategy, SemanticKey, UpdateMode};
 pub use interaction::{
     BindId, ClipboardOp, FocusAppearance, FocusDirection, GestureAxis, GestureConfig, GestureEvent,
     GestureKind, GesturePhase, HostPorts, ImeUpdate, InputEvent, KeyCombo, KeyState,

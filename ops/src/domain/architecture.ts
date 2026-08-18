@@ -42,6 +42,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-contract',
     'tela-core',
     'tela-desktop-ui-kit',
+    'tela-ui-dsl',
     'tela-ui-headless',
     'tela-ui-foundation',
   ],
@@ -64,7 +65,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-contract',
     'tela-core',
     'tela-mobile-ui-kit',
-    'tela-ui-headless',
+    'tela-ui-dsl',
     'tela-ui-foundation',
   ],
   'tela-mobile-ui-kit': [
@@ -161,6 +162,8 @@ const ALLOWED_NORMAL: AllowedDeps = {
   ],
   'tela-text-resources': ['ab_glyph', 'tela-contract', 'tela-font-resources'],
   'tela-ui-headless': ['tela-contract', 'tela-core'],
+  'tela-ui-dsl': ['tela-contract', 'tela-core', 'tela-ui-dsl-macros'],
+  'tela-ui-dsl-macros': ['proc-macro-crate', 'proc-macro2', 'quote', 'syn'],
   'tela-ui-foundation': ['tela-contract', 'tela-core'],
 };
 
@@ -168,9 +171,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
 const ALLOWED_DEV: AllowedDeps = {
   'tela-desktop-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-desktop-runtime': ['serde_json', 'tela-app-abi'],
-  'tela-mobile-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
+  'tela-mobile-demo': [
+    'tela-icon-resources',
+    'tela-render-raster',
+    'tela-text-resources',
+    'tela-ui-headless',
+  ],
   'tela-render-raster': ['tela-core'],
   'tela-render-wgpu': ['naga', 'pollster'],
+  'tela-ui-dsl': ['trybuild'],
 };
 
 const TARGET_CRATES = new Set([
@@ -211,6 +220,7 @@ const UI_CRATES = new Set([
   'tela-desktop-ui-kit',
   'tela-mobile-ui-kit',
 ]);
+const COMPOSITION_CRATES = new Set(['tela-ui-dsl', 'tela-ui-dsl-macros']);
 
 const MANAGED_CRATES = new Set([
   ...ZERO_DEP_CRATES,
@@ -295,8 +305,31 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
       reportForbiddenDependencies(
         violations,
         info,
-        new Set([...RENDERER_CRATES, ...DELIVERY_CRATES, ...TARGET_CRATES, ...APPLICATION_CRATES, ...PRODUCT_CRATES]),
-        'UI Capability 禁止依赖 Renderer、Delivery、Target、Application 或 Product',
+        new Set([
+          ...COMPOSITION_CRATES,
+          ...RENDERER_CRATES,
+          ...DELIVERY_CRATES,
+          ...TARGET_CRATES,
+          ...APPLICATION_CRATES,
+          ...PRODUCT_CRATES,
+        ]),
+        'UI Capability 禁止依赖 Composition、Renderer、Delivery、Target、Application 或 Product',
+      );
+    }
+
+    if (COMPOSITION_CRATES.has(info.name)) {
+      reportForbiddenDependencies(
+        violations,
+        info,
+        new Set([
+          ...UI_CRATES,
+          ...PRESENTATION_CRATES,
+          ...DELIVERY_CRATES,
+          ...TARGET_CRATES,
+          ...APPLICATION_CRATES,
+          ...PRODUCT_CRATES,
+        ]),
+        'Application Composition runtime 禁止依赖 UI、Presentation、Delivery、Target、Application 或 Product',
       );
     }
 
@@ -306,12 +339,13 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
         info,
         new Set([
           ...UI_CRATES,
+          ...COMPOSITION_CRATES,
           ...APPLICATION_CRATES,
           ...DELIVERY_CRATES,
           ...TARGET_CRATES,
           ...PRODUCT_CRATES,
         ]),
-        'Presentation 禁止依赖 UI、Application、Delivery、Target 或 Product',
+        'Presentation 禁止依赖 UI、Composition、Application、Delivery、Target 或 Product',
       );
     }
 
@@ -319,8 +353,13 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
       reportForbiddenDependencies(
         violations,
         info,
-        new Set([...TARGET_CRATES, ...APPLICATION_CRATES, ...PRODUCT_CRATES]),
-        'Delivery 禁止依赖 Target、Application 或 Product',
+        new Set([
+          ...TARGET_CRATES,
+          ...COMPOSITION_CRATES,
+          ...APPLICATION_CRATES,
+          ...PRODUCT_CRATES,
+        ]),
+        'Delivery 禁止依赖 Composition、Target、Application 或 Product',
       );
     }
 
@@ -328,8 +367,8 @@ export function checkArchitecture(crates: readonly CrateInfo[]): ArchViolation[]
       reportForbiddenDependencies(
         violations,
         info,
-        new Set([...APPLICATION_CRATES, ...PRODUCT_CRATES]),
-        'Target 只承载本地宿主，禁止静态依赖 Application 或 Product',
+        new Set([...COMPOSITION_CRATES, ...APPLICATION_CRATES, ...PRODUCT_CRATES]),
+        'Target 只承载本地宿主，禁止静态依赖 Application 或 Product，也不得依赖 Composition',
       );
       const foreignTarget = info.deps.find(
         (dep) => TARGET_CRATES.has(dep.name) && dep.name !== info.name,

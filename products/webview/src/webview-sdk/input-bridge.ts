@@ -33,12 +33,14 @@ export interface InputBridgeOptions {
   bindings: TelaWebviewBindings;
   dispatch(packet: Uint8Array): boolean;
   status(): WebAppStatus;
+  /** Token of the frame the browser last presented, never merely the latest guest publication. */
+  presentedFrameToken(): bigint | undefined;
   viewport(): { width: number; height: number };
 }
 
 /** Installs pointer, physical keyboard and IME bridges for one active WebView canvas. */
 export function installInputBridge(options: InputBridgeOptions): InputBridgeHandle {
-  const { canvas, bindings, dispatch, status, viewport } = options;
+  const { canvas, bindings, dispatch, status, presentedFrameToken, viewport } = options;
   let composing = false;
   let closed = false;
 
@@ -95,6 +97,10 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
     synchronize();
     return consumed;
   };
+  const sendFrameInput = (encode: (sourceFrameToken: bigint) => Uint8Array): boolean => {
+    const sourceFrameToken = presentedFrameToken();
+    return sourceFrameToken === undefined ? false : send(encode(sourceFrameToken));
+  };
   const pointerKind = (pointerType: string): number => {
     if (pointerType === 'touch') return 1;
     if (pointerType === 'pen') return 2;
@@ -108,7 +114,8 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
     position = point(event),
     deltaX = 0,
     deltaY = 0,
-  ): boolean => send(bindings.event_pointer(
+  ): boolean => sendFrameInput((sourceFrameToken) => bindings.event_pointer(
+    sourceFrameToken,
     pointerId(event.pointerId),
     pointerKind(event.pointerType),
     phase,
@@ -148,7 +155,8 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
         ? logical.height
         : 1;
     const bounds = canvas.getBoundingClientRect();
-    send(bindings.event_pointer(
+    sendFrameInput((sourceFrameToken) => bindings.event_pointer(
+      sourceFrameToken,
       0n,
       0,
       4,
@@ -164,46 +172,56 @@ export function installInputBridge(options: InputBridgeOptions): InputBridgeHand
     if (event.isComposing || status().input_focused) return;
     const physicalKey = PHYSICAL_KEY_CODES[event.code];
     if (physicalKey === undefined) return;
-    if (send(bindings.event_key_down(physicalKey, modifierBits(event), event.repeat))) {
+    if (sendFrameInput((sourceFrameToken) => bindings.event_key_down(
+      sourceFrameToken,
+      physicalKey,
+      modifierBits(event),
+      event.repeat,
+    ))) {
       event.preventDefault();
     }
   };
   const onEditorFocus = () => {
-    send(bindings.event_input_focus());
+    sendFrameInput((sourceFrameToken) => bindings.event_input_focus(sourceFrameToken));
   };
   const onEditorInput = () => {
-    send(bindings.event_set_input_value(editor.value));
+    sendFrameInput((sourceFrameToken) => bindings.event_set_input_value(sourceFrameToken, editor.value));
   };
   const onCompositionStart = () => {
     composing = true;
-    send(bindings.event_input_composition_start());
+    sendFrameInput((sourceFrameToken) => bindings.event_input_composition_start(sourceFrameToken));
   };
   const onCompositionEnd = () => {
-    send(bindings.event_input_composition_end());
+    sendFrameInput((sourceFrameToken) => bindings.event_input_composition_end(sourceFrameToken));
     composing = false;
     synchronize();
   };
   const onEditorKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'Enter' && !event.isComposing) {
       event.preventDefault();
-      send(bindings.event_input_enter());
+      sendFrameInput((sourceFrameToken) => bindings.event_input_enter(sourceFrameToken));
       return;
     }
     if (event.key === 'Escape') {
       event.preventDefault();
-      send(bindings.event_input_cancel());
+      sendFrameInput((sourceFrameToken) => bindings.event_input_cancel(sourceFrameToken));
       return;
     }
     if (event.code !== 'Tab' || event.isComposing) return;
     const physicalKey = PHYSICAL_KEY_CODES[event.code];
-    if (physicalKey !== undefined && send(bindings.event_key_down(physicalKey, modifierBits(event), event.repeat))) {
+    if (physicalKey !== undefined && sendFrameInput((sourceFrameToken) => bindings.event_key_down(
+      sourceFrameToken,
+      physicalKey,
+      modifierBits(event),
+      event.repeat,
+    ))) {
       event.preventDefault();
       synchronize(true);
     }
   };
   const onEditorBlur = () => {
     composing = false;
-    send(bindings.event_input_blur());
+    sendFrameInput((sourceFrameToken) => bindings.event_input_blur(sourceFrameToken));
   };
 
   canvas.addEventListener('pointerdown', onPointerDown);

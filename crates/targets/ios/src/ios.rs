@@ -36,6 +36,9 @@ struct IosHost<A: IosMobileSession> {
     app: A,
     text: ControlledTextInput,
     touch: TouchAdapter,
+    /// Provenance of the last frame Metal actually presented. A newer logical frame is not
+    /// enough: input can still arrive from an older drawable while a redraw is queued.
+    presented_frame_token: Option<u64>,
 }
 
 impl<A: IosMobileSession> IosHost<A> {
@@ -46,6 +49,7 @@ impl<A: IosMobileSession> IosHost<A> {
             app,
             text: ControlledTextInput::default(),
             touch: TouchAdapter::new(),
+            presented_frame_token: None,
         }
     }
 
@@ -78,9 +82,15 @@ impl<A: IosMobileSession> IosHost<A> {
             return;
         }
         let scale = window.scale_factor().max(1.0) as f32;
-        self.app
+        let viewport_changed = self
+            .app
             .set_viewport(size.width as f32 / scale, size.height as f32 / scale);
-        self.app.set_safe_area(safe_area::for_window(&window));
+        let safe_area_changed = self.app.set_safe_area(safe_area::for_window(&window));
+        if viewport_changed || safe_area_changed {
+            // Physical coordinates from the previous drawable no longer have a valid logical
+            // viewport. Do not route input until Metal presents the replacement frame.
+            self.presented_frame_token = None;
+        }
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.resize(size.width, size.height);
         }
@@ -119,8 +129,11 @@ impl<A: IosMobileSession> IosHost<A> {
             .unwrap_or(1.0);
         let x = logical_coordinate(touch.location.x, scale);
         let y = logical_coordinate(touch.location.y, scale);
-        self.app
-            .dispatch_pointer(self.touch.handle(touch.id, phase, x, y));
+        let pointer = self.touch.handle(touch.id, phase, x, y);
+        let Some(frame_token) = self.presented_frame_token else {
+            return;
+        };
+        self.app.dispatch_pointer(frame_token, pointer);
         self.sync_text_channel();
         self.request_redraw();
     }
@@ -135,26 +148,29 @@ impl<A: IosMobileSession> IosHost<A> {
         if state != ElementState::Pressed {
             return;
         }
+        let Some(frame_token) = self.presented_frame_token else {
+            return;
+        };
         match logical_key {
             Key::Named(NamedKey::Backspace) => {
                 if let Some(value) = self.text.delete_backward() {
-                    self.app.set_input_value(value);
+                    self.app.set_input_value(frame_token, value);
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                self.app.input_enter();
+                self.app.input_enter(frame_token);
             }
             Key::Named(NamedKey::Escape) => {
-                self.app.dispatch_key(0x29);
+                self.app.dispatch_key(frame_token, 0x29);
             }
             _ => {
                 if let Some(text) = text.as_ref().map(|text| text.as_str()) {
                     if text == "\n" || text == "\r" {
-                        self.app.input_enter();
+                        self.app.input_enter(frame_token);
                     } else if !text.chars().all(char::is_control)
                         && let Some(value) = self.text.append(text)
                     {
-                        self.app.set_input_value(value);
+                        self.app.set_input_value(frame_token, value);
                     }
                 }
             }
@@ -164,13 +180,15 @@ impl<A: IosMobileSession> IosHost<A> {
     }
 
     fn redraw(&mut self) {
-        let frame = self.app.frame().clone();
+        let (frame, frame_token) = self.app.frame();
+        let frame = frame.clone();
         let outcome = match self.gpu.as_mut() {
             Some(gpu) => gpu.render(&frame),
             None => return,
         };
         match outcome {
             RenderOutcome::Presented { suboptimal } => {
+                self.presented_frame_token = Some(frame_token);
                 if suboptimal {
                     if let Some(gpu) = self.gpu.as_mut() {
                         gpu.reconfigure();
@@ -179,12 +197,14 @@ impl<A: IosMobileSession> IosHost<A> {
                 }
             }
             RenderOutcome::Outdated => {
+                self.presented_frame_token = None;
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.reconfigure();
                 }
                 self.request_redraw();
             }
             RenderOutcome::Lost => {
+                self.presented_frame_token = None;
                 let Some(window) = self.window.as_ref().cloned() else {
                     return;
                 };
@@ -199,6 +219,7 @@ impl<A: IosMobileSession> IosHost<A> {
             RenderOutcome::Timeout => self.request_redraw(),
             RenderOutcome::Occluded => {}
             RenderOutcome::Validation => {
+                self.presented_frame_token = None;
                 self.fail("Metal surface validation failed while acquiring a frame")
             }
         }
@@ -214,10 +235,16 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        let frame_token = self.presented_frame_token;
         for event in self.touch.cancel_all() {
-            self.app.dispatch_pointer(event);
+            if let Some(frame_token) = frame_token {
+                self.app.dispatch_pointer(frame_token, event);
+            }
         }
-        self.app.input_blur();
+        if let Some(frame_token) = frame_token {
+            self.app.input_blur(frame_token);
+        }
+        self.presented_frame_token = None;
         self.sync_text_channel();
         // UIKit may invalidate its Metal drawable in the background. The next `resumed` callback
         // retains the business session but creates a fresh surface and device.
@@ -239,12 +266,16 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
             WindowEvent::Touch(touch) => self.handle_touch(touch),
             WindowEvent::KeyboardInput { event, .. } => self.handle_keyboard(event),
             WindowEvent::Ime(_) => {
-                self.app.composition_changed();
+                if let Some(frame_token) = self.presented_frame_token {
+                    self.app.composition_changed(frame_token);
+                }
                 self.sync_text_channel();
                 self.request_redraw();
             }
             WindowEvent::Focused(false) => {
-                self.app.input_blur();
+                if let Some(frame_token) = self.presented_frame_token {
+                    self.app.input_blur(frame_token);
+                }
                 self.sync_text_channel();
                 self.request_redraw();
             }
@@ -254,6 +285,7 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.presented_frame_token = None;
         self.gpu = None;
         self.window = None;
     }

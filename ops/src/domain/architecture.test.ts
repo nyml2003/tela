@@ -98,6 +98,36 @@ test('Headless 是 UI Capability 的独立语义层，不能越过 Kernel 认识
   assert.ok(violations.some((violation) => /tela-ui-foundation/.test(violation.message)));
 });
 
+test('Composition runtime 只依赖 Kernel 与自己的 macro helper', () => {
+  const allowed = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-ui-dsl-macros', [
+      ['proc-macro-crate', 'normal'],
+      ['proc-macro2', 'normal'],
+      ['quote', 'normal'],
+      ['syn', 'normal'],
+    ]),
+    crate('tela-ui-dsl', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-ui-dsl-macros', 'normal'],
+      ['trybuild', 'dev'],
+    ]),
+  ]);
+  assert.deepEqual(allowed, []);
+
+  const violations = checkArchitecture([
+    ...zeroDependencies(),
+    crate('tela-ui-dsl', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-ui-headless', 'normal'],
+      ['tela-target-ios', 'normal'],
+    ]),
+  ]);
+  assert.ok(violations.some((violation) => /Composition runtime/.test(violation.message)));
+});
+
 test('Presentation 通过 Contract 协议提供资源，不能反向依赖 UI kit', () => {
   const violations = checkArchitecture([
     ...zeroDependencies(),
@@ -118,6 +148,7 @@ test('Application 可在测试中注入资源，但生产闭包不能静态耦�
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
       ['tela-mobile-ui-kit', 'normal'],
+      ['tela-ui-dsl', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
       ['tela-render-raster', 'dev'],
@@ -226,12 +257,25 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['zip', 'normal'],
     ]),
     crate('tela-core', [['tela-contract', 'normal']]),
+    crate('tela-ui-dsl-macros', [
+      ['proc-macro-crate', 'normal'],
+      ['proc-macro2', 'normal'],
+      ['quote', 'normal'],
+      ['syn', 'normal'],
+    ]),
+    crate('tela-ui-dsl', [
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-ui-dsl-macros', 'normal'],
+      ['trybuild', 'dev'],
+    ]),
     crate('tela-desktop-demo', [
       ['serde', 'normal'],
       ['serde_json', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
       ['tela-desktop-ui-kit', 'normal'],
+      ['tela-ui-dsl', 'normal'],
       ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
@@ -265,11 +309,12 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
       ['tela-mobile-ui-kit', 'normal'],
-      ['tela-ui-headless', 'normal'],
+      ['tela-ui-dsl', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
       ['tela-render-raster', 'dev'],
       ['tela-text-resources', 'dev'],
+      ['tela-ui-headless', 'dev'],
     ]),
     crate('tela-mobile-ui-kit', [
       ['tela-contract', 'normal'],

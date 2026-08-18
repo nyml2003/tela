@@ -127,6 +127,7 @@ fn decorate_root(root: &ComponentRoot, body: UiNode, theme: DesktopTheme) -> UiN
         .identity(IdentityConcern {
             key_strategy: KeyStrategy::SemanticId,
             semantic_key: Some(root_key(root, "desktop")),
+            key_segment: None,
             update_mode: UpdateMode::Dirty,
         })
         .into()
@@ -286,6 +287,7 @@ fn decorate_part(
         .identity(IdentityConcern {
             key_strategy: KeyStrategy::SemanticId,
             semantic_key: Some(part.key().clone()),
+            key_segment: None,
             update_mode: UpdateMode::Dirty,
         })
         .into();
@@ -980,7 +982,7 @@ mod tests {
             }
         }
         assert_eq!(
-            hash, 1_046_346_486_918_880_925,
+            hash, 4_370_154_311_314_795_047,
             "update the reference intentionally after visual review"
         );
     }

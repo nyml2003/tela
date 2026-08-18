@@ -66,6 +66,30 @@ impl DefaultApplicationProfile {
         )
     }
 
+    /// 以纯方式解析一个尚未发布的 Host 候选帧。
+    ///
+    /// 该入口不读取或写入内部 dirty layout cache，因此 Host 可以将 `ViewStateStore` 的
+    /// candidate 与 Application / DSL 的候选 tree 一起 preflight；任一失败只需丢弃候选
+    /// state，不会污染上一成功帧的 cache。成功后 Host 可选择在未来帧继续使用
+    /// [`Self::resolve`] 的缓存路径，缓存本身始终只是同一纯布局函数的优化。
+    pub fn resolve_candidate(
+        &self,
+        tree: &UiTree,
+        viewport: Viewport,
+        text_measurer: &(impl TextMeasurer + ?Sized),
+        scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+        view_state: &ViewStateStore,
+        focus_appearance: Option<FocusAppearance>,
+    ) -> Result<UiFrame, UiLayoutError> {
+        tree.resolve_with_focus(
+            viewport,
+            text_measurer,
+            scroll_inputs,
+            view_state.current_focus_key(),
+            focus_appearance,
+        )
+    }
+
     /// Dispatches an input event through the built-in hit-testing and focus rules.
     pub fn dispatch_input(
         &self,
@@ -163,5 +187,31 @@ mod tests {
             .resolve(&tree, viewport, &FixedText, &scrolls, &state, appearance)
             .expect("profile frame");
         assert_eq!(selected, direct);
+    }
+
+    #[test]
+    fn candidate_resolve_matches_the_published_profile_frame_without_needing_cache_mutation() {
+        let tree = tree();
+        let viewport = Viewport {
+            width: 320.0,
+            height: 240.0,
+        };
+        let scrolls = HashMap::new();
+        let state = ViewStateStore::new();
+        let appearance = Some(FocusAppearance {
+            color: Color::BLUE,
+            width: 2.0,
+            inset: 1.0,
+        });
+        let mut profile = DefaultApplicationProfile::new();
+
+        let candidate = profile
+            .resolve_candidate(&tree, viewport, &FixedText, &scrolls, &state, appearance)
+            .expect("candidate frame");
+        let published = profile
+            .resolve(&tree, viewport, &FixedText, &scrolls, &state, appearance)
+            .expect("published frame");
+
+        assert_eq!(candidate, published);
     }
 }

@@ -1,0 +1,5 @@
+error: DSL action attributes cannot contain closures; use a function path or with_context(value, mapper)
+ --> tests/ui/action_attributes_reject_closures.rs:6:31
+  |
+6 |         <ActionTarget action={|| ()}>
+  |                               ^

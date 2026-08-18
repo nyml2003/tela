@@ -12,6 +12,8 @@ export interface ValidatedBundle {
 }
 
 export interface WebAppStatus {
+  /** Guest frame identity. A browser host may use it only after a successful present. */
+  readonly frame_token: bigint | undefined;
   readonly cursor: number;
   readonly input_focused: boolean;
   readonly input_value: string;
@@ -24,6 +26,7 @@ export interface TelaWebviewBindings {
   decode_app_status(bytes: Uint8Array): WebAppStatus;
   event_viewport(width: number, height: number): Uint8Array;
   event_pointer(
+    sourceFrameToken: bigint,
     pointerId: bigint,
     kind: number,
     phase: number,
@@ -34,14 +37,14 @@ export interface TelaWebviewBindings {
     deltaX: number,
     deltaY: number,
   ): Uint8Array;
-  event_key_down(physicalKey: number, modifierBits: number, repeat: boolean): Uint8Array;
-  event_set_input_value(value: string): Uint8Array;
-  event_input_focus(): Uint8Array;
-  event_input_blur(): Uint8Array;
-  event_input_enter(): Uint8Array;
-  event_input_cancel(): Uint8Array;
-  event_input_composition_start(): Uint8Array;
-  event_input_composition_end(): Uint8Array;
+  event_key_down(sourceFrameToken: bigint, physicalKey: number, modifierBits: number, repeat: boolean): Uint8Array;
+  event_set_input_value(sourceFrameToken: bigint, value: string): Uint8Array;
+  event_input_focus(sourceFrameToken: bigint): Uint8Array;
+  event_input_blur(sourceFrameToken: bigint): Uint8Array;
+  event_input_enter(sourceFrameToken: bigint): Uint8Array;
+  event_input_cancel(sourceFrameToken: bigint): Uint8Array;
+  event_input_composition_start(sourceFrameToken: bigint): Uint8Array;
+  event_input_composition_end(sourceFrameToken: bigint): Uint8Array;
   event_replace_keymap_json(json: string): Uint8Array;
   start_gpu(canvas: HTMLCanvasElement): Promise<void>;
   render_gpu(framePacket: Uint8Array): boolean;

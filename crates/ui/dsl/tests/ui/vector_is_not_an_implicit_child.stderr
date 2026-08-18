@@ -1,0 +1,31 @@
+error[E0277]: the trait bound `Vec<tela_ui_dsl::__private::UiNode>: IntoViewChild<_>` is not satisfied
+  --> tests/ui/vector_is_not_an_implicit_child.rs:9:15
+   |
+ 7 |       let _ = ui!(build {
+   |  _____________-
+ 8 | |         <Column>
+ 9 | |             { nodes }
+   | |               ^^^^^ the trait `IntoViewChild<_>` is not implemented for `Vec<tela_ui_dsl::__private::UiNode>`
+10 | |         </Column>
+11 | |     });
+   | |______- required by a bound introduced by this call
+   |
+help: the following other types implement trait `IntoViewChild<A>`
+  --> src/view.rs
+   |
+   | impl<A> IntoViewChild<A> for ViewResult<UiNode> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<tela_ui_dsl::__private::UiNode, ViewBuildError>`
+...
+   | impl<A> IntoViewChild<A> for ViewOutput<A> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ViewOutput<A>`
+...
+   | impl<A> IntoViewChild<A> for ViewResult<ViewOutput<A>> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<ViewOutput<A>, ViewBuildError>`
+note: required by a bound in `tela_ui_dsl::into_view_child`
+  --> src/view.rs
+   |
+   | pub fn into_view_child<A, V>(child: V) -> ViewResult<ViewChild<A>>
+   |        --------------- required by a bound in this function
+   | where
+   |     V: IntoViewChild<A>,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `into_view_child`

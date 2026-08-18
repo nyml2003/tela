@@ -17,7 +17,10 @@ use objc2_app_kit::{
     NSTrackingRectTag, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString};
-use tela_app_abi::{AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, CursorKind};
+use tela_app_abi::{
+    AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind, AppPointerPhase,
+    CursorKind,
+};
 use tela_contract::UiFrame;
 use tela_desktop_runtime::{
     DeviceLossAction, GuestRuntime, PlatformLaunchOptions, ShellLifecycle, ShellPhase,
@@ -38,6 +41,8 @@ struct ViewState {
     lifecycle: ShellLifecycle,
     runtime: Option<GuestRuntime>,
     frame: Option<UiFrame>,
+    frame_token: Option<AppFrameToken>,
+    presented_frame_token: Option<AppFrameToken>,
     gpu: Option<GpuSession>,
     startup_rx: Option<Receiver<Result<GuestRuntime, String>>>,
     startup_cancel: Arc<AtomicBool>,
@@ -162,6 +167,8 @@ impl TelaView {
                 lifecycle: ShellLifecycle::new(),
                 runtime: None,
                 frame: None,
+                frame_token: None,
+                presented_frame_token: None,
                 gpu: None,
                 startup_rx,
                 startup_cancel,
@@ -212,6 +219,7 @@ impl TelaView {
         if let Err(error) = state.dispatch_text_channel_action(action) {
             eprintln!("tela-macos-host: close text channel: {error}");
         }
+        state.presented_frame_token = None;
         state.gpu = None;
     }
 
@@ -270,7 +278,7 @@ impl TelaView {
             0.0,
         );
         let mut state = self.ivars().state.borrow_mut();
-        if let Err(error) = state.pointer(self, AppEvent::Pointer(pointer)) {
+        if let Err(error) = state.pointer(self, AppFrameInput::Pointer(pointer)) {
             state.fail_terminal(self, error);
         }
     }
@@ -287,7 +295,7 @@ impl TelaView {
         let mut state = self.ivars().state.borrow_mut();
         if let Err(error) = state.pointer(
             self,
-            AppEvent::Pointer(AppPointerEvent::new(
+            AppFrameInput::Pointer(AppPointerEvent::new(
                 0,
                 AppPointerKind::Mouse,
                 AppPointerPhase::Scroll,
@@ -383,7 +391,10 @@ impl ViewState {
         }
         let activation: Result<(), String> = (|| {
             let frame = runtime.frame().map_err(|error| error.to_string())?;
+            let frame_token = runtime.status().frame_token;
             self.frame = Some(frame);
+            self.frame_token = frame_token;
+            self.presented_frame_token = None;
             self.runtime = Some(runtime);
             let Some(metrics) = self.client_metrics(view) else {
                 self.lifecycle.startup_succeeded(false);
@@ -413,6 +424,8 @@ impl ViewState {
         eprintln!("tela-macos-host: startup failed: {error}");
         self.runtime = None;
         self.frame = None;
+        self.frame_token = None;
+        self.presented_frame_token = None;
         self.gpu = None;
         self.lifecycle.startup_failed();
         self.set_status(&format!(
@@ -428,6 +441,7 @@ impl ViewState {
         }
         eprintln!("tela-macos-host: {error}");
         self.terminal_error = Some(error.clone());
+        self.presented_frame_token = None;
         let action = self.lifecycle.failed();
         if let Err(text_error) = self.dispatch_text_channel_action(action) {
             eprintln!("tela-macos-host: fatal text channel cleanup: {text_error}");
@@ -473,6 +487,7 @@ impl ViewState {
         }
         let Some(metrics) = self.client_metrics(view) else {
             self.lifecycle.client_area_changed(false);
+            self.presented_frame_token = None;
             self.cancel_surface_retry();
             return Ok(());
         };
@@ -493,6 +508,8 @@ impl ViewState {
     }
 
     fn dispatch_viewport(&mut self, metrics: ClientMetrics) -> Result<(), String> {
+        // The previous client geometry is no longer an eligible source for hit testing.
+        self.presented_frame_token = None;
         self.dispatch_guest(AppEvent::Viewport {
             width: metrics.logical_width,
             height: metrics.logical_height,
@@ -501,7 +518,13 @@ impl ViewState {
     }
 
     fn dispatch_guest(&mut self, event: AppEvent) -> Result<bool, String> {
-        let (changed, frame) = {
+        let changed = self.dispatch_guest_without_text_reconcile(event)?;
+        self.synchronize_text_channel(None)?;
+        Ok(changed)
+    }
+
+    fn dispatch_guest_without_text_reconcile(&mut self, event: AppEvent) -> Result<bool, String> {
+        let (changed, frame, frame_token) = {
             let runtime = self
                 .runtime
                 .as_mut()
@@ -510,11 +533,34 @@ impl ViewState {
                 .dispatch(&event)
                 .map_err(|error| error.to_string())?;
             let frame = runtime.frame().map_err(|error| error.to_string())?;
-            (changed, frame)
+            (changed, frame, runtime.status().frame_token)
         };
         self.frame = Some(frame);
-        self.synchronize_text_channel(None)?;
+        self.frame_token = frame_token;
         Ok(changed)
+    }
+
+    fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
+        let Some(source_frame_token) = self.presented_frame_token else {
+            return Ok(false);
+        };
+        self.dispatch_guest(AppEvent::FrameInput {
+            source_frame_token,
+            input,
+        })
+    }
+
+    fn dispatch_presented_input_without_text_reconcile(
+        &mut self,
+        input: AppFrameInput,
+    ) -> Result<bool, String> {
+        let Some(source_frame_token) = self.presented_frame_token else {
+            return Ok(false);
+        };
+        self.dispatch_guest_without_text_reconcile(AppEvent::FrameInput {
+            source_frame_token,
+            input,
+        })
     }
 
     fn synchronize_text_channel(&mut self, window_focus: Option<bool>) -> Result<(), String> {
@@ -545,29 +591,21 @@ impl ViewState {
         let Some(action) = action else {
             return Ok(());
         };
-        let event = match action {
-            TextChannelAction::Focus => AppEvent::InputFocus,
-            TextChannelAction::Blur => AppEvent::InputBlur,
+        let input = match action {
+            TextChannelAction::Focus => AppFrameInput::InputFocus,
+            TextChannelAction::Blur => AppFrameInput::InputBlur,
         };
-        let frame = {
-            let runtime = self
-                .runtime
-                .as_mut()
-                .ok_or_else(|| "text channel event without a live guest runtime".to_owned())?;
-            runtime
-                .dispatch(&event)
-                .map_err(|error| error.to_string())?;
-            runtime.frame().map_err(|error| error.to_string())?
-        };
-        self.frame = Some(frame);
+        // This acknowledgement originates from the native editor. Keep it frame-owned, while
+        // avoiding recursive text-channel reconciliation from within that reconciliation itself.
+        let _ = self.dispatch_presented_input_without_text_reconcile(input)?;
         Ok(())
     }
 
-    fn pointer(&mut self, view: &TelaView, event: AppEvent) -> Result<(), String> {
+    fn pointer(&mut self, view: &TelaView, input: AppFrameInput) -> Result<(), String> {
         if !self.lifecycle.can_render() {
             return Ok(());
         }
-        self.dispatch_guest(event)?;
+        self.dispatch_presented_input(input)?;
         self.update_cursor();
         self.request_redraw(view);
         Ok(())
@@ -576,7 +614,7 @@ impl ViewState {
     fn pointer_left_client(&mut self, view: &TelaView) -> Result<(), String> {
         self.pointer(
             view,
-            AppEvent::Pointer(AppPointerEvent::new(
+            AppFrameInput::Pointer(AppPointerEvent::new(
                 0,
                 AppPointerKind::Mouse,
                 AppPointerPhase::Move,
@@ -603,12 +641,12 @@ impl ViewState {
         if input_focused {
             match key_code {
                 36 => {
-                    self.dispatch_guest(AppEvent::InputEnter)?;
+                    self.dispatch_presented_input(AppFrameInput::InputEnter)?;
                     self.request_redraw(view);
                     return Ok(());
                 }
                 53 => {
-                    self.dispatch_guest(AppEvent::InputCancel)?;
+                    self.dispatch_presented_input(AppFrameInput::InputCancel)?;
                     self.request_redraw(view);
                     return Ok(());
                 }
@@ -620,7 +658,9 @@ impl ViewState {
                         .status()
                         .input_value
                         .clone();
-                    self.dispatch_guest(AppEvent::SetInputValue(input::backspace(&value)))?;
+                    self.dispatch_presented_input(AppFrameInput::SetInputValue(input::backspace(
+                        &value,
+                    )))?;
                     self.request_redraw(view);
                     return Ok(());
                 }
@@ -637,7 +677,7 @@ impl ViewState {
                             &characters.to_string(),
                         )
                     {
-                        self.dispatch_guest(AppEvent::SetInputValue(value))?;
+                        self.dispatch_presented_input(AppFrameInput::SetInputValue(value))?;
                         self.request_redraw(view);
                     }
                     return Ok(());
@@ -646,7 +686,7 @@ impl ViewState {
             }
         }
         if let Some(physical_key) = input::physical_key(key_code) {
-            self.dispatch_guest(AppEvent::KeyDown {
+            self.dispatch_presented_input(AppFrameInput::KeyDown {
                 physical_key,
                 modifier_bits: input::modifier_bits(flags),
                 repeat: event.isARepeat(),
@@ -660,6 +700,7 @@ impl ViewState {
         if !self.lifecycle.can_render() {
             return Ok(());
         }
+        let frame_token = self.frame_token;
         let frame = self
             .frame
             .as_ref()
@@ -670,6 +711,7 @@ impl ViewState {
             .ok_or_else(|| "render without a live GPU session".to_owned())?;
         match gpu.render(frame) {
             RenderOutcome::Presented { suboptimal } => {
+                self.presented_frame_token = frame_token;
                 self.lifecycle.surface_presented();
                 self.cancel_surface_retry();
                 if suboptimal {
@@ -678,10 +720,12 @@ impl ViewState {
                 }
             }
             RenderOutcome::Outdated => {
+                self.presented_frame_token = None;
                 self.reconfigure_surface(view)?;
                 self.request_redraw(view);
             }
             RenderOutcome::Lost => {
+                self.presented_frame_token = None;
                 self.recreate_surface(view)?;
                 self.request_redraw(view);
             }
@@ -695,6 +739,7 @@ impl ViewState {
     }
 
     fn reconfigure_surface(&mut self, view: &TelaView) -> Result<(), String> {
+        self.presented_frame_token = None;
         let Some(metrics) = self.client_metrics(view) else {
             self.lifecycle.client_area_changed(false);
             return Ok(());
@@ -708,6 +753,7 @@ impl ViewState {
     }
 
     fn recreate_surface(&mut self, view: &TelaView) -> Result<(), String> {
+        self.presented_frame_token = None;
         let Some(metrics) = self.client_metrics(view) else {
             self.lifecycle.client_area_changed(false);
             return Ok(());
@@ -766,6 +812,7 @@ impl ViewState {
                     report.detail
                 );
                 self.gpu = None;
+                self.presented_frame_token = None;
                 if self.lifecycle.phase() == ShellPhase::Suspended {
                     return;
                 }

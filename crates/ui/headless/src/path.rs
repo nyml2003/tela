@@ -5,7 +5,8 @@ use std::fmt;
 /// Application 为组件实例分配的稳定路径。
 ///
 /// 此路径不等同于 Kernel 的 NodeId 或业务字段 BindId。它用来表达一个组件实例在
-/// Application 视图组合中的位置，并作为显式 Signal 观察关系的所有者。
+/// Headless Root/Part 组合中的位置，并作为组件事件路由的语义路径。显式 Signal
+/// 观察关系由 `tela-ui-dsl` 以 Kernel `SemanticKey` 为所有者。
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct ComponentPath(String);
 

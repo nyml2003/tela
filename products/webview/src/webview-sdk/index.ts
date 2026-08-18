@@ -43,6 +43,7 @@ export async function startTelaWebview(
   let animationFrame: number | undefined;
   let retryTimer: number | undefined;
   let renderError: string | undefined;
+  let presentedFrameToken: bigint | undefined;
 
   const scheduleRender = () => {
     if (closed || animationFrame !== undefined) return;
@@ -50,12 +51,16 @@ export async function startTelaWebview(
       animationFrame = undefined;
       if (closed) return;
       try {
-        if (!bindings.render_gpu(guest.framePacket())) {
+        const framePacket = guest.framePacket();
+        const frameToken = guest.status().frame_token;
+        if (!bindings.render_gpu(framePacket)) {
+          presentedFrameToken = undefined;
           retryTimer ??= window.setTimeout(() => {
             retryTimer = undefined;
             scheduleRender();
           }, 100);
         } else {
+          presentedFrameToken = frameToken;
           renderError = undefined;
         }
       } catch (error) {
@@ -64,6 +69,7 @@ export async function startTelaWebview(
           console.error(message);
           renderError = message;
         }
+        presentedFrameToken = undefined;
       }
     });
   };
@@ -76,6 +82,7 @@ export async function startTelaWebview(
   };
   const dispatchViewport = (surface: CanvasSurfaceSize) => {
     currentSurface = surface;
+    presentedFrameToken = undefined;
     dispatch(bindings.event_viewport(surface.logicalWidth, surface.logicalHeight));
   };
 
@@ -88,6 +95,7 @@ export async function startTelaWebview(
       bindings,
       dispatch,
       status: () => guest.status(),
+      presentedFrameToken: () => presentedFrameToken,
       viewport: () => ({
         width: currentSurface.logicalWidth,
         height: currentSurface.logicalHeight,
@@ -116,6 +124,7 @@ export async function startTelaWebview(
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       stopSurfaceObservation?.();
       input?.close();
+      presentedFrameToken = undefined;
       bindings.shutdown_gpu();
     },
   };

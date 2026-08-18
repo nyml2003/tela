@@ -1,5 +1,7 @@
 //! Explicit host-to-guest input and guest-to-host status packets.
 
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 use tela_contract::{Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase};
 
@@ -7,7 +9,7 @@ use crate::FrameCodecError;
 
 const EVENT_MAGIC: [u8; 4] = *b"TLEV";
 const STATUS_MAGIC: [u8; 4] = *b"TLSV";
-const PACKET_VERSION: u16 = 2;
+const PACKET_VERSION: u16 = 3;
 const HEADER_LEN: usize = EVENT_MAGIC.len() + std::mem::size_of::<u16>();
 
 /// 原始指针设备类型在 Application ABI 中的稳定编码。
@@ -125,17 +127,38 @@ impl From<AppPointerEvent> for PointerEvent {
     }
 }
 
-/// One normalized event delivered by a platform SDK to the application guest.
+/// A non-zero identity for one guest frame published to a platform host.
+///
+/// A token becomes eligible for input only after the host actually presents the corresponding
+/// frame. The host returns this value in every frame-owned input packet, so the guest can reject
+/// stale input before it reaches hit testing or controlled-input state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct AppFrameToken(NonZeroU64);
+
+impl AppFrameToken {
+    /// Creates a frame token from a guest-generated raw value.
+    ///
+    /// `0` deliberately has no token meaning and is never accepted as a provenance sentinel.
+    #[must_use]
+    pub const fn new(raw: u64) -> Option<Self> {
+        match NonZeroU64::new(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
+    /// Returns the stable raw value carried over the application ABI.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// A normalized input whose routing must be evaluated against one presented guest frame.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum AppEvent {
-    /// The host content area changed in logical pixels.
-    Viewport {
-        /// Logical content width.
-        width: f32,
-        /// Logical content height.
-        height: f32,
-    },
-    /// 一个未经组件或手势预判的原始指针帧。
+pub enum AppFrameInput {
+    /// An unclassified raw pointer frame.
     Pointer(AppPointerEvent),
     /// A normalized USB-HID physical key press. The guest resolves it with its current keymap.
     KeyDown {
@@ -165,6 +188,29 @@ pub enum AppEvent {
     /// The host sends the resulting controlled value separately, then lets the guest decide
     /// whether an explicit confirmation should commit it.
     InputCompositionEnd,
+}
+
+/// One normalized event delivered by a platform SDK to the application guest.
+///
+/// System events are independent of a rendered frame. Every interaction that can be routed to a
+/// node is instead carried by [`AppEvent::FrameInput`] with the token of the frame the host
+/// actually presented.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AppEvent {
+    /// The host content area changed in logical pixels.
+    Viewport {
+        /// Logical content width.
+        width: f32,
+        /// Logical content height.
+        height: f32,
+    },
+    /// An input event evaluated against the identified presented frame.
+    FrameInput {
+        /// Token of the frame that was actually visible when the host observed this input.
+        source_frame_token: AppFrameToken,
+        /// Normalized interaction data.
+        input: AppFrameInput,
+    },
     /// Atomically replace the runtime keymap with a validated JSON snapshot.
     ///
     /// This is intentionally an ABI event rather than a browser-only escape hatch, so every
@@ -188,6 +234,11 @@ pub enum CursorKind {
 /// Current guest state that a platform SDK needs outside of drawing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppStatus {
+    /// Identity of the most recently published guest frame.
+    ///
+    /// Hosts may retain it as an input source only after their renderer reports a successful
+    /// present. `None` is reserved for a guest that has not produced an interactive frame.
+    pub frame_token: Option<AppFrameToken>,
     /// Requested cursor shape.
     pub cursor: CursorKind,
     /// Whether a controlled text input is focused.
@@ -252,22 +303,26 @@ mod tests {
 
     #[test]
     fn event_and_status_packets_round_trip() {
-        let event = AppEvent::Pointer(AppPointerEvent::new(
-            42,
-            AppPointerKind::Touch,
-            AppPointerPhase::Move,
-            10.0,
-            20.0,
-            1,
-            123,
-            1.0,
-            -2.0,
-        ));
+        let event = AppEvent::FrameInput {
+            source_frame_token: AppFrameToken::new(7).expect("non-zero frame token"),
+            input: AppFrameInput::Pointer(AppPointerEvent::new(
+                42,
+                AppPointerKind::Touch,
+                AppPointerPhase::Move,
+                10.0,
+                20.0,
+                1,
+                123,
+                1.0,
+                -2.0,
+            )),
+        };
         assert_eq!(
             decode_event(&encode_event(&event).expect("encode")).expect("decode"),
             event
         );
         let status = AppStatus {
+            frame_token: AppFrameToken::new(7),
             cursor: CursorKind::Text,
             input_focused: true,
             input_value: "文件".to_owned(),
@@ -281,8 +336,14 @@ mod tests {
     #[test]
     fn extended_input_events_round_trip() {
         for event in [
-            AppEvent::InputCompositionStart,
-            AppEvent::InputCompositionEnd,
+            AppEvent::FrameInput {
+                source_frame_token: AppFrameToken::new(1).expect("non-zero frame token"),
+                input: AppFrameInput::InputCompositionStart,
+            },
+            AppEvent::FrameInput {
+                source_frame_token: AppFrameToken::new(1).expect("non-zero frame token"),
+                input: AppFrameInput::InputCompositionEnd,
+            },
             AppEvent::ReplaceKeymapJson(r#"{\"bindings\":[]}"#.to_owned()),
         ] {
             assert_eq!(
@@ -290,5 +351,11 @@ mod tests {
                 event
             );
         }
+    }
+
+    #[test]
+    fn zero_is_not_a_frame_token() {
+        assert_eq!(AppFrameToken::new(0), None);
+        assert_eq!(AppFrameToken::new(99).map(AppFrameToken::get), Some(99));
     }
 }

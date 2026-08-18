@@ -46,8 +46,12 @@ impl UiTree {
         allocator: &mut IdentityAllocator,
     ) -> Result<Self, UiBuildError> {
         let root = root.into();
-        let result = validate::validate(&root, allocator)?;
+        // 身份分配是跨帧状态；任何后续校验失败都不能让失败树占用下一帧的稳定身份。
+        // `FrameCoordinator` 也会维护候选状态，但这个 Core 入口本身必须保持原子语义。
+        let mut candidate_allocator = allocator.clone();
+        let result = validate::validate(&root, &mut candidate_allocator)?;
         validate::validate_teleport_references(&root, &result.keys)?;
+        *allocator = candidate_allocator;
         Ok(Self {
             root,
             keys: result.keys,

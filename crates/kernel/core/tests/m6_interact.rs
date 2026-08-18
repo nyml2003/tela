@@ -745,6 +745,19 @@ fn focus_graph_cross_scope_rejected_at_build() {
 }
 
 #[test]
+fn focus_scope_references_resolved_auto_path_keys() {
+    // FocusRef 不能只读取 UiNode.identity.semantic_key：这个 child 没有显式 key，
+    // 但完成 identity 分配后其最终 key 是 /0/。
+    let scope = LogicalContainer::focus_scope(FocusScopeSpec {
+        entry: FocusPort::uniform(FocusRef(SemanticKey("/0/".to_owned()))),
+        ..FocusScopeSpec::default()
+    })
+    .children([focusable_rect(50.0, 20.0, 0)]);
+
+    assert!(UiTree::new(scope).is_ok());
+}
+
+#[test]
 fn teleport_focus_chain_mounts_to_modal_host_scope() {
     // Teleport 内可聚焦节点：焦点链重挂载到 ModalHost 作用域（Tab 可进入，见 008-2.10）。
     let teleported = LogicalContainer::teleport(tela_contract::TeleportSpec {

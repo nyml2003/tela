@@ -1,0 +1,33 @@
+error[E0277]: the trait bound `NonCloneAction: Clone` is not satisfied
+ --> tests/ui/actions_must_be_clone.rs:8:13
+  |
+8 |     let _ = FrameCoordinator::<NonCloneAction>::new();
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `NonCloneAction`
+  |
+note: required by a bound in `FrameCoordinator`
+ --> src/frame.rs
+  |
+  | pub struct FrameCoordinator<A: Clone + 'static> {
+  |                                ^^^^^ required by this bound in `FrameCoordinator`
+help: consider annotating `NonCloneAction` with `#[derive(Clone)]`
+  |
+3 + #[derive(Clone)]
+4 | enum NonCloneAction {
+  |
+
+error[E0599]: the function or associated item `new` exists for struct `FrameCoordinator<NonCloneAction>`, but its trait bounds were not satisfied
+ --> tests/ui/actions_must_be_clone.rs:8:49
+  |
+3 | enum NonCloneAction {
+  | ------------------- doesn't satisfy `NonCloneAction: Clone`
+...
+8 |     let _ = FrameCoordinator::<NonCloneAction>::new();
+  |                                                 ^^^ function or associated item cannot be called on `FrameCoordinator<NonCloneAction>` due to unsatisfied trait bounds
+  |
+  = note: the following trait bounds were not satisfied:
+          `NonCloneAction: Clone`
+help: consider annotating `NonCloneAction` with `#[derive(Clone)]`
+  |
+3 + #[derive(Clone)]
+4 | enum NonCloneAction {
+  |

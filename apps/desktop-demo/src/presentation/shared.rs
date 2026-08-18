@@ -129,6 +129,7 @@ pub fn command_button(
     node.identity = Some(IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(SemanticKey(action_key.to_owned())),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     });
     node
@@ -172,6 +173,7 @@ pub fn clickable(mut node: UiNode, action_key: impl Into<String>) -> UiNode {
         node.identity = Some(IdentityConcern {
             key_strategy: KeyStrategy::SemanticId,
             semantic_key: Some(action_key),
+            key_segment: None,
             update_mode: UpdateMode::Dirty,
         });
     }

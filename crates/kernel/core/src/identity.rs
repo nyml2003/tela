@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use tela_contract::{ContentConcern, KeyStrategy, SemanticKey, UiNode};
 
 /// 稳定身份分配器（宿主跨帧传入 `UiTree::new_with_allocator`）。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct IdentityAllocator {
     /// 作用域容器 key → 分配表。
     tables: HashMap<SemanticKey, StableTable>,
@@ -24,7 +24,7 @@ pub struct IdentityAllocator {
 }
 
 /// 单作用域分配表。
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct StableTable {
     next_id: u64,
     /// 上帧快照：相对路径 → id（位置优先匹配；每帧由 `path_this_frame` 轮转，无脏累积）。
@@ -91,7 +91,9 @@ impl IdentityAllocator {
             if table.touched_this_frame {
                 table.scope_unused_frames = 0;
             } else {
-                table.scope_unused_frames += 1;
+                // Scope age only participates in a threshold comparison. Saturation prevents a
+                // long-lived idle scope from wrapping back to zero in release builds.
+                table.scope_unused_frames = table.scope_unused_frames.saturating_add(1);
                 if table.scope_unused_frames >= max_scope_unused {
                     remove_scopes.push(scope_key.clone());
                 }
@@ -151,7 +153,10 @@ impl StableTable {
 
         // 3. 全新身份。
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("stable identity id exhausted after u64::MAX allocations");
         self.id_to_fp.insert(id, fp);
         self.mark_used(path, id);
         id
@@ -171,7 +176,9 @@ impl StableTable {
             if self.used_this_frame.contains(&id) {
                 *age = 0;
             } else {
-                *age += 1;
+                // Age only participates in a threshold comparison. Saturation prevents an idle
+                // entry from wrapping and becoming artificially young again.
+                *age = age.saturating_add(1);
                 if *age >= max_unused {
                     to_remove.push(id);
                 }
@@ -259,4 +266,26 @@ pub(crate) fn is_stable_scope(node: &UiNode) -> bool {
     node.identity
         .as_ref()
         .is_some_and(|i| i.key_strategy == KeyStrategy::AutoStableIdentity)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::StableTable;
+
+    #[test]
+    fn stable_identity_counter_never_wraps_back_to_a_reusable_id() {
+        let mut table = StableTable {
+            next_id: u64::MAX,
+            ..StableTable::default()
+        };
+
+        let result = catch_unwind(AssertUnwindSafe(|| table.assign("/0/", 1)));
+
+        assert!(result.is_err());
+        assert_eq!(table.next_id, u64::MAX);
+        assert!(table.id_to_fp.is_empty());
+        assert!(table.used_this_frame.is_empty());
+    }
 }

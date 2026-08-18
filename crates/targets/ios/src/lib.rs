@@ -38,26 +38,30 @@ pub trait IosMobileSession {
     /// Updates system-bar and gesture exclusion insets in logical points.
     fn set_safe_area(&mut self, safe_area: Insets) -> bool;
 
-    /// Delivers a normalized touch or scroll event.
-    fn dispatch_pointer(&mut self, event: PointerEvent) -> bool;
+    /// Delivers a normalized touch or scroll event tagged with the frame UIKit actually presented.
+    fn dispatch_pointer(&mut self, frame_token: u64, event: PointerEvent) -> bool;
 
-    /// Delivers one platform-neutral physical key code.
-    fn dispatch_key(&mut self, physical_key: u16) -> bool;
+    /// Delivers one platform-neutral physical key code tagged with its presented frame.
+    fn dispatch_key(&mut self, frame_token: u64, physical_key: u16) -> bool;
 
-    /// Replaces the complete controlled native text value.
-    fn set_input_value(&mut self, value: String) -> bool;
+    /// Replaces the complete controlled native text value for its presented frame.
+    fn set_input_value(&mut self, frame_token: u64, value: String) -> bool;
 
-    /// Records an IME composition transition.
-    fn composition_changed(&mut self) -> bool;
+    /// Records an IME composition transition for its presented frame.
+    fn composition_changed(&mut self, frame_token: u64) -> bool;
 
-    /// Commits the active native text interaction.
-    fn input_enter(&mut self) -> bool;
+    /// Commits the active native text interaction for its presented frame.
+    fn input_enter(&mut self, frame_token: u64) -> bool;
 
-    /// Notifies the application that native text focus was lost.
-    fn input_blur(&mut self) -> bool;
+    /// Notifies the application that native text focus was lost for its presented frame.
+    fn input_blur(&mut self, frame_token: u64) -> bool;
 
-    /// Resolves and borrows the portable drawing frame for Metal rendering.
-    fn frame(&mut self) -> &UiFrame;
+    /// Resolves the portable drawing frame and its nonzero provenance token for Metal rendering.
+    ///
+    /// UIKit must retain the token only after the frame is actually presented, then pass it back
+    /// with subsequent touch, keyboard, and IME input. This prevents a reused `NodeId` from an
+    /// older Metal drawable being routed into a newer application frame.
+    fn frame(&mut self) -> (&UiFrame, u64);
 
     /// Returns the state UIKit needs after an input or lifecycle transition.
     fn text_status(&self) -> MobileTextStatus;

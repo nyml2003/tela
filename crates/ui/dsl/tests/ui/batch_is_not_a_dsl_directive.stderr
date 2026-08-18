@@ -1,0 +1,5 @@
+error: @batch is not a DSL directive; call runtime.batch(|| { ... }) in ActionHandler
+ --> tests/ui/batch_is_not_a_dsl_directive.rs:7:10
+  |
+7 |         @batch {
+  |          ^^^^^

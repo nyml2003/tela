@@ -30,6 +30,7 @@ pub(crate) fn semantic_identity(key: impl Into<String>) -> IdentityConcern {
     IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(SemanticKey(key.into())),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     }
 }

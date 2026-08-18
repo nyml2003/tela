@@ -22,7 +22,10 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
     Win32WindowHandle, WindowsDisplayHandle,
 };
-use tela_app_abi::{AppEvent, AppPointerEvent, AppPointerKind, AppPointerPhase, CursorKind};
+use tela_app_abi::{
+    AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind, AppPointerPhase,
+    CursorKind,
+};
 use tela_contract::{Color, UiFrame};
 use tela_render_wgpu::WgpuRenderer;
 use windows::{
@@ -187,6 +190,8 @@ struct WindowState {
     lifecycle: ShellLifecycle,
     runtime: Option<GuestRuntime>,
     frame: Option<UiFrame>,
+    frame_token: Option<AppFrameToken>,
+    presented_frame_token: Option<AppFrameToken>,
     gpu: Option<GpuSession>,
     dpi_scale: f32,
     startup_rx: Option<Receiver<Result<GuestRuntime, String>>>,
@@ -210,6 +215,8 @@ impl WindowState {
             lifecycle: ShellLifecycle::new(),
             runtime: None,
             frame: None,
+            frame_token: None,
+            presented_frame_token: None,
             gpu: None,
             dpi_scale: 1.0,
             startup_rx: Some(startup_rx),
@@ -252,7 +259,10 @@ impl WindowState {
         }
         let activation: Result<(), String> = (|| {
             let frame = runtime.frame().map_err(|error| error.to_string())?;
+            let frame_token = runtime.status().frame_token;
             self.frame = Some(frame);
+            self.frame_token = frame_token;
+            self.presented_frame_token = None;
             self.runtime = Some(runtime);
             let Some(metrics) = self.client_metrics()? else {
                 self.lifecycle.startup_succeeded(false);
@@ -276,6 +286,8 @@ impl WindowState {
         eprintln!("tela-win32-host: startup failed: {error}");
         self.runtime = None;
         self.frame = None;
+        self.frame_token = None;
+        self.presented_frame_token = None;
         self.gpu = None;
         self.startup_error = Some(error);
         self.lifecycle.startup_failed();
@@ -375,6 +387,8 @@ impl WindowState {
     }
 
     fn dispatch_viewport(&mut self, metrics: ClientMetrics) -> Result<(), String> {
+        // A frame from the previous client geometry must not route input after this point.
+        self.presented_frame_token = None;
         self.dispatch_guest(AppEvent::Viewport {
             width: metrics.width as f32 / metrics.dpi_scale,
             height: metrics.height as f32 / metrics.dpi_scale,
@@ -413,7 +427,13 @@ impl WindowState {
     }
 
     fn dispatch_guest(&mut self, event: AppEvent) -> Result<bool, String> {
-        let (changed, frame) = {
+        let changed = self.dispatch_guest_without_text_reconcile(event)?;
+        self.synchronize_text_channel(None)?;
+        Ok(changed)
+    }
+
+    fn dispatch_guest_without_text_reconcile(&mut self, event: AppEvent) -> Result<bool, String> {
+        let (changed, frame, frame_token) = {
             let runtime = self
                 .runtime
                 .as_mut()
@@ -422,11 +442,34 @@ impl WindowState {
                 .dispatch(&event)
                 .map_err(|error| error.to_string())?;
             let frame = runtime.frame().map_err(|error| error.to_string())?;
-            (changed, frame)
+            (changed, frame, runtime.status().frame_token)
         };
         self.frame = Some(frame);
-        self.synchronize_text_channel(None)?;
+        self.frame_token = frame_token;
         Ok(changed)
+    }
+
+    fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
+        let Some(source_frame_token) = self.presented_frame_token else {
+            return Ok(false);
+        };
+        self.dispatch_guest(AppEvent::FrameInput {
+            source_frame_token,
+            input,
+        })
+    }
+
+    fn dispatch_presented_input_without_text_reconcile(
+        &mut self,
+        input: AppFrameInput,
+    ) -> Result<bool, String> {
+        let Some(source_frame_token) = self.presented_frame_token else {
+            return Ok(false);
+        };
+        self.dispatch_guest_without_text_reconcile(AppEvent::FrameInput {
+            source_frame_token,
+            input,
+        })
     }
 
     fn synchronize_text_channel(&mut self, window_focus: Option<bool>) -> Result<(), String> {
@@ -457,29 +500,22 @@ impl WindowState {
         let Some(action) = action else {
             return Ok(());
         };
-        let event = match action {
-            TextChannelAction::Focus => AppEvent::InputFocus,
-            TextChannelAction::Blur => AppEvent::InputBlur,
+        let input = match action {
+            TextChannelAction::Focus => AppFrameInput::InputFocus,
+            TextChannelAction::Blur => AppFrameInput::InputBlur,
         };
-        let frame = {
-            let runtime = self
-                .runtime
-                .as_mut()
-                .ok_or_else(|| "text channel event without a live guest runtime".to_owned())?;
-            runtime
-                .dispatch(&event)
-                .map_err(|error| error.to_string())?;
-            runtime.frame().map_err(|error| error.to_string())?
-        };
-        self.frame = Some(frame);
+        // This acknowledgement originates from the native editor, so it remains frame-owned. Do
+        // not call `dispatch_guest` here: this method runs inside text-channel reconciliation and
+        // intentionally avoids recursive lifecycle transitions.
+        let _ = self.dispatch_presented_input_without_text_reconcile(input)?;
         Ok(())
     }
 
-    fn pointer(&mut self, event: AppEvent) -> Result<(), String> {
+    fn pointer(&mut self, input: AppFrameInput) -> Result<(), String> {
         if !self.lifecycle.can_render() {
             return Ok(());
         }
-        self.dispatch_guest(event)?;
+        self.dispatch_presented_input(input)?;
         self.request_redraw();
         Ok(())
     }
@@ -492,13 +528,13 @@ impl WindowState {
         buttons: u16,
         delta_x: f32,
         delta_y: f32,
-    ) -> AppEvent {
+    ) -> AppFrameInput {
         let timestamp_micros = self
             .input_epoch
             .elapsed()
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
-        AppEvent::Pointer(AppPointerEvent::new(
+        AppFrameInput::Pointer(AppPointerEvent::new(
             0,
             AppPointerKind::Mouse,
             phase,
@@ -522,12 +558,12 @@ impl WindowState {
         if input_focused {
             match virtual_key {
                 key if key == VK_RETURN.0 => {
-                    self.dispatch_guest(AppEvent::InputEnter)?;
+                    self.dispatch_presented_input(AppFrameInput::InputEnter)?;
                     self.request_redraw();
                     return Ok(true);
                 }
                 key if key == VK_ESCAPE.0 => {
-                    self.dispatch_guest(AppEvent::InputCancel)?;
+                    self.dispatch_presented_input(AppFrameInput::InputCancel)?;
                     self.request_redraw();
                     return Ok(true);
                 }
@@ -538,7 +574,7 @@ impl WindowState {
         let Some(physical_key) = physical_key(virtual_key) else {
             return Ok(false);
         };
-        let consumed = self.dispatch_guest(AppEvent::KeyDown {
+        let consumed = self.dispatch_presented_input(AppFrameInput::KeyDown {
             physical_key,
             modifier_bits: modifier_bits(),
             repeat,
@@ -572,7 +608,7 @@ impl WindowState {
             }
             _ => return Ok(false),
         }
-        self.dispatch_guest(AppEvent::SetInputValue(value))?;
+        self.dispatch_presented_input(AppFrameInput::SetInputValue(value))?;
         self.request_redraw();
         Ok(true)
     }
@@ -610,6 +646,7 @@ impl WindowState {
     fn paint_guest(&mut self) -> Result<(), String> {
         match self.render()? {
             RenderOutcome::Presented { suboptimal } => {
+                self.presented_frame_token = self.frame_token;
                 self.lifecycle.surface_presented();
                 self.cancel_surface_retry();
                 if suboptimal {
@@ -618,10 +655,12 @@ impl WindowState {
                 }
             }
             RenderOutcome::Outdated => {
+                self.presented_frame_token = None;
                 self.reconfigure_surface()?;
                 self.request_redraw();
             }
             RenderOutcome::Lost => {
+                self.presented_frame_token = None;
                 self.recreate_surface()?;
                 self.request_redraw();
             }
@@ -635,6 +674,7 @@ impl WindowState {
     }
 
     fn reconfigure_surface(&mut self) -> Result<(), String> {
+        self.presented_frame_token = None;
         let Some(metrics) = self.client_metrics()? else {
             self.lifecycle.client_area_changed(false);
             return Ok(());
@@ -651,6 +691,7 @@ impl WindowState {
     }
 
     fn recreate_surface(&mut self) -> Result<(), String> {
+        self.presented_frame_token = None;
         let Some(metrics) = self.client_metrics()? else {
             self.lifecycle.client_area_changed(false);
             return Ok(());
@@ -718,6 +759,7 @@ impl WindowState {
             Some(DeviceLossAction::RecreateGpu) => {
                 eprintln!("tela-win32-host: WGPU device lost, rebuilding once: {detail}");
                 self.gpu = None;
+                self.presented_frame_token = None;
                 if self.lifecycle.phase() == ShellPhase::Suspended {
                     return;
                 }
@@ -802,6 +844,7 @@ impl WindowState {
             return;
         }
         self.startup_cancel.store(true, Ordering::Release);
+        self.presented_frame_token = None;
         self.end_pointer_capture(true);
         let _ = self.pointer_left_client();
         self.cancel_surface_retry();

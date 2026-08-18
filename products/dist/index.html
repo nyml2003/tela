@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TELA 文件</title>
+<style>
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #f5f7fc; }
+  body { position: fixed; inset: 0; }
+  canvas { display: block; width: 100dvw; height: 100dvh; touch-action: none; }
+  canvas:focus { outline: none; }
+  #startup-error { position: fixed; right: 16px; bottom: 16px; max-width: min(560px, calc(100vw - 32px));
+                   padding: 10px 12px; border: 1px solid #d77; border-radius: 6px;
+                   background: #fff7f7; color: #7a1e1e; font: 13px/1.5 system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<canvas aria-label="tela 文件管理器演示" tabindex="0"></canvas>
+<div id="startup-error" role="alert" hidden></div>
+<script type="module" src="./assets/tela-web/app.js"></script>
+</body>
+</html>

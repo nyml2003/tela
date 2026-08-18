@@ -73,7 +73,7 @@ pub(crate) struct ActiveGesture {
 }
 
 /// 视图状态仓库（见 004-更新策略与状态保持 3）。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ViewStateStore {
     scroll: HashMap<SemanticKey, ScrollState>,
     focus: HashMap<SemanticKey, FocusSlot>,

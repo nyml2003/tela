@@ -434,6 +434,7 @@ fn action_identity(action_key: String) -> IdentityConcern {
     IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(SemanticKey(action_key)),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     }
 }

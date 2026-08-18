@@ -11,7 +11,7 @@ use jni::{
     objects::{JObject, JString},
     sys::{jboolean, jint, jstring},
 };
-use tela_app_abi::{AppEvent, AppStatus};
+use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppStatus};
 use tela_contract::{
     Color, DrawCommand, DrawPayload, Rect, TextContent, TextStyleRef, UiFrame, Viewport,
 };
@@ -151,6 +151,8 @@ struct AndroidHost {
     gpu: Option<GpuSession>,
     runtime: Option<GuestRuntime>,
     frame: Option<UiFrame>,
+    frame_token: Option<AppFrameToken>,
+    presented_frame_token: Option<AppFrameToken>,
     touch: TouchAdapter,
     failure: Option<String>,
 }
@@ -165,6 +167,8 @@ impl AndroidHost {
             gpu: None,
             runtime: None,
             frame: None,
+            frame_token: None,
+            presented_frame_token: None,
             touch: TouchAdapter::new(),
             failure: None,
         }
@@ -213,9 +217,12 @@ impl AndroidHost {
 
     fn install_runtime(&mut self, runtime: GuestRuntime) -> Result<(), String> {
         let frame = runtime.frame().map_err(|error| error.to_string())?;
-        publish_guest_status(runtime.status());
+        let status = runtime.status().clone();
+        publish_guest_status(&status);
         self.failure = None;
         self.frame = Some(frame);
+        self.frame_token = status.frame_token;
+        self.presented_frame_token = None;
         self.runtime = Some(runtime);
         self.dispatch_viewport()?;
         self.request_redraw();
@@ -234,6 +241,9 @@ impl AndroidHost {
             return Ok(());
         }
         let scale = window.scale_factor().max(1.0) as f32;
+        // The previous surface geometry is no longer the one visible to the user. Do not use its
+        // frame identity for subsequent hit testing while the resized frame is awaiting present.
+        self.presented_frame_token = None;
         self.dispatch_guest(AppEvent::Viewport {
             width: size.width as f32 / scale,
             height: size.height as f32 / scale,
@@ -251,10 +261,22 @@ impl AndroidHost {
             .dispatch(&event)
             .map_err(|error| error.to_string())?;
         let frame = runtime.frame().map_err(|error| error.to_string())?;
-        publish_guest_status(runtime.status());
+        let status = runtime.status().clone();
+        publish_guest_status(&status);
         self.frame = Some(frame);
+        self.frame_token = status.frame_token;
         self.request_redraw();
         Ok(changed)
+    }
+
+    fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
+        let Some(source_frame_token) = self.presented_frame_token else {
+            return Ok(false);
+        };
+        self.dispatch_guest(AppEvent::FrameInput {
+            source_frame_token,
+            input,
+        })
     }
 
     fn handle_system_back(&mut self) {
@@ -267,9 +289,9 @@ impl AndroidHost {
             .as_ref()
             .is_some_and(|runtime| runtime.status().input_focused);
         let result = if focused {
-            self.dispatch_guest(AppEvent::InputBlur)
+            self.dispatch_presented_input(AppFrameInput::InputBlur)
         } else {
-            self.dispatch_guest(AppEvent::KeyDown {
+            self.dispatch_presented_input(AppFrameInput::KeyDown {
                 physical_key: 0x29,
                 modifier_bits: 0,
                 repeat: false,
@@ -296,7 +318,7 @@ impl AndroidHost {
         let x = logical_coordinate(touch.location.x, scale);
         let y = logical_coordinate(touch.location.y, scale);
         let event = self.touch.handle(touch.id, phase, x, y);
-        if let Err(error) = self.dispatch_guest(AppEvent::Pointer(event)) {
+        if let Err(error) = self.dispatch_presented_input(AppFrameInput::Pointer(event)) {
             self.fail(error);
         }
     }
@@ -319,16 +341,18 @@ impl AndroidHost {
     }
 
     fn redraw(&mut self) {
-        let frame = self
+        let (frame, frame_token) = self
             .frame
             .clone()
-            .unwrap_or_else(|| self.diagnostic_frame());
+            .map(|frame| (frame, self.frame_token))
+            .unwrap_or_else(|| (self.diagnostic_frame(), None));
         let render_result = match self.gpu.as_mut() {
             Some(gpu) => gpu.render(&frame),
             None => return,
         };
         match render_result {
             RenderOutcome::Presented { suboptimal } => {
+                self.presented_frame_token = frame_token;
                 if suboptimal {
                     if let Err(error) = self
                         .gpu
@@ -343,6 +367,7 @@ impl AndroidHost {
                 }
             }
             RenderOutcome::Outdated => {
+                self.presented_frame_token = None;
                 let result = self
                     .gpu
                     .as_mut()
@@ -355,6 +380,7 @@ impl AndroidHost {
                 }
             }
             RenderOutcome::Lost => {
+                self.presented_frame_token = None;
                 let Some(window) = self.window.as_ref().cloned() else {
                     return;
                 };
@@ -461,6 +487,8 @@ impl AndroidHost {
         self.failure = Some(error);
         self.runtime = None;
         self.frame = None;
+        self.frame_token = None;
+        self.presented_frame_token = None;
         publish_guest_status(&AppStatus::default());
         self.request_redraw();
     }
@@ -484,13 +512,14 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
         // Android invalidates the SurfaceView here; surface and every resource borrowing it must
         // disappear before this callback returns. The portable guest intentionally survives.
         for event in self.touch.cancel_all() {
-            if let Err(error) = self.dispatch_guest(AppEvent::Pointer(event)) {
+            if let Err(error) = self.dispatch_presented_input(AppFrameInput::Pointer(event)) {
                 self.fail(error);
                 break;
             }
         }
         self.gpu = None;
         self.window = None;
+        self.presented_frame_token = None;
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: HostEvent) {
@@ -505,32 +534,38 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
                 Err(error) => self.fail(error),
             },
             HostEvent::SetInputValue(value) => {
-                if let Err(error) = self.dispatch_guest(AppEvent::SetInputValue(value)) {
+                if let Err(error) =
+                    self.dispatch_presented_input(AppFrameInput::SetInputValue(value))
+                {
                     self.fail(error);
                 }
             }
             HostEvent::InputFocus => {
-                if let Err(error) = self.dispatch_guest(AppEvent::InputFocus) {
+                if let Err(error) = self.dispatch_presented_input(AppFrameInput::InputFocus) {
                     self.fail(error);
                 }
             }
             HostEvent::InputBlur => {
-                if let Err(error) = self.dispatch_guest(AppEvent::InputBlur) {
+                if let Err(error) = self.dispatch_presented_input(AppFrameInput::InputBlur) {
                     self.fail(error);
                 }
             }
             HostEvent::InputEnter => {
-                if let Err(error) = self.dispatch_guest(AppEvent::InputEnter) {
+                if let Err(error) = self.dispatch_presented_input(AppFrameInput::InputEnter) {
                     self.fail(error);
                 }
             }
             HostEvent::CompositionStart => {
-                if let Err(error) = self.dispatch_guest(AppEvent::InputCompositionStart) {
+                if let Err(error) =
+                    self.dispatch_presented_input(AppFrameInput::InputCompositionStart)
+                {
                     self.fail(error);
                 }
             }
             HostEvent::CompositionEnd => {
-                if let Err(error) = self.dispatch_guest(AppEvent::InputCompositionEnd) {
+                if let Err(error) =
+                    self.dispatch_presented_input(AppFrameInput::InputCompositionEnd)
+                {
                     self.fail(error);
                 }
             }
@@ -550,7 +585,7 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
             WindowEvent::Touch(touch) => self.handle_touch(touch),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if let Some(physical_key) = map_physical_key(event.physical_key) {
-                    if let Err(error) = self.dispatch_guest(AppEvent::KeyDown {
+                    if let Err(error) = self.dispatch_presented_input(AppFrameInput::KeyDown {
                         physical_key,
                         modifier_bits: 0,
                         repeat: event.repeat,
@@ -564,7 +599,7 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
                     .runtime
                     .as_ref()
                     .is_some_and(|runtime| runtime.status().input_focused)
-                    && let Err(error) = self.dispatch_guest(AppEvent::InputBlur)
+                    && let Err(error) = self.dispatch_presented_input(AppFrameInput::InputBlur)
                 {
                     self.fail(error);
                 }
@@ -577,6 +612,7 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.gpu = None;
         self.window = None;
+        self.presented_frame_token = None;
         clear_bridge();
     }
 

@@ -8,5 +8,5 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod guest;

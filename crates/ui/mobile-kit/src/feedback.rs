@@ -185,6 +185,7 @@ fn action_node(action: MobileEmptyAction, style: MobileEmptyStateStyle) -> UiNod
     .identity(IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(action.action_key),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     })
     .into();

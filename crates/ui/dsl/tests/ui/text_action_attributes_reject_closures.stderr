@@ -1,0 +1,5 @@
+error: DSL action attributes cannot contain closures; use a function path or with_context(value, mapper)
+ --> tests/ui/text_action_attributes_reject_closures.rs:6:66
+  |
+6 |         <ActionTarget on_input={tela_ui_dsl::with_context(7_u32, |id, value| {
+  |                                                                  ^

@@ -11,9 +11,13 @@ use tela_mobile_ui_kit::{
     MobileLayout, MobileNavBar, MobileNavBarStyle, MobileScaffold, MobileScaffoldStyle,
     MobileSearchField, MobileSurfaceStyle,
 };
+use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::Icon;
 
-use crate::domain::{Entry, EntryKind};
+use crate::{
+    application::MobileAction,
+    domain::{Entry, EntryKind},
+};
 
 const APP_BAR_H: f32 = 64.0;
 const SEARCH_H: f32 = 68.0;
@@ -88,6 +92,253 @@ pub fn render(props: MobileViewProps<'_>) -> UiNode {
         background: BACKGROUND,
     })
     .into_node()
+}
+
+/// Builds the Browse route through the application DSL rather than a Headless event table.
+///
+/// The visual leaf nodes still come from the mobile kit, while the structural scroll root,
+/// collection identity, Signal dependency declarations, and application actions are all native
+/// DSL constructs. Preview remains on the existing direct projection until a separate migration
+/// decision is made.
+pub(crate) fn render_browse_dsl(
+    build: &mut ViewBuild<MobileAction>,
+    props: MobileViewProps<'_>,
+    route_signal: &Signal<crate::application::Route>,
+    query_signal: &Signal<String>,
+) -> ViewResult<ViewOutput<MobileAction>> {
+    let layout = MobileLayout::with_chrome(props.viewport, props.safe_area, APP_BAR_H, SEARCH_H);
+    let content_width = layout.content_width();
+    let content_height = layout.content_height();
+    let chrome_height = layout.chrome_height();
+
+    ui!(build {
+        @watch(route, &route_signal);
+        @watch(query, &query_signal);
+
+        <Frame
+            key={"mobile.browse"}
+            width={Size::fixed(props.viewport.width)}
+            height={Size::fixed(props.viewport.height)}
+            padding={props.safe_area}
+            fill={Fill::Solid(BACKGROUND)}
+        >
+            <Column
+                width={Size::fixed(content_width)}
+                height={Size::fixed(chrome_height)}
+            >
+                { browse_app_bar_dsl(build, &props, content_width) }
+                { search_field_dsl(build, &props, content_width) }
+                <ScrollView
+                    key={"mobile.content-scroll"}
+                    width={Size::fixed(content_width)}
+                    height={Size::fixed(content_height)}
+                    padding={Insets {
+                        top: 0.0,
+                        right: CONTENT_INSET,
+                        bottom: 0.0,
+                        left: CONTENT_INSET,
+                    }}
+                    overflow={Overflow::Scroll}
+                    clip={true}
+                >
+                    { browse_rows_dsl(build, &props, content_width) }
+                </ScrollView>
+            </Column>
+        </Frame>
+    })
+}
+
+fn browse_app_bar_dsl(
+    build: &mut ViewBuild<MobileAction>,
+    props: &MobileViewProps<'_>,
+    width: f32,
+) -> ViewResult<ViewOutput<MobileAction>> {
+    let title: UiNode = LayoutContainer::expanded(
+        LayoutContainer::column([
+            text(props.title, 20.0, TEXT),
+            text("本机文件", 12.0, SECONDARY),
+        ])
+        .layout(LayoutConcern {
+            gap: 2.0,
+            ..LayoutConcern::default()
+        }),
+    )
+    .into();
+    let trailing = icon_badge(IconName::More, SECONDARY, MUTED_SURFACE, props.icons);
+
+    ui!(build {
+        <Row
+            width={Size::fixed(width)}
+            height={Size::fixed(APP_BAR_H)}
+            padding={Insets {
+                top: 8.0,
+                right: CONTENT_INSET,
+                bottom: 8.0,
+                left: CONTENT_INSET,
+            }}
+            gap={TOUCH_GAP}
+            cross_align={tela_contract::CrossAlign::Center}
+            fill={Fill::Solid(SURFACE)}
+            border_width={1.0}
+            border_color={BORDER}
+        >
+            { browse_app_bar_leading_dsl(build, props.can_go_back, props.icons) }
+            { title }
+            { trailing }
+        </Row>
+    })
+}
+
+/// Builds the only plan-bearing app-bar child.
+///
+/// `ViewOutput` carries the transparent ActionTarget plan with its root, so callers may inline it
+/// or bind it to an ordinary Rust local before inserting it into a parent `ui!` expression.
+fn browse_app_bar_leading_dsl(
+    build: &mut ViewBuild<MobileAction>,
+    can_go_back: bool,
+    icons: &dyn IconProvider,
+) -> ViewResult<ViewOutput<MobileAction>> {
+    if !can_go_back {
+        return Ok(ViewOutput::opaque(icon_badge(
+            IconName::FolderOpen,
+            FOLDER,
+            FOLDER_SURFACE,
+            icons,
+        )));
+    }
+
+    ui!(build {
+        <ActionTarget action={MobileAction::GoBack}>
+            { icon_button_unbound(IconName::ArrowBack, icons) }
+        </ActionTarget>
+    })
+}
+
+fn search_field_dsl(
+    build: &mut ViewBuild<MobileAction>,
+    props: &MobileViewProps<'_>,
+    width: f32,
+) -> ViewResult<ViewOutput<MobileAction>> {
+    let label = if props.query.is_empty() {
+        "搜索文件和文件夹"
+    } else {
+        props.query
+    };
+    let color = if props.query.is_empty() {
+        SECONDARY
+    } else {
+        TEXT
+    };
+    let inner: UiNode = LayoutContainer::row([
+        icon(
+            IconName::Search,
+            if props.search_focused {
+                PRIMARY
+            } else {
+                SECONDARY
+            },
+            props.icons,
+        ),
+        text(label, 16.0, color),
+    ])
+    .layout(LayoutConcern {
+        gap: 12.0,
+        cross_align: tela_contract::CrossAlign::Center,
+        ..LayoutConcern::default()
+    })
+    .into();
+    let field = MobileSearchField::unbound(inner, "mobile.search")
+        .width((width - CONTENT_INSET * 2.0).max(1.0))
+        .height(SEARCH_FIELD_H)
+        .padding(Insets {
+            top: 0.0,
+            right: 16.0,
+            bottom: 0.0,
+            left: 16.0,
+        })
+        .surfaces(
+            MobileSurfaceStyle {
+                fill: MUTED_SURFACE,
+                border_color: Some(BORDER),
+                border_width: 1.0,
+                border_radius: BorderRadius::all(8.0),
+            },
+            MobileSurfaceStyle {
+                fill: SURFACE,
+                border_color: Some(PRIMARY),
+                border_width: 2.0,
+                border_radius: BorderRadius::all(8.0),
+            },
+        )
+        .focused(props.search_focused)
+        .into_node();
+
+    ui!(build {
+        <Frame
+            width={Size::fixed(width)}
+            height={Size::fixed(SEARCH_H)}
+            padding={Insets {
+                top: 8.0,
+                right: CONTENT_INSET,
+                bottom: 8.0,
+                left: CONTENT_INSET,
+            }}
+        >
+            <ActionTarget
+                on_input={MobileAction::Search}
+                on_submit={MobileAction::Search}
+                on_cancel={MobileAction::ClearSearch}
+            >
+                { field }
+            </ActionTarget>
+        </Frame>
+    })
+}
+
+fn browse_rows_dsl(
+    build: &mut ViewBuild<MobileAction>,
+    props: &MobileViewProps<'_>,
+    width: f32,
+) -> ViewResult<ViewOutput<MobileAction>> {
+    if props.entries.is_empty() {
+        let empty = empty_state(props.query);
+        return ui!(build {
+            <Column
+                width={Size::fixed((width - CONTENT_INSET * 2.0).max(1.0))}
+                padding={Insets {
+                    top: 8.0,
+                    right: 0.0,
+                    bottom: 24.0,
+                    left: 0.0,
+                }}
+            >
+                { empty }
+            </Column>
+        });
+    }
+
+    let entries = &props.entries;
+    let icons = props.icons;
+    ui!(build {
+        <Column
+            width={Size::fixed((width - CONTENT_INSET * 2.0).max(1.0))}
+            padding={Insets {
+                top: 8.0,
+                right: 0.0,
+                bottom: 24.0,
+                left: 0.0,
+            }}
+            gap={TOUCH_GAP}
+        >
+            <For each={entries.iter()} key={entry.id}>
+                {|entry|
+                    <ActionTarget action={MobileAction::OpenEntry(entry.id.to_owned())}>
+                        { entry_row_unbound(entry, width, icons) }
+                    </ActionTarget>
+                }
+            </For>
+        </Column>
+    })
 }
 
 fn app_bar(title: &str, can_go_back: bool, width: f32, icons: &dyn IconProvider) -> UiNode {
@@ -265,6 +516,44 @@ fn entry_row(entry: &Entry, width: f32, icons: &dyn IconProvider) -> UiNode {
         .into_node()
 }
 
+/// DSL collection item visual: it deliberately has no local semantic key because `<For>` owns
+/// the item identity and `<ActionTarget>` owns the action anchor.
+fn entry_row_unbound(entry: &Entry, width: f32, icons: &dyn IconProvider) -> UiNode {
+    let (icon_name, icon_color, icon_surface) = entry_style(entry.kind);
+    let kind = match entry.kind {
+        EntryKind::Folder => "文件夹",
+        EntryKind::Document => "文档",
+        EntryKind::Asset => "资源",
+    };
+    let metadata = format!("{kind}  ·  {}", entry.metadata);
+    MobileCell::new(entry.name)
+        .label(metadata)
+        .leading(icon_badge(icon_name, icon_color, icon_surface, icons))
+        .trailing(icon(IconName::ChevronRight, SECONDARY, icons))
+        .interactive()
+        .width(width)
+        .min_height(ROW_H)
+        .padding(Insets {
+            top: 8.0,
+            right: 12.0,
+            bottom: 8.0,
+            left: 12.0,
+        })
+        .style(MobileCellStyle {
+            surface: MobileSurfaceStyle {
+                fill: SURFACE,
+                border_color: Some(BORDER),
+                border_width: 1.0,
+                border_radius: BorderRadius::all(8.0),
+            },
+            title: TEXT,
+            label: SECONDARY,
+            value: SECONDARY,
+            ..MobileCellStyle::default()
+        })
+        .into_node()
+}
+
 fn preview(entry: &Entry, width: f32, height: f32, icons: &dyn IconProvider) -> UiNode {
     let (icon_name, icon_color, icon_surface) = entry_style(entry.kind);
     let heading: UiNode = LayoutContainer::row([
@@ -402,6 +691,19 @@ fn icon_button(icon_name: IconName, action_key: &str, icons: &dyn IconProvider) 
         .into_node()
 }
 
+/// DSL action-target visual: the outer DSL node owns its identity, not this Kit helper.
+fn icon_button_unbound(icon_name: IconName, icons: &dyn IconProvider) -> UiNode {
+    MobileIconButton::unbound(icon(icon_name, PRIMARY, icons))
+        .size(48.0, 48.0)
+        .surface(MobileSurfaceStyle {
+            fill: MUTED_SURFACE,
+            border_color: Some(BORDER),
+            border_width: 1.0,
+            border_radius: BorderRadius::all(8.0),
+        })
+        .into_node()
+}
+
 fn icon_badge(
     icon_name: IconName,
     color: Color,
@@ -446,6 +748,7 @@ fn semantic_identity(key: &str) -> IdentityConcern {
     IdentityConcern {
         key_strategy: KeyStrategy::SemanticId,
         semantic_key: Some(SemanticKey(key.to_owned())),
+        key_segment: None,
         update_mode: UpdateMode::Dirty,
     }
 }
