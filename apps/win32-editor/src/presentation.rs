@@ -31,17 +31,12 @@ pub fn render_root(
     about_rows: &[(String, String)],
 ) -> ViewResult<ViewOutput<EditorAction>> {
     ui!(build {
-        <Frame
-            key={"win32.root"}
+        <View
             width={Size::fixed(viewport.width)}
             height={Size::fixed(viewport.height)}
-            fill={Fill::Solid(CONTENT_BACKGROUND)}
+            fill={Fill::Solid(Color::BLUE)}
         >
-            <Column width={Size::fixed(viewport.width)} height={Size::fixed(viewport.height)}>
-                { top_bar(build, viewport.width, route) }
-                { page(build, viewport, route, settings, document, about_rows) }
-            </Column>
-        </Frame>
+        </View>
     })
 }
 
@@ -174,6 +169,8 @@ fn render_settings_page(
         >
             <Text value={"设置"} font_size={20.0} color={TEXT} />
             <Text value={"字体大小"} font_size={14.0} color={SECONDARY} />
+            <View key={"win32.divider.font"} width={Size::fixed(viewport.width - CONTENT_INSET * 2.0)}
+                  height={Size::fixed(1.0)} fill={Fill::Solid(BAR_BORDER)} />
             <Row gap={12.0} cross_align={CrossAlign::Center}>
                 { step_button(build, "font.small", "减小", EditorAction::SetFontSize(settings.font_size.saturating_sub(2).max(10))) }
                 <Text value={format!("{} pt", settings.font_size)} font_size={16.0} color={TEXT} />

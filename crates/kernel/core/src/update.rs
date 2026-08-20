@@ -195,6 +195,7 @@ fn hash_kind(kind: &NodeKind, hasher: &mut FnvHasher) {
             hash_grid_spec(spec, hasher);
         }
         NodeKind::Frame => hasher.write(11),
+        NodeKind::View => hasher.write(26),
         NodeKind::Expanded => hasher.write(12),
         NodeKind::Spacer => hasher.write(13),
         NodeKind::BaselineRow => hasher.write(14),

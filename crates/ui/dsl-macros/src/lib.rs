@@ -561,6 +561,7 @@ fn generate_element(
         "Column" => generate_container(element, "Column", build, dsl),
         "Row" => generate_container(element, "Row", build, dsl),
         "Frame" => generate_container(element, "Frame", build, dsl),
+        "View" => generate_container(element, "View", build, dsl),
         "Stack" => generate_container(element, "Stack", build, dsl),
         "ScrollView" => generate_container(element, "ScrollView", build, dsl),
         "Fragment" => generate_fragment(element, build, dsl, scopes),
@@ -572,7 +573,7 @@ fn generate_element(
         "Image" => generate_image(element, dsl),
         _ => Err(Error::new(
             element.name.span(),
-            "unsupported DSL tag; V1 supports Column, Row, Frame, Stack, ScrollView, Text, Icon, Image, For, VirtualList, Fragment, and ActionTarget",
+            "unsupported DSL tag; V1 supports Column, Row, Frame, View, Stack, ScrollView, Text, Icon, Image, For, VirtualList, Fragment, and ActionTarget",
         )),
     }
 }
@@ -633,6 +634,7 @@ fn generate_container(
         "Column" => quote!(#dsl::__private::NodeKind::Column),
         "Row" => quote!(#dsl::__private::NodeKind::Row),
         "Frame" => quote!(#dsl::__private::NodeKind::Frame),
+        "View" => quote!(#dsl::__private::NodeKind::View),
         "Stack" => quote!(#dsl::__private::NodeKind::Stack),
         "ScrollView" => quote!(#dsl::__private::NodeKind::ScrollView),
         _ => unreachable!("container kind is checked by caller"),

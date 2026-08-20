@@ -31,6 +31,8 @@ pub enum NodeKind {
     Grid(crate::GridSpec),
     /// 布局容器：单子节点盒，负责显式尺寸与盒模型边界。
     Frame,
+    /// 布局容器：通用盒模型容器，允许 0..1 个内容子节点（空 View = 纯装饰块）。
+    View,
     /// 布局包装器：在 Row/Column 已知主轴时分配剩余空间。
     Expanded,
     /// 布局原语：在 Row/Column 已知主轴时消费一份剩余空间。
@@ -84,6 +86,7 @@ impl NodeKind {
                 | NodeKind::Wrap
                 | NodeKind::Grid(_)
                 | NodeKind::Frame
+                | NodeKind::View
                 | NodeKind::Expanded
                 | NodeKind::Spacer
                 | NodeKind::BaselineRow

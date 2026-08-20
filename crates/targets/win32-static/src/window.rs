@@ -71,6 +71,8 @@ struct StaticWindowState {
     pointer_captured: bool,
     mouse_leave_tracking: bool,
     input_epoch: Instant,
+    /// 连续未成功呈现次数；达到阈值后暂停自动重绘（防 Outdated/Suboptimal 忙循环）。
+    render_retries: u32,
 }
 
 /// Creates the window and runs the message loop until the window closes.
@@ -96,6 +98,8 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
 
     // SAFETY: standard message loop on the thread that owns hwnd.
     let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+    let mut message_count = 0u64;
+    let mut last_message_at = Instant::now();
     loop {
         let retrieved = unsafe { GetMessageW(&mut message, None, 0, 0) };
         if retrieved.0 == 0 {
@@ -106,7 +110,22 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
         }
         // SAFETY: dispatch is the standard loop step for the owning thread.
         unsafe { DispatchMessageW(&message) };
+        message_count += 1;
+        let since_last = last_message_at.elapsed().as_millis();
+        last_message_at = Instant::now();
+        eprintln!(
+            "tela win32-static: msg #{message_count} 0x{:04x} wparam=0x{:x} hwnd=0x{:x} dt={}ms",
+            message.message,
+            message.wParam.0,
+            message.hwnd.0 as isize,
+            since_last
+        );
+        if message_count >= 200 {
+            eprintln!("tela win32-static: message log cap reached; silencing");
+            break;
+        }
     }
+    eprintln!("tela win32-static: message loop exited after {message_count} messages");
     Ok(())
 }
 
@@ -119,6 +138,7 @@ fn state_ptr(app: Box<dyn Win32StaticSession>, hwnd: HWND) -> isize {
         pointer_captured: false,
         mouse_leave_tracking: false,
         input_epoch: Instant::now(),
+        render_retries: 0,
     });
     Box::into_raw(state) as isize
 }
@@ -135,6 +155,7 @@ unsafe fn with_state<R>(hwnd: HWND, f: impl FnOnce(&mut StaticWindowState) -> R)
             pointer_captured: false,
             mouse_leave_tracking: false,
             input_epoch: Instant::now(),
+            render_retries: 0,
         });
     }
     f(unsafe { &mut *(value as *mut StaticWindowState) })
@@ -233,13 +254,7 @@ unsafe extern "system" fn wnd_proc(
         WM_SIZE => {
             unsafe {
                 with_state(hwnd, |state| {
-                    let (width, height) = client_size(hwnd);
-                    let dpr = state.dpi_scale;
-                    state.session.set_viewport(width, height, dpr);
-                    if let Some(gpu) = state.gpu.as_mut() {
-                        gpu.reconfigure((width * dpr) as u32, (height * dpr) as u32);
-                    }
-                    request_redraw(hwnd);
+                    state.update_viewport(hwnd, state.dpi_scale);
                 });
             }
             LRESULT(0)
@@ -247,16 +262,10 @@ unsafe extern "system" fn wnd_proc(
         WM_DPICHANGED => {
             unsafe {
                 with_state(hwnd, |state| {
-                    state.dpi_scale = (wparam.0 as u16) as f32 / 96.0;
-                    let (width, height) = client_size(hwnd);
-                    state.session.set_viewport(width, height, state.dpi_scale);
-                    if let Some(gpu) = state.gpu.as_mut() {
-                        gpu.reconfigure(
-                            (width * state.dpi_scale) as u32,
-                            (height * state.dpi_scale) as u32,
-                        );
-                    }
-                    request_redraw(hwnd);
+                    let new_dpr = (wparam.0 as u16) as f32 / 96.0;
+                    eprintln!("tela win32-static: DPI changed -> {:.2}", new_dpr);
+                    state.dpi_scale = new_dpr;
+                    state.update_viewport(hwnd, new_dpr);
                 });
             }
             LRESULT(0)
@@ -269,15 +278,21 @@ unsafe extern "system" fn wnd_proc(
                     // The first paint can arrive synchronously from UpdateWindow before any
                     // input/viewport event; ensure the frame exists before rendering.
                     let frame_ready = state.session.ensure_frame();
+                    eprintln!(
+                        "tela win32-static: paint begin: frame_ready={frame_ready}, gpu={}",
+                        state.gpu.is_some()
+                    );
                     if state.gpu.is_none() {
                         let (width, height) = client_size(hwnd);
-                        match GpuSession::new(
-                            hwnd,
-                            (width * state.dpi_scale) as u32,
-                            (height * state.dpi_scale) as u32,
-                            state.dpi_scale,
-                        ) {
-                            Ok(gpu) => state.gpu = Some(gpu),
+                        // GetClientRect 返回物理像素：surface config 直接用物理尺寸。
+                        match GpuSession::new(hwnd, width as u32, height as u32, state.dpi_scale) {
+                            Ok(gpu) => {
+                                eprintln!(
+                                    "tela win32-static: gpu ready {}x{} dpr={:.2}",
+                                    width as u32, height as u32, state.dpi_scale
+                                );
+                                state.gpu = Some(gpu);
+                            }
                             Err(error) => eprintln!("tela win32-static: gpu init: {error}"),
                         }
                     }
@@ -285,33 +300,46 @@ unsafe extern "system" fn wnd_proc(
                         if frame_ready {
                             match gpu.render(state.session.frame()) {
                                 Ok(RenderOutcome::Presented { suboptimal }) => {
+                                    state.render_retries = 0;
+                                    eprintln!(
+                                        "tela win32-static: presented suboptimal={suboptimal}"
+                                    );
                                     if suboptimal {
+                                        state.render_retries += 1;
                                         gpu.reconfigure(gpu.config.width, gpu.config.height);
-                                        request_redraw(hwnd);
+                                        state.redraw_or_backoff(hwnd, "suboptimal");
                                     }
                                 }
                                 Ok(RenderOutcome::Outdated) => {
+                                    state.render_retries += 1;
                                     gpu.reconfigure(gpu.config.width, gpu.config.height);
-                                    request_redraw(hwnd);
+                                    state.redraw_or_backoff(hwnd, "outdated");
                                 }
                                 Ok(RenderOutcome::Lost) => {
+                                    state.render_retries += 1;
                                     if let Err(error) = gpu.recreate(hwnd) {
                                         eprintln!("tela win32-static: surface recreate: {error}");
                                     }
-                                    request_redraw(hwnd);
+                                    state.redraw_or_backoff(hwnd, "lost");
                                 }
                                 Ok(RenderOutcome::Timeout) => {
-                                    request_redraw(hwnd);
+                                    state.render_retries += 1;
+                                    state.redraw_or_backoff(hwnd, "timeout");
                                 }
                                 Ok(RenderOutcome::Occluded) => {}
                                 Ok(RenderOutcome::Validation) => {
+                                    state.render_retries += 1;
                                     eprintln!("tela win32-static: surface validation failed");
                                 }
-                                Err(error) => eprintln!("tela win32-static: render: {error}"),
+                                Err(error) => {
+                                    state.render_retries += 1;
+                                    eprintln!("tela win32-static: render: {error}");
+                                }
                             }
                         }
                     }
                     let _ = EndPaint(hwnd, &paint);
+                    eprintln!("tela win32-static: paint end");
                 });
             }
             LRESULT(0)
@@ -477,6 +505,41 @@ unsafe extern "system" fn wnd_proc(
 }
 
 impl StaticWindowState {
+    /// 统一视口更新：GetClientRect 返回物理像素，逻辑尺寸 = 物理 / dpr；
+    /// surface config 用物理像素。尺寸真正变化时才请求重绘。
+    fn update_viewport(&mut self, hwnd: HWND, dpr: f32) {
+        let (physical_w, physical_h) = client_size(hwnd);
+        let logical_w = physical_w / dpr;
+        let logical_h = physical_h / dpr;
+        let changed = self.session.set_viewport(logical_w, logical_h, dpr);
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.reconfigure(physical_w as u32, physical_h as u32);
+        }
+        if changed {
+            eprintln!(
+                "tela win32-static: viewport {:.0}x{:.0} logical, {}x{} physical, dpr={:.2}",
+                logical_w, logical_h, physical_w as u32, physical_h as u32, dpr
+            );
+            request_redraw(hwnd);
+        }
+    }
+
+    /// 重绘或熔断：连续失败达到阈值后暂停自动重绘，避免 Outdated/Suboptimal 忙循环。
+    fn redraw_or_backoff(&mut self, hwnd: HWND, reason: &str) {
+        if self.render_retries >= 5 {
+            eprintln!(
+                "tela win32-static: render backoff after {} retries ({reason}); waiting for the next viewport/input event",
+                self.render_retries
+            );
+            return;
+        }
+        eprintln!(
+            "tela win32-static: render retry #{}/5 ({reason})",
+            self.render_retries
+        );
+        request_redraw(hwnd);
+    }
+
     fn mouse_pointer_event(
         &self,
         phase: PointerPhase,

@@ -419,6 +419,8 @@ fn validate_layout_shape(
         NodeKind::Frame | NodeKind::Expanded | NodeKind::Overlay(_) if node.children.len() != 1 => {
             Err(UiBuildError::InvalidLayoutShape)
         }
+        // View 是通用盒模型容器：允许空（纯装饰块）或恰好一个内容子节点。
+        NodeKind::View if node.children.len() > 1 => Err(UiBuildError::InvalidLayoutShape),
         NodeKind::Spacer if !node.children.is_empty() => Err(UiBuildError::InvalidLayoutShape),
         NodeKind::Expanded | NodeKind::Spacer
             if !matches!(parent_kind, Some(NodeKind::Row) | Some(NodeKind::Column)) =>

@@ -2061,3 +2061,45 @@ fn stack_content_overlay_interleaved_indices() {
     assert_eq!(frame.commands[2].geometry.y, 0.0);
     assert_eq!(frame.commands[2].geometry.w, 40.0);
 }
+
+#[test]
+fn view_accepts_zero_or_one_child() {
+    // 空 View = 纯装饰块。
+    let empty: UiNode = UiNode::new(tela_contract::NodeKind::View)
+        .with_layout(LayoutConcern {
+            width: Some(Size::fixed(40.0)),
+            height: Some(Size::fixed(2.0)),
+            ..LayoutConcern::default()
+        })
+        .with_visual(tela_contract::VisualConcern {
+            fill: Some(tela_contract::Fill::Solid(tela_contract::Color::BLACK)),
+            ..tela_contract::VisualConcern::default()
+        });
+    let tree = UiTree::new(empty.clone()).expect("empty view must be valid");
+    let frame = tree
+        .resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
+        .expect("empty view resolves");
+    assert!(!frame.commands.is_empty(), "empty view draws its fill");
+
+    // 单子 View = 通用盒子。
+    let single = UiNode::new(tela_contract::NodeKind::View)
+        .with_layout(LayoutConcern {
+            width: Some(Size::fixed(120.0)),
+            height: Some(Size::fixed(48.0)),
+            ..LayoutConcern::default()
+        })
+        .with_children([rect(10.0, 10.0)]);
+    let tree = UiTree::new(single.clone()).expect("single-child view must be valid");
+    assert!(
+        tree.resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
+            .is_ok()
+    );
+
+    // 双子 View 拒绝。
+    let multi = UiNode::new(tela_contract::NodeKind::View)
+        .with_children([rect(10.0, 10.0), rect(10.0, 10.0)]);
+    assert!(matches!(
+        UiTree::new(multi),
+        Err(UiBuildError::InvalidLayoutShape)
+    ));
+}

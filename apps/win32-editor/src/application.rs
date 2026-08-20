@@ -132,6 +132,12 @@ impl App {
         }
         self.frames.runtime().begin_frame();
         let dirty = self.frames.runtime().take_dirty();
+        eprintln!(
+            "tela-win32-editor: rebuild invalidated={} dirty={:?} route={:?}",
+            self.projection_invalidated,
+            dirty,
+            self.route.get()
+        );
         let mut candidate_state = self.view_state.clone();
         let prepared = match self.prepare_projection() {
             Ok(prepared) => prepared,

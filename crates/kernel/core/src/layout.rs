@@ -149,6 +149,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             NodeKind::Wrap => self.measure_wrap(node, constraints, children),
             NodeKind::Grid(spec) => self.measure_grid(node, spec, constraints, children),
             NodeKind::Frame => self.measure_frame(node, constraints, children),
+            NodeKind::View => self.measure_view(node, constraints, children),
             // Expanded/Spacer/Overlay only receive their final context from the parent primitive.
             // The fallback makes malformed direct use deterministic; validation rejects it in normal trees.
             NodeKind::Expanded => self.measure_expanded_after_visit(
@@ -708,6 +709,69 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             h: self_h,
             first_baseline: propagated_baseline(&children),
             children,
+        })
+    }
+
+    /// 通用盒模型容器：0..1 个内容子节点（空 View = 纯装饰块）。
+    fn measure_view<P: ChildMeasurer<M>>(
+        &mut self,
+        node: &UiNode,
+        constraints: Constraints,
+        child_measurer: &mut P,
+    ) -> Result<LayoutBox, UiLayoutError> {
+        let layout = layout_of(node);
+        let known_w = self.declared_extent(node, Axis::Width, constraints)?;
+        let known_h = self.declared_extent(node, Axis::Height, constraints)?;
+        let mut child_constraints = inner_constraints(constraints, &layout);
+        if let Some(width) = known_w {
+            set_axis_range(
+                &mut child_constraints,
+                Axis::Width,
+                0.0,
+                (width - axis_insets(&layout, Axis::Width)).max(0.0),
+            );
+        }
+        if let Some(height) = known_h {
+            set_axis_range(
+                &mut child_constraints,
+                Axis::Height,
+                0.0,
+                (height - axis_insets(&layout, Axis::Height)).max(0.0),
+            );
+        }
+        let child = match node.children.first() {
+            Some(child) => {
+                let mut measured =
+                    child_measurer.measure_child(self, child, 0, child_constraints)?;
+                measured.x = content_origin(&layout, Axis::Width);
+                measured.y = content_origin(&layout, Axis::Height);
+                measured
+            }
+            None => LayoutBox::default(),
+        };
+        let self_w = known_w.unwrap_or(self.resolve_self_axis(
+            node,
+            Axis::Width,
+            child.w + axis_insets(&layout, Axis::Width),
+            constraints,
+        )?);
+        let self_h = known_h.unwrap_or(self.resolve_self_axis(
+            node,
+            Axis::Height,
+            child.h + axis_insets(&layout, Axis::Height),
+            constraints,
+        )?);
+        Ok(LayoutBox {
+            x: 0.0,
+            y: 0.0,
+            w: self_w,
+            h: self_h,
+            first_baseline: child.first_baseline.map(|baseline| child.y + baseline),
+            children: if node.children.is_empty() {
+                Vec::new()
+            } else {
+                vec![child]
+            },
         })
     }
 

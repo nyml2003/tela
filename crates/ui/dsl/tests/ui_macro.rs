@@ -1307,3 +1307,47 @@ fn for_requires_one_real_item_root_after_fragment_lowering() {
         Err(ViewBuildError::ForItemRequiresSingleRoot { actual: 2, .. })
     ));
 }
+
+fn render_view_container(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
+    ui!(build {
+        <View
+            key={"view.container"}
+            width={tela_contract::Size::fixed(120.0)}
+            height={tela_contract::Size::fixed(48.0)}
+            fill={tela_contract::Fill::Solid(tela_contract::Color::BLUE)}
+        >
+            <Text value={"boxed"} />
+        </View>
+    })
+}
+
+fn render_empty_view(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
+    ui!(build {
+        <View
+            key={"view.empty"}
+            width={tela_contract::Size::fixed(40.0)}
+            height={tela_contract::Size::fixed(2.0)}
+            fill={tela_contract::Fill::Solid(tela_contract::Color::BLACK)}
+        />
+    })
+}
+
+#[test]
+fn view_renders_as_a_boxed_container() {
+    let mut build = ViewBuild::new();
+    let view = render_view_container(&mut build).expect("view container");
+    let tree = UiTree::new(view.node().clone()).expect("view tree");
+    assert_eq!(view.node().kind, tela_contract::NodeKind::View);
+    assert_eq!(view.node().children.len(), 1);
+    assert!(tree.keys().iter().any(|key| key.0 == "view.container"));
+}
+
+#[test]
+fn empty_view_builds_as_a_decoration_block() {
+    let mut build = ViewBuild::new();
+    let view = render_empty_view(&mut build).expect("empty view");
+    assert_eq!(view.node().kind, tela_contract::NodeKind::View);
+    assert!(view.node().children.is_empty());
+    let tree = UiTree::new(view.node().clone()).expect("empty view tree");
+    assert!(tree.keys().iter().any(|key| key.0 == "view.empty"));
+}
