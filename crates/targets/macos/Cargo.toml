@@ -6,6 +6,7 @@ publish.workspace = true
 description = "Tela macOS AppKit and Metal target host"
 
 [dependencies]
+tela-bridge = { path = "../../delivery/bridge", features = ["host"] }
 tela-desktop-runtime = { path = "../../delivery/desktop-runtime" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -34,6 +35,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSNotification",
     "NSObject",
     "NSString",
+    "NSTimeZone",
     "NSTimer",
 ] }
 pollster = "0.4"

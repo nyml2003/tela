@@ -4,7 +4,7 @@ import type { ProcessOptions, ProcessPort, ProcessResult } from '../domain/ports
 
 /** 子进程执行：捕获 stdout/stderr（可能超长截断尾部），失败不抛异常、返回码为准。 */
 export class NodeProcessPort implements ProcessPort {
-  private static readonly MAX_CAPTURE = 64 * 1024;
+  private static readonly MAX_CAPTURE = 256 * 1024;
 
   async run(cmd: string, args: string[], opts: ProcessOptions = {}): Promise<ProcessResult> {
     return new Promise((resolve, reject) => {

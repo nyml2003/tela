@@ -34,6 +34,7 @@ const ZERO_DEP_CRATES = new Set([
  */
 const ALLOWED_NORMAL: AllowedDeps = {
   'tela-app-abi': ['postcard', 'serde', 'tela-contract'],
+  'tela-bridge': ['postcard', 'serde', 'tela-utils'],
   'tela-bundle': ['hex', 'serde', 'serde_json', 'sha2', 'tela-app-abi', 'zip'],
   'tela-core': ['tela-contract'],
   'tela-desktop-demo': [
@@ -46,7 +47,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-ui-headless',
     'tela-ui-foundation',
   ],
-  'tela-desktop-runtime': ['tela-bundle', 'tela-guest-runtime'],
+  'tela-desktop-runtime': ['tela-bridge', 'tela-bundle', 'tela-guest-runtime', 'tela-utils'],
   'tela-desktop-ui-kit': [
     'tela-contract',
     'tela-core',
@@ -56,6 +57,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
   'tela-guest-runtime': [
     'serde_json',
     'tela-app-abi',
+    'tela-bridge',
     'tela-bundle',
     'tela-contract',
     'wasmtime',
@@ -76,6 +78,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
   ],
   'tela-product-desktop-guest': [
     'tela-app-abi',
+    'tela-bridge',
     'tela-contract',
     'tela-desktop-demo',
     'tela-icon-resources',
@@ -87,6 +90,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-mobile-demo',
     'tela-target-ios',
     'tela-text-resources',
+  ],
+  'tela-product-win32-editor': [
+    'tela-contract',
+    'tela-desktop-runtime',
+    'tela-icon-resources',
+    'tela-utils',
+    'tela-target-win32-static',
+    'tela-text-resources',
+    'tela-win32-editor',
   ],
   'tela-product-mobile-guest': [
     'tela-app-abi',
@@ -132,11 +144,29 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'pollster',
     'raw-window-handle',
     'tela-app-abi',
+    'tela-bridge',
     'tela-contract',
     'tela-desktop-runtime',
     'tela-render-wgpu',
     'ureq',
     'wgpu',
+  ],
+  'tela-win32-editor': [
+    'tela-bridge',
+    'tela-contract',
+    'tela-core',
+    'tela-ui-dsl',
+    'tela-ui-foundation',
+  ],
+  'tela-target-win32-static': [
+    'pollster',
+    'raw-window-handle',
+    'tela-bridge',
+    'tela-contract',
+    'tela-desktop-runtime',
+    'tela-render-wgpu',
+    'wgpu',
+    'windows',
   ],
   'tela-target-webview': [
     'serde_json',
@@ -149,10 +179,12 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'web-sys',
     'wgpu',
   ],
+  'tela-utils': ['serde', 'serde_json'],
   'tela-target-win32': [
     'pollster',
     'raw-window-handle',
     'tela-app-abi',
+    'tela-bridge',
     'tela-contract',
     'tela-desktop-runtime',
     'tela-render-wgpu',
@@ -171,6 +203,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
 const ALLOWED_DEV: AllowedDeps = {
   'tela-desktop-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-desktop-runtime': ['serde_json', 'tela-app-abi'],
+  'tela-win32-editor': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-mobile-demo': [
     'tela-icon-resources',
     'tela-render-raster',

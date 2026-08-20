@@ -2331,6 +2331,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-bridge"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "tela-utils",
+]
+
+[[package]]
 name = "tela-bundle"
 version = "0.1.0"
 dependencies = [
@@ -2376,8 +2385,10 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tela-app-abi",
+ "tela-bridge",
  "tela-bundle",
  "tela-guest-runtime",
+ "tela-utils",
 ]
 
 [[package]]
@@ -2400,6 +2411,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tela-app-abi",
+ "tela-bridge",
  "tela-bundle",
  "tela-contract",
  "wasmtime",
@@ -2447,6 +2459,7 @@ name = "tela-product-desktop-guest"
 version = "0.1.0"
 dependencies = [
  "tela-app-abi",
+ "tela-bridge",
  "tela-contract",
  "tela-desktop-demo",
  "tela-icon-resources",
@@ -2473,6 +2486,19 @@ dependencies = [
  "tela-icon-resources",
  "tela-mobile-demo",
  "tela-text-resources",
+]
+
+[[package]]
+name = "tela-product-win32-editor"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-desktop-runtime",
+ "tela-icon-resources",
+ "tela-target-win32-static",
+ "tela-text-resources",
+ "tela-utils",
+ "tela-win32-editor",
 ]
 
 [[package]]
@@ -2551,6 +2577,7 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "tela-app-abi",
+ "tela-bridge",
  "tela-contract",
  "tela-desktop-runtime",
  "tela-render-wgpu",
@@ -2580,10 +2607,25 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "tela-app-abi",
+ "tela-bridge",
  "tela-contract",
  "tela-desktop-runtime",
  "tela-render-wgpu",
  "ureq",
+ "wgpu",
+ "windows",
+]
+
+[[package]]
+name = "tela-target-win32-static"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "raw-window-handle",
+ "tela-bridge",
+ "tela-contract",
+ "tela-desktop-runtime",
+ "tela-render-wgpu",
  "wgpu",
  "windows",
 ]
@@ -2631,6 +2673,28 @@ version = "0.1.0"
 dependencies = [
  "tela-contract",
  "tela-core",
+]
+
+[[package]]
+name = "tela-utils"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tela-win32-editor"
+version = "0.1.0"
+dependencies = [
+ "tela-bridge",
+ "tela-contract",
+ "tela-core",
+ "tela-icon-resources",
+ "tela-render-raster",
+ "tela-text-resources",
+ "tela-ui-dsl",
+ "tela-ui-foundation",
 ]
 
 [[package]]

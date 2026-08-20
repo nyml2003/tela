@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test:wire": "esbuild bridge-wire.test.mjs --bundle --format=esm --outfile=dist-test/bridge-wire.test.mjs && node dist-test/bridge-wire.test.mjs"
   },
   "dependencies": {
     "solid-js": "^1.9.14"

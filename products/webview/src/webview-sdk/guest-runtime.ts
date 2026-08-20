@@ -19,6 +19,10 @@ interface GuestExports {
   tela_app_status_len: GuestFunction;
   tela_app_error_ptr: GuestFunction;
   tela_app_error_len: GuestFunction;
+  tela_app_request_begin?: GuestFunction;
+  tela_app_request_len?: GuestFunction;
+  tela_app_bridge_dispatch_begin?: GuestFunction;
+  tela_app_bridge_dispatch?: GuestFunction;
 }
 
 export interface GuestPublication {
@@ -74,6 +78,48 @@ export class TelaGuestRuntime {
       if (diagnostic) throw new Error(diagnostic);
     }
     return this.refresh(changed);
+  }
+
+  /** Whether the guest exposes the full bridge ABI (all four exports present). */
+  bridgeAvailable(): boolean {
+    return (
+      this.exports.tela_app_request_begin !== undefined &&
+      this.exports.tela_app_request_len !== undefined &&
+      this.exports.tela_app_bridge_dispatch_begin !== undefined &&
+      this.exports.tela_app_bridge_dispatch !== undefined
+    );
+  }
+
+  /** Length of the guest's queued bridge request packets; `0` when unavailable. */
+  bridgeRequestLen(): number {
+    const requestLen = this.exports.tela_app_request_len;
+    if (!requestLen) return 0;
+    return requestLen() >>> 0;
+  }
+
+  /** Reads the guest's queued bridge request packets (raw bytes, caller decodes). */
+  bridgeReadRequests(): Uint8Array {
+    const requestBegin = this.exports.tela_app_request_begin;
+    if (!requestBegin) return new Uint8Array(0);
+    const length = this.bridgeRequestLen();
+    if (length === 0) return new Uint8Array(0);
+    const pointer = requestBegin(0) >>> 0;
+    return this.copyFromGuest(pointer, length, 'bridge requests');
+  }
+
+  /** Delivers one encoded bridge event packet (response) to the guest. */
+  bridgeDeliver(packet: Uint8Array): void {
+    const dispatchBegin = this.exports.tela_app_bridge_dispatch_begin;
+    const dispatch = this.exports.tela_app_bridge_dispatch;
+    if (!dispatchBegin || !dispatch) {
+      throw new Error('应用 guest 未暴露桥 ABI');
+    }
+    if (packet.byteLength > MAX_PACKET_BYTES) {
+      throw new Error(`桥事件包超过 ${MAX_PACKET_BYTES / 1024 / 1024} MiB 限制`);
+    }
+    const pointer = dispatchBegin(packet.byteLength) >>> 0;
+    this.copyIntoGuest(pointer, packet);
+    dispatch(packet.byteLength);
   }
 
   /** Latest guest frame; valid only after initialization. */

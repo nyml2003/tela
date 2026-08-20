@@ -5,10 +5,12 @@
 //! owned by `run_window`; GPU resources are dropped from `WM_DESTROY`, while the HWND is valid.
 
 use std::{
+    cell::RefCell,
     env,
     ffi::c_void,
     num::NonZeroIsize,
     path::PathBuf,
+    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -26,8 +28,14 @@ use tela_app_abi::{
     AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind, AppPointerPhase,
     CursorKind,
 };
+use tela_bridge::BridgeDispatcher;
 use tela_contract::{Color, UiFrame};
+use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
 use tela_render_wgpu::WgpuRenderer;
+
+#[path = "providers.rs"]
+mod providers;
+use providers::{WindowMetrics, build_dispatcher};
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -203,6 +211,8 @@ struct WindowState {
     pointer_captured: bool,
     startup_error: Option<String>,
     terminal_error: Option<String>,
+    bridge: Option<BridgeDispatcher>,
+    bridge_metrics: Rc<RefCell<WindowMetrics>>,
 }
 
 impl WindowState {
@@ -228,6 +238,8 @@ impl WindowState {
             pointer_captured: false,
             startup_error: None,
             terminal_error: None,
+            bridge_metrics: Rc::new(RefCell::new(WindowMetrics::default())),
+            bridge: None,
         }
     }
 
@@ -256,6 +268,13 @@ impl WindowState {
     fn install_runtime(&mut self, runtime: GuestRuntime) {
         if self.lifecycle.phase() != ShellPhase::Loading {
             return;
+        }
+        if self.bridge.is_none() {
+            self.bridge = Some(build_dispatcher(
+                Rc::clone(&self.bridge_metrics),
+                &BuildConstants::default(),
+                vec![],
+            ));
         }
         let activation: Result<(), String> = (|| {
             let frame = runtime.frame().map_err(|error| error.to_string())?;
@@ -389,6 +408,11 @@ impl WindowState {
     fn dispatch_viewport(&mut self, metrics: ClientMetrics) -> Result<(), String> {
         // A frame from the previous client geometry must not route input after this point.
         self.presented_frame_token = None;
+        self.bridge_metrics.replace(WindowMetrics {
+            width: (metrics.width as f32 / metrics.dpi_scale) as u32,
+            height: (metrics.height as f32 / metrics.dpi_scale) as u32,
+            dpr: metrics.dpi_scale,
+        });
         self.dispatch_guest(AppEvent::Viewport {
             width: metrics.width as f32 / metrics.dpi_scale,
             height: metrics.height as f32 / metrics.dpi_scale,
@@ -442,6 +466,9 @@ impl WindowState {
                 .dispatch(&event)
                 .map_err(|error| error.to_string())?;
             let frame = runtime.frame().map_err(|error| error.to_string())?;
+            if let Some(dispatcher) = self.bridge.as_mut() {
+                process_bridge_requests(runtime, dispatcher)?;
+            }
             (changed, frame, runtime.status().frame_token)
         };
         self.frame = Some(frame);

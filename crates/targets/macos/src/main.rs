@@ -15,10 +15,15 @@ use tela_desktop_runtime::{LaunchMode, PlatformLaunchOptions, launch_mode, usage
 mod appkit;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
+mod ffi;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod gpu;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod input;
+#[cfg(target_os = "macos")]
+mod providers;
 #[cfg(target_os = "macos")]
 mod startup;
 #[cfg(target_os = "macos")]

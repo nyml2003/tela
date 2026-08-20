@@ -1,0 +1,26 @@
+[package]
+name = "tela-product-win32-editor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela Win32 static text editor product assembly (static-link shell + DSL app)"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-desktop-runtime = { path = "../../crates/delivery/desktop-runtime" }
+tela-utils = { path = "../../crates/support/utils" }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-target-win32-static = { path = "../../crates/targets/win32-static" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+tela-win32-editor = { path = "../../apps/win32-editor", features = ["app-runtime"] }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[[bin]]
+name = "tela-win32-editor-host"
+path = "src/main.rs"

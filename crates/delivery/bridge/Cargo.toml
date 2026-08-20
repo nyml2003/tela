@@ -1,0 +1,19 @@
+[package]
+name = "tela-bridge"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela host bridge contract: versioned capability requests, results, and transport codec"
+
+[dependencies]
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+tela-utils = { path = "../../support/utils" }
+
+[features]
+default = []
+guest = []
+host = []
+
+[lints]
+workspace = true

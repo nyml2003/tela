@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tela-app-abi = { path = "../../crates/delivery/app-abi" }
+tela-bridge = { path = "../../crates/delivery/bridge", features = ["guest"] }
 tela-contract = { path = "../../crates/kernel/contract" }
 tela-desktop-demo = { path = "../../apps/desktop-demo", features = ["app-runtime"] }
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }

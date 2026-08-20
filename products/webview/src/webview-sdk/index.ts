@@ -6,6 +6,8 @@ import { loadDevelopmentBundle } from './bundle-loader';
 import { TelaGuestRuntime } from './guest-runtime';
 import { installInputBridge, type InputBridgeHandle } from './input-bridge';
 import { observeCanvasSurface, syncCanvasSurface, type CanvasSurfaceSize } from './surface';
+import { decodeRequestPacket, encodeResponseEvent } from './bridge-codec';
+import { handleBridgeRequest } from './bridge-providers';
 
 export interface StartTelaWebviewOptions {
   /** One focusable DOM canvas owned by the caller. */
@@ -76,9 +78,61 @@ export async function startTelaWebview(
   const dispatch = (packet: Uint8Array): boolean => {
     if (closed) return false;
     const publication = guest.dispatch(packet);
+    processBridgeRequests();
     input?.synchronize();
     scheduleRender();
     return publication.changed;
+  };
+  /** 桥队列处理：读队列 → 逐个 provider → 回投；异步 provider 完成后再回投。 */
+  const processBridgeRequests = (): void => {
+    if (closed || !guest.bridgeAvailable()) return;
+    const raw = guest.bridgeReadRequests();
+    if (raw.byteLength === 0) return;
+    let offset = 0;
+    let handled = 0;
+    while (offset < raw.byteLength) {
+      let decoded;
+      try {
+        decoded = decodeRequestPacket(raw.subarray(offset));
+      } catch (error) {
+        console.error(`桥请求包解码失败: ${String(error)}`);
+        break;
+      }
+      const request = decoded.request;
+      offset += decoded.consumed;
+      const outcome = handleBridgeRequest(request);
+      if (outcome.immediate) {
+        guest.bridgeDeliver(
+          encodeResponseEvent(
+            request.request_id,
+            outcome.error
+              ? { kind: 'err', error: outcome.error }
+              : { kind: 'ok', payload: outcome.payload },
+          ),
+        );
+      } else {
+        outcome.promise
+          ?.then((result) => {
+            if (closed) return;
+            guest.bridgeDeliver(
+              encodeResponseEvent(
+                request.request_id,
+                result.error
+                  ? { kind: 'err', error: result.error }
+                  : { kind: 'ok', payload: result.payload },
+              ),
+            );
+            scheduleRender();
+          })
+          .catch((error: unknown) => {
+            console.error(`桥异步 provider 失败: ${String(error)}`);
+          });
+      }
+      handled++;
+    }
+    if (handled > 0) {
+      console.debug(`tela bridge: 处理 ${handled} 个请求`);
+    }
   };
   const dispatchViewport = (surface: CanvasSurfaceSize) => {
     currentSurface = surface;

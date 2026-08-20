@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Desktop shell bridge loop driver (drain guest requests, dispatch, deliver).
+pub mod bridge;
 /// Development-bundle retrieval, validation, and cache fallback.
 pub mod bundle_loader;
 /// Platform-neutral command-line parsing for native development shells.
@@ -15,6 +17,7 @@ pub mod launch;
 /// Common native shell lifecycle policy without windowing or GPU objects.
 pub mod lifecycle;
 
+pub use bridge::{deliver_event, process_bridge_requests};
 pub use bundle_loader::{
     BundleLoadError, BundleLoadMetrics, BundleLoader, BundleSource, LoadedBundle,
 };

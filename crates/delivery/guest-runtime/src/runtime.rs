@@ -8,6 +8,7 @@ use std::{
 use tela_app_abi::{
     ABI_VERSION, AppEvent, AppStatus, FrameCodecError, decode_frame, decode_status, encode_event,
 };
+use tela_bridge::{BridgeRequest, decode_request_stream};
 use tela_contract::UiFrame;
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store, TypedFunc};
 
@@ -64,6 +65,12 @@ pub struct GuestRuntime {
     status_len: TypedFunc<(), u32>,
     error_ptr: TypedFunc<(), u32>,
     error_len: TypedFunc<(), u32>,
+    // Bridge ABI exports are optional: guests that do not implement them get a transparently
+    // unavailable bridge instead of a hard failure.
+    bridge_request_begin: Option<TypedFunc<u32, u32>>,
+    bridge_request_len: Option<TypedFunc<(), u32>>,
+    bridge_dispatch_begin: Option<TypedFunc<u32, u32>>,
+    bridge_dispatch: Option<TypedFunc<u32, ()>>,
     // Keep only portable frame bytes here. `UiFrame` can contain a host-only CustomDraw trait
     // object and is intentionally not Send; the native UI thread decodes it after worker handoff.
     frame_packet: Vec<u8>,
@@ -108,6 +115,12 @@ impl GuestRuntime {
         let status_len = export(&instance, &mut store, "tela_app_status_len")?;
         let error_ptr = export(&instance, &mut store, "tela_app_error_ptr")?;
         let error_len = export(&instance, &mut store, "tela_app_error_len")?;
+        // Bridge exports are optional; any missing export makes the bridge unavailable.
+        let bridge_request_begin = optional_export(&instance, &mut store, "tela_app_request_begin");
+        let bridge_request_len = optional_export(&instance, &mut store, "tela_app_request_len");
+        let bridge_dispatch_begin =
+            optional_export(&instance, &mut store, "tela_app_bridge_dispatch_begin");
+        let bridge_dispatch = optional_export(&instance, &mut store, "tela_app_bridge_dispatch");
 
         let host_abi = abi_version.call(&mut store, ()).map_err(|error| {
             GuestRuntimeError::message(format!("read guest ABI version: {error}"))
@@ -130,6 +143,10 @@ impl GuestRuntime {
             status_len,
             error_ptr,
             error_len,
+            bridge_request_begin,
+            bridge_request_len,
+            bridge_dispatch_begin,
+            bridge_dispatch,
             frame_packet: Vec::new(),
             status: AppStatus::default(),
             metrics: GuestRuntimeMetrics {
@@ -217,6 +234,84 @@ impl GuestRuntime {
         Ok(changed != 0)
     }
 
+    /// Whether the guest exposes the full bridge ABI (all four exports present).
+    pub fn bridge_available(&self) -> bool {
+        self.bridge_request_begin.is_some()
+            && self.bridge_request_len.is_some()
+            && self.bridge_dispatch_begin.is_some()
+            && self.bridge_dispatch.is_some()
+    }
+
+    /// Length of the guest's queued bridge request packets; `0` when the bridge is unavailable.
+    pub fn bridge_request_len(&mut self) -> u32 {
+        let Some(request_len) = self.bridge_request_len.clone() else {
+            return 0;
+        };
+        request_len.call(&mut self.store, ()).unwrap_or(0)
+    }
+
+    /// Drains and decodes the guest's queued bridge requests (empty when unavailable).
+    pub fn bridge_drain_requests(&mut self) -> Result<Vec<BridgeRequest>, GuestRuntimeError> {
+        let Some(request_begin) = self.bridge_request_begin.clone() else {
+            return Ok(Vec::new());
+        };
+        let Some(request_len) = self.bridge_request_len.clone() else {
+            return Ok(Vec::new());
+        };
+        let len = request_len.call(&mut self.store, ()).map_err(|error| {
+            GuestRuntimeError::message(format!("read guest bridge request length: {error}"))
+        })? as usize;
+        if len == 0 || len > MAX_PACKET_BYTES {
+            return Ok(Vec::new());
+        }
+        let pointer = request_begin.call(&mut self.store, 0).map_err(|error| {
+            GuestRuntimeError::message(format!("read guest bridge request pointer: {error}"))
+        })? as usize;
+        let mut bytes = vec![0; len];
+        self.memory
+            .read(&self.store, pointer, &mut bytes)
+            .map_err(|error| {
+                GuestRuntimeError::message(format!("copy guest bridge requests: {error}"))
+            })?;
+        decode_request_stream(&bytes).map_err(|error| {
+            GuestRuntimeError::message(format!("invalid guest bridge request packet: {error}"))
+        })
+    }
+
+    /// Delivers one encoded bridge event packet to the guest (response or future message).
+    pub fn bridge_deliver(&mut self, bytes: &[u8]) -> Result<(), GuestRuntimeError> {
+        let Some(dispatch_begin) = self.bridge_dispatch_begin.clone() else {
+            return Err(GuestRuntimeError::message(
+                "guest does not expose the bridge ABI",
+            ));
+        };
+        let Some(dispatch) = self.bridge_dispatch.clone() else {
+            return Err(GuestRuntimeError::message(
+                "guest does not expose the bridge ABI",
+            ));
+        };
+        if bytes.len() > MAX_PACKET_BYTES {
+            return Err(GuestRuntimeError::message(
+                "bridge event packet exceeds host limit",
+            ));
+        }
+        let pointer = dispatch_begin
+            .call(&mut self.store, bytes.len() as u32)
+            .map_err(|error| {
+                GuestRuntimeError::message(format!("reserve guest bridge input: {error}"))
+            })? as usize;
+        self.memory
+            .write(&mut self.store, pointer, bytes)
+            .map_err(|error| {
+                GuestRuntimeError::message(format!("copy bridge event into guest memory: {error}"))
+            })?;
+        dispatch
+            .call(&mut self.store, bytes.len() as u32)
+            .map_err(|error| {
+                GuestRuntimeError::message(format!("dispatch bridge event to guest: {error}"))
+            })
+    }
+
     fn refresh_publications(&mut self) -> Result<(), GuestRuntimeError> {
         let frame_packet = self.read_export(self.frame_ptr.clone(), self.frame_len.clone())?;
         let status_packet = self.read_export(self.status_ptr.clone(), self.status_len.clone())?;
@@ -271,6 +366,18 @@ impl GuestRuntime {
             .map_err(|error| GuestRuntimeError::message(format!("copy guest output: {error}")))?;
         Ok(bytes)
     }
+}
+
+fn optional_export<Params, Results>(
+    instance: &Instance,
+    store: &mut Store<()>,
+    name: &str,
+) -> Option<TypedFunc<Params, Results>>
+where
+    Params: wasmtime::WasmParams,
+    Results: wasmtime::WasmResults,
+{
+    instance.get_typed_func(store, name).ok()
 }
 
 fn export<Params, Results>(

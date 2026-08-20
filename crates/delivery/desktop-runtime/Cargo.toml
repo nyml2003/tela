@@ -6,6 +6,8 @@ publish.workspace = true
 description = "Desktop dynamic guest cache and lifecycle runtime"
 
 [dependencies]
+tela-bridge = { path = "../bridge", features = ["host"] }
+tela-utils = { path = "../../support/utils" }
 tela-bundle = { path = "../bundle" }
 tela-guest-runtime = { path = "../guest-runtime" }
 

@@ -17,10 +17,17 @@ use objc2_app_kit::{
     NSTrackingRectTag, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString};
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use tela_app_abi::{
     AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind, AppPointerPhase,
     CursorKind,
 };
+use tela_bridge::BridgeDispatcher;
+use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
+
+use crate::providers::MacMetrics;
 use tela_contract::UiFrame;
 use tela_desktop_runtime::{
     DeviceLossAction, GuestRuntime, PlatformLaunchOptions, ShellLifecycle, ShellPhase,
@@ -51,6 +58,8 @@ struct ViewState {
     surface_retry_deadline: Option<Instant>,
     status_label: Retained<NSTextField>,
     terminal_error: Option<String>,
+    bridge: Option<BridgeDispatcher>,
+    bridge_metrics: Rc<RefCell<MacMetrics>>,
 }
 
 define_class!(
@@ -177,6 +186,8 @@ impl TelaView {
                 surface_retry_deadline: None,
                 status_label,
                 terminal_error: None,
+                bridge_metrics: Rc::new(RefCell::new(MacMetrics::default())),
+                bridge: None,
             }),
             tracking_rect: Cell::new(None),
         });
@@ -389,6 +400,13 @@ impl ViewState {
         if self.lifecycle.phase() != ShellPhase::Loading {
             return;
         }
+        if self.bridge.is_none() {
+            self.bridge = Some(crate::providers::build_dispatcher(
+                Rc::clone(&self.bridge_metrics),
+                &BuildConstants::default(),
+                vec![],
+            ));
+        }
         let activation: Result<(), String> = (|| {
             let frame = runtime.frame().map_err(|error| error.to_string())?;
             let frame_token = runtime.status().frame_token;
@@ -508,6 +526,15 @@ impl ViewState {
     }
 
     fn dispatch_viewport(&mut self, metrics: ClientMetrics) -> Result<(), String> {
+        self.bridge_metrics.replace(MacMetrics {
+            width: metrics.logical_width as u32,
+            height: metrics.logical_height as u32,
+            dpr: if metrics.logical_width > 0.0 {
+                metrics.width as f32 / metrics.logical_width
+            } else {
+                1.0
+            },
+        });
         // The previous client geometry is no longer an eligible source for hit testing.
         self.presented_frame_token = None;
         self.dispatch_guest(AppEvent::Viewport {
@@ -533,6 +560,9 @@ impl ViewState {
                 .dispatch(&event)
                 .map_err(|error| error.to_string())?;
             let frame = runtime.frame().map_err(|error| error.to_string())?;
+            if let Some(dispatcher) = self.bridge.as_mut() {
+                process_bridge_requests(runtime, dispatcher)?;
+            }
             (changed, frame, runtime.status().frame_token)
         };
         self.frame = Some(frame);

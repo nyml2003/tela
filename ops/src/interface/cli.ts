@@ -3,7 +3,7 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    四道验证门（fmt/clippy/test/arch）
-//   ops build <core|webview|frontend|bundle|android|ios|win32|macos> [--release]  构建显式产品闭包
+//   ops build <core|webview|frontend|bundle|android|ios|win32|win32-editor|macos> [--release]  构建显式产品闭包
 //   ops verify bundle [desktop|mobile] [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
@@ -22,6 +22,7 @@ import { runBuildCore } from '../application/build-core.ts';
 import { runBuildFrontend } from '../application/build-frontend.ts';
 import { runBuildBundle } from '../application/build-bundle.ts';
 import { runBuildWin32 } from '../application/build-win32.ts';
+import { runBuildWin32Editor } from '../application/build-win32-editor.ts';
 import { runBuildMacos } from '../application/build-macos.ts';
 import { runBuildAndroid } from '../application/build-android.ts';
 import { runBuildIos } from '../application/build-ios.ts';
@@ -172,6 +173,13 @@ async function main(): Promise<number> {
             values.release ? 'release' : 'dev',
           );
           if (!result.ok) return 1;
+        } else if (t === 'win32-editor') {
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildWin32Editor(
+            { cargo, fs, reporter, workspace },
+            values.release ? 'release' : 'dev',
+          );
+          if (!result.ok) return 1;
         } else if (t === 'win32') {
           const cargo = new CargoPort(processPort, workspace);
           const bundle = await runBuildBundle(
@@ -202,7 +210,7 @@ async function main(): Promise<number> {
           );
           if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（core | webview | frontend | bundle | android | ios | win32 | macos）`);
+          reporter.fail(`未知构建目标: ${t}（core | webview | frontend | bundle | android | ios | win32 | win32-editor | macos）`);
           return 1;
         }
       }
