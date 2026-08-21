@@ -125,3 +125,13 @@
     「注册设备→生成 profile→安装启动」全链路，之后 `ops ios deploy` 可直接复用 profile。
 - 本机设备：`风唤长河`（iPhone 17, iPhone18,3），UDID `31D43215-027C-5D5E-8558-235CD7D7C352`。
 - 部署命令：`nix develop .#ios --command ops build ios` → `ops ios deploy --device <UDID>`。
+
+## Win32 开发工作流约定（2026-08 起强制）
+
+- **写完/改完任何 Win32 相关代码后，必须跑 release 交叉构建验证**：native `cargo check`
+  不会编译 `cfg(target_os = "windows")` 代码（window.rs/gpu.rs/providers.rs 全部被跳过），
+  只有交叉构建能抓出真实错误（曾漏掉 `IDC_HAND` 未导入、`SetCursor` 类型不匹配等）。
+- 命令：`nix develop .#win32 --command ops build win32-editor --release`
+  （`cargo-win32` wrapper 由 `.#win32` dev shell 提供，普通 `nix develop .` 没有）。
+- 构建成功产出 `dist/win32-editor/tela-win32-editor-host.exe`，每次交付前以此为准。
+- Windows 侧实测从 cmd 运行：`\\wsl$\Ubuntu\home\nyml\projects\tela\dist\win32-editor\tela-win32-editor-host.exe 2>log.txt`。

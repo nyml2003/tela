@@ -46,6 +46,11 @@ impl LayoutCache {
     pub fn measure_count(&self) -> usize {
         self.measures
     }
+
+    /// 缓存条目数（按 SemanticKey 去重，key 稳定时有界；诊断泄漏用）。
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// Dirty 容器向下传递的子树请求器。

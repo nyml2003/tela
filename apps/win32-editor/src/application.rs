@@ -83,6 +83,10 @@ pub struct App {
     bridge: BridgeDispatcher,
     about_cache: Vec<(String, String)>,
     projection_invalidated: bool,
+    /// 上次 rebuild 的布局缓存累计测量数（用于打印本次增量）。
+    last_layout_measures: usize,
+    /// rebuild 日志时间节流（拖拽缩放时每帧 rebuild，避免刷屏）。
+    last_rebuild_log_at: std::time::Instant,
 }
 
 impl App {
@@ -105,6 +109,8 @@ impl App {
             bridge,
             about_cache,
             projection_invalidated: true,
+            last_layout_measures: 0,
+            last_rebuild_log_at: std::time::Instant::now(),
         }
     }
 
@@ -132,12 +138,17 @@ impl App {
         }
         self.frames.runtime().begin_frame();
         let dirty = self.frames.runtime().take_dirty();
-        eprintln!(
-            "tela-win32-editor: rebuild invalidated={} dirty={:?} route={:?}",
-            self.projection_invalidated,
-            dirty,
-            self.route.get()
-        );
+        // 拖拽缩放时每帧 rebuild，日志 500ms 节流；rebuild 与 layout 统计同批打印。
+        let log_this_frame = self.last_rebuild_log_at.elapsed().as_millis() >= 500;
+        if log_this_frame {
+            self.last_rebuild_log_at = std::time::Instant::now();
+            eprintln!(
+                "tela-win32-editor: rebuild invalidated={} dirty={:?} route={:?}",
+                self.projection_invalidated,
+                dirty,
+                self.route.get()
+            );
+        }
         let mut candidate_state = self.view_state.clone();
         let prepared = match self.prepare_projection() {
             Ok(prepared) => prepared,
@@ -151,11 +162,14 @@ impl App {
             .reconcile_tree(prepared.tree(), &mut candidate_state);
         self.profile
             .ensure_modal_focus(prepared.tree(), &mut candidate_state);
-        let frame = match self.profile.resolve_candidate(
+        // 走 Dirty 布局缓存路径（resolve 而非 resolve_candidate）：纯视觉变化（hover
+        // 高亮等）不改变子树指纹，直接命中缓存零重测；只有尺寸/文本/结构变化才重算
+        // 对应子树。滚动输入也改用真实状态（此前传空 map，滚动偏移从未进入布局）。
+        let frame = match self.profile.resolve(
             prepared.tree(),
             self.viewport,
             self.resources.text_measurer(),
-            &Default::default(),
+            candidate_state.scrolls(),
             &candidate_state,
             Some(FOCUS_APPEARANCE),
         ) {
@@ -166,6 +180,17 @@ impl App {
                 return false;
             }
         };
+        let total_measures = self.profile.layout_measure_count();
+        let measured_this_frame = total_measures.saturating_sub(self.last_layout_measures);
+        self.last_layout_measures = total_measures;
+        // measure_count 是累计值（LayoutCache 内部从不重置），这里打印本次增量：
+        // 首次 rebuild 为全量节点数，之后应稳定在小数值（Dirty 缓存命中）。
+        if log_this_frame {
+            eprintln!(
+                "tela-win32-editor: layout measured {measured_this_frame} nodes (cumulative {total_measures}, entries {})",
+                self.profile.layout_entry_count()
+            );
+        }
         let resolved = prepared
             .resolve(|_| Ok::<_, UiLayoutError>(frame))
             .expect("already resolved editor candidate cannot fail again");
@@ -295,6 +320,12 @@ impl App {
         self.document.get()
     }
 
+    /// Whether the pointer currently hovers an interactive (hoverable) node; the shell uses
+    /// this to switch the native cursor (IDC_HAND) on WM_SETCURSOR.
+    pub fn hover_interactive(&self) -> bool {
+        self.view_state.hover_key().is_some()
+    }
+
     /// About page rows (cached at construction; build constants are static per session).
     pub fn about_rows(&self) -> &[(String, String)] {
         &self.about_cache
@@ -355,6 +386,7 @@ impl App {
             }
             match framed.into_parts().1 {
                 UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
+                UiAction::Hover { .. } => changed = true,
                 UiAction::ValueChange { bind_id, value } => {
                     changed |= self.handle_value_change(bind_id.0, value)
                 }

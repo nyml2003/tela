@@ -105,6 +105,16 @@ impl DefaultApplicationProfile {
     pub fn clear_layout_cache(&mut self) {
         self.layout_cache.clear();
     }
+
+    /// 自上次调用以来实际进入测量器的缓存节点数（诊断：Dirty 布局命中率）。
+    pub fn layout_measure_count(&self) -> usize {
+        self.layout_cache.measure_count()
+    }
+
+    /// 布局缓存条目数（按 SemanticKey 去重；key 稳定时有界，诊断泄漏用）。
+    pub fn layout_entry_count(&self) -> usize {
+        self.layout_cache.entry_count()
+    }
 }
 
 #[cfg(test)]

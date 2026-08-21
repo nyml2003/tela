@@ -24,10 +24,12 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
             DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-            PostQuitMessage, RegisterClassW, SetWindowLongPtrW, WINDOW_EX_STYLE, WM_CANCELMODE,
-            WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN,
-            WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-            WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+            HTCLIENT, IDC_ARROW, IDC_HAND, LoadCursorW, PostQuitMessage, RegisterClassW,
+            SetCursor, SetWindowLongPtrW,
+            WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
+            WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+            WM_MOUSEWHEEL, WM_NCCREATE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE,
+            WNDCLASSW, WS_OVERLAPPEDWINDOW,
         },
     },
 };
@@ -57,6 +59,10 @@ pub trait Win32StaticSession {
     fn input_cancel(&mut self) -> u32;
     /// Whether the native text channel is currently attached.
     fn input_focused(&self) -> bool;
+    /// Whether the pointer currently hovers an interactive (hoverable) node.
+    fn hover_interactive(&self) -> bool {
+        false
+    }
     /// Current controlled text value.
     fn input_value(&self) -> String;
     /// The latest resolved frame to render.
@@ -73,6 +79,10 @@ struct StaticWindowState {
     input_epoch: Instant,
     /// 连续未成功呈现次数；达到阈值后暂停自动重绘（防 Outdated/Suboptimal 忙循环）。
     render_retries: u32,
+    /// 高频诊断日志节流：拖拽缩放时 WM_SIZE/WM_PAINT 每帧触发，避免日志刷屏。
+    last_log_at: Instant,
+    /// 上次打印 viewport 日志的尺寸（变化超过阈值才打印）。
+    last_logged_viewport: (f32, f32),
 }
 
 /// Creates the window and runs the message loop until the window closes.
@@ -99,7 +109,6 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
     // SAFETY: standard message loop on the thread that owns hwnd.
     let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
     let mut message_count = 0u64;
-    let mut last_message_at = Instant::now();
     loop {
         let retrieved = unsafe { GetMessageW(&mut message, None, 0, 0) };
         if retrieved.0 == 0 {
@@ -111,19 +120,6 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
         // SAFETY: dispatch is the standard loop step for the owning thread.
         unsafe { DispatchMessageW(&message) };
         message_count += 1;
-        let since_last = last_message_at.elapsed().as_millis();
-        last_message_at = Instant::now();
-        eprintln!(
-            "tela win32-static: msg #{message_count} 0x{:04x} wparam=0x{:x} hwnd=0x{:x} dt={}ms",
-            message.message,
-            message.wParam.0,
-            message.hwnd.0 as isize,
-            since_last
-        );
-        if message_count >= 200 {
-            eprintln!("tela win32-static: message log cap reached; silencing");
-            break;
-        }
     }
     eprintln!("tela win32-static: message loop exited after {message_count} messages");
     Ok(())
@@ -139,6 +135,8 @@ fn state_ptr(app: Box<dyn Win32StaticSession>, hwnd: HWND) -> isize {
         mouse_leave_tracking: false,
         input_epoch: Instant::now(),
         render_retries: 0,
+        last_log_at: Instant::now(),
+        last_logged_viewport: (0.0, 0.0),
     });
     Box::into_raw(state) as isize
 }
@@ -156,6 +154,8 @@ unsafe fn with_state<R>(hwnd: HWND, f: impl FnOnce(&mut StaticWindowState) -> R)
             mouse_leave_tracking: false,
             input_epoch: Instant::now(),
             render_retries: 0,
+            last_log_at: Instant::now(),
+            last_logged_viewport: (0.0, 0.0),
         });
     }
     f(unsafe { &mut *(value as *mut StaticWindowState) })
@@ -278,10 +278,6 @@ unsafe extern "system" fn wnd_proc(
                     // The first paint can arrive synchronously from UpdateWindow before any
                     // input/viewport event; ensure the frame exists before rendering.
                     let frame_ready = state.session.ensure_frame();
-                    eprintln!(
-                        "tela win32-static: paint begin: frame_ready={frame_ready}, gpu={}",
-                        state.gpu.is_some()
-                    );
                     if state.gpu.is_none() {
                         let (width, height) = client_size(hwnd);
                         // GetClientRect 返回物理像素：surface config 直接用物理尺寸。
@@ -296,14 +292,15 @@ unsafe extern "system" fn wnd_proc(
                             Err(error) => eprintln!("tela win32-static: gpu init: {error}"),
                         }
                     }
+                    let mut presented_this_frame = false;
+                    let mut presented_suboptimal = false;
                     if let Some(gpu) = state.gpu.as_mut() {
                         if frame_ready {
                             match gpu.render(state.session.frame()) {
                                 Ok(RenderOutcome::Presented { suboptimal }) => {
                                     state.render_retries = 0;
-                                    eprintln!(
-                                        "tela win32-static: presented suboptimal={suboptimal}"
-                                    );
+                                    presented_this_frame = true;
+                                    presented_suboptimal = suboptimal;
                                     if suboptimal {
                                         state.render_retries += 1;
                                         gpu.reconfigure(gpu.config.width, gpu.config.height);
@@ -338,8 +335,15 @@ unsafe extern "system" fn wnd_proc(
                             }
                         }
                     }
+                    if presented_this_frame {
+                        // 常规呈现节流；suboptimal 是异常路径必须立即打印。
+                        if presented_suboptimal {
+                            eprintln!("tela win32-static: presented suboptimal=true");
+                        } else {
+                            state.log_throttled(|| "tela win32-static: presented".to_owned());
+                        }
+                    }
                     let _ = EndPaint(hwnd, &paint);
-                    eprintln!("tela win32-static: paint end");
                 });
             }
             LRESULT(0)
@@ -358,6 +362,25 @@ unsafe extern "system" fn wnd_proc(
                         0.0,
                         0.0,
                     );
+                    // 有动作（hover 变化/焦点/路由）才重绘；纯移动无状态变化时跳过，
+                    // 避免无意义的空 paint。
+                    if state.session.dispatch_pointer(event) > 0 {
+                        request_redraw(hwnd);
+                    }
+                    // 实时刷新客户区光标：拖拽缩放（sizing loop）结束等场景系统不再
+                    // 发 WM_SETCURSOR，只有这里能覆盖残留的系统光标。
+                    state.apply_client_cursor();
+                });
+            }
+            LRESULT(0)
+        }
+        WM_NCMOUSEMOVE => {
+            // 非客户区（边缘/标题栏）移动期间清空 hover：此时没有客户区
+            // WM_MOUSEMOVE，hover_key 保持陈旧，回到客户区会显示错误的手型。
+            unsafe {
+                with_state(hwnd, |state| {
+                    let event =
+                        state.mouse_pointer_event(PointerPhase::Move, -1.0, -1.0, 0, 0.0, 0.0);
                     state.session.dispatch_pointer(event);
                 });
             }
@@ -391,7 +414,10 @@ unsafe extern "system" fn wnd_proc(
                         0.0,
                         0.0,
                     );
-                    state.session.dispatch_pointer(event);
+                    // 点击会改变路由/焦点；有动作才重绘，否则画面停在旧帧。
+                    if state.session.dispatch_pointer(event) > 0 {
+                        request_redraw(hwnd);
+                    }
                 });
             }
             LRESULT(0)
@@ -409,9 +435,13 @@ unsafe extern "system" fn wnd_proc(
                         0.0,
                         0.0,
                     );
-                    state.session.dispatch_pointer(event);
+                    let consumed = state.session.dispatch_pointer(event);
                     state.pointer_captured = false;
                     let _ = ReleaseCapture();
+                    // 有动作（路由/焦点/输入）才重绘。
+                    if consumed > 0 {
+                        request_redraw(hwnd);
+                    }
                 });
             }
             LRESULT(0)
@@ -480,7 +510,22 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_SETCURSOR => LRESULT(1),
+        WM_SETCURSOR => {
+            // MSDN: wParam = 光标所在窗口句柄；lParam 低位 = hit-test 码（WM_NCHITTEST
+            // 返回值），lParam 高位 = 触发消息（如 WM_MOUSEMOVE）。只有客户区
+            // （HTCLIENT）才由应用接管光标：hover 交互节点显示手型，否则箭头。
+            // 边缘/标题栏/系统菜单等非客户区必须交回 DefWindowProcW，由系统显示
+            // resize/移动等标准光标并支持边缘拖拽缩放。
+            let hit_test = (lparam.0 & 0xffff) as u16;
+            if hit_test == HTCLIENT as u16 {
+                unsafe {
+                    with_state(hwnd, |state| state.apply_client_cursor());
+                }
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+        }
         WM_CLOSE => {
             unsafe {
                 with_state(hwnd, |state| {
@@ -516,11 +561,27 @@ impl StaticWindowState {
             gpu.reconfigure(physical_w as u32, physical_h as u32);
         }
         if changed {
-            eprintln!(
-                "tela win32-static: viewport {:.0}x{:.0} logical, {}x{} physical, dpr={:.2}",
-                logical_w, logical_h, physical_w as u32, physical_h as u32, dpr
-            );
+            // 拖拽缩放时 WM_SIZE 高频触发（每像素一次）；尺寸变化超过阈值才打印，
+            // 避免日志刷屏（跨显示器 DPI 变化由 WM_DPICHANGED 日志覆盖）。
+            let (last_w, last_h) = self.last_logged_viewport;
+            let jump_w = (logical_w - last_w).abs();
+            let jump_h = (logical_h - last_h).abs();
+            if jump_w > 24.0 || jump_h > 24.0 {
+                eprintln!(
+                    "tela win32-static: viewport {:.0}x{:.0} logical, {}x{} physical, dpr={:.2}",
+                    logical_w, logical_h, physical_w as u32, physical_h as u32, dpr
+                );
+                self.last_logged_viewport = (logical_w, logical_h);
+            }
             request_redraw(hwnd);
+        }
+    }
+
+    /// 高频诊断日志时间节流（500ms）：拖拽缩放期间 WM_PAINT 每帧触发。
+    fn log_throttled(&mut self, message: impl FnOnce() -> String) {
+        if self.last_log_at.elapsed().as_millis() >= 500 {
+            self.last_log_at = Instant::now();
+            eprintln!("{}", message());
         }
     }
 
@@ -538,6 +599,22 @@ impl StaticWindowState {
             self.render_retries
         );
         request_redraw(hwnd);
+    }
+
+    /// 客户区光标：hover 交互节点 → 手型，否则箭头。
+    ///
+    /// 在 WM_SETCURSOR（系统请求）与 WM_MOUSEMOVE（实时刷新，覆盖拖拽缩放结束等
+    /// 系统不再发 WM_SETCURSOR 的场景）两处调用。
+    fn apply_client_cursor(&mut self) {
+        let id = if self.session.hover_interactive() {
+            IDC_HAND
+        } else {
+            IDC_ARROW
+        };
+        // SAFETY: SetCursor 更新全局光标，UI 线程调用；LoadCursorW 静态系统光标 ID。
+        unsafe {
+            let _ = SetCursor(LoadCursorW(None, id).ok());
+        }
     }
 
     fn mouse_pointer_event(

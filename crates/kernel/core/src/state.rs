@@ -106,6 +106,11 @@ impl ViewStateStore {
         self.scroll.get(key).copied().unwrap_or_default()
     }
 
+    /// 全部滚动状态（布局 resolve 的只读输入）。
+    pub fn scrolls(&self) -> &HashMap<SemanticKey, ScrollState> {
+        &self.scroll
+    }
+
     /// 写入滚动状态。
     pub fn set_scroll(&mut self, key: SemanticKey, state: ScrollState) {
         self.scroll.insert(key, state);

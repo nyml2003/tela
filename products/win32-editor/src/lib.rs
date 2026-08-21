@@ -92,6 +92,10 @@ impl Win32StaticSession for ProductSession {
         self.app.input_focused()
     }
 
+    fn hover_interactive(&self) -> bool {
+        self.app.hover_interactive()
+    }
+
     fn input_value(&self) -> String {
         self.app.input_value()
     }

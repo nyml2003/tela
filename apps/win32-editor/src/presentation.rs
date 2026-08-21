@@ -31,12 +31,17 @@ pub fn render_root(
     about_rows: &[(String, String)],
 ) -> ViewResult<ViewOutput<EditorAction>> {
     ui!(build {
-        <View
+        <Frame
+            key={"win32.root"}
             width={Size::fixed(viewport.width)}
             height={Size::fixed(viewport.height)}
-            fill={Fill::Solid(Color::BLUE)}
+            fill={Fill::Solid(CONTENT_BACKGROUND)}
         >
-        </View>
+            <Column width={Size::fixed(viewport.width)} height={Size::fixed(viewport.height)}>
+                { top_bar(build, viewport.width, route) }
+                { page(build, viewport, route, settings, document, about_rows) }
+            </Column>
+        </Frame>
     })
 }
 
@@ -72,16 +77,15 @@ fn nav_button(
     current: Route,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let selected = target == current;
-    let key = format!("win32.nav.{}", route_name(target));
     ui!(build {
         <ActionTarget action={EditorAction::Navigate(target)}>
             <Frame
-                key={key}
                 width={Size::fixed(72.0)}
                 height={Size::fixed(30.0)}
                 fill={Fill::Solid(if selected { ACCENT_SOFT } else { BAR_BACKGROUND })}
                 border_width={0.0}
                 clickable={true}
+                hoverable={true}
             >
                 <Text value={label} font_size={13.0} color={if selected { ACCENT } else { TEXT }} />
             </Frame>
@@ -203,6 +207,7 @@ fn step_button(
                 border_width={1.0}
                 border_color={BAR_BORDER}
                 clickable={true}
+                hoverable={true}
             >
                 <Text value={label} font_size={13.0} color={TEXT} />
             </Frame>
