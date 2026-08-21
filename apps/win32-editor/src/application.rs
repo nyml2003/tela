@@ -335,6 +335,7 @@ impl App {
         let route = self.route.get();
         let settings = self.settings.get();
         let document = self.document.get();
+        let hover_key = self.view_state.hover_key();
         let mut build = self.frames.begin_build();
         let root = render_root(
             &mut build,
@@ -343,6 +344,7 @@ impl App {
             settings,
             &document,
             &self.about_cache,
+            hover_key,
         )
         .map_err(|error| error.to_string())?;
         self.frames.prepare(root).map_err(|error| error.to_string())

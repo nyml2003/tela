@@ -1,11 +1,12 @@
 //! Editor presentation: flat Win32-style top bar plus the three pages, built with the `ui!` DSL.
 
 use tela_contract::{
-    Color, CrossAlign, Fill, Insets, LayoutConcern, Size, TextContent, TextStyleRef, UiNode,
-    Viewport,
+    Color, CrossAlign, Fill, IdentityConcern, Insets, KeyStrategy, LayoutConcern,
+    SemanticKey, Size, TextContent, TextStyleRef, UiNode, UpdateMode, Viewport,
 };
 use tela_core::{LayoutContainer, Primitive};
 use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_foundation::{Button, ButtonPalette, ButtonState};
 
 use crate::application::{EDITOR_INPUT_KEY, EditorAction, EditorSettings, Route};
 
@@ -15,8 +16,17 @@ const BAR_BORDER: Color = Color::rgba(0.80, 0.80, 0.80, 1.0);
 const CONTENT_BACKGROUND: Color = Color::rgba(1.0, 1.0, 1.0, 1.0);
 const TEXT: Color = Color::rgba(0.10, 0.10, 0.10, 1.0);
 const SECONDARY: Color = Color::rgba(0.35, 0.35, 0.35, 1.0);
-const ACCENT: Color = Color::rgba(0.0, 0.47, 0.83, 1.0);
 const ACCENT_SOFT: Color = Color::rgba(0.85, 0.93, 0.98, 1.0);
+
+/// 顶部导航按钮调色板（选中/悬停用浅蓝，与 Win11 扁平主题一致）。
+const NAV_PALETTE: ButtonPalette = ButtonPalette {
+    normal: BAR_BACKGROUND,
+    hovered: ACCENT_SOFT,
+    selected: ACCENT_SOFT,
+    disabled: BAR_BACKGROUND,
+    text: TEXT,
+    disabled_text: SECONDARY,
+};
 
 const TOP_BAR_H: f32 = 40.0;
 const CONTENT_INSET: f32 = 16.0;
@@ -29,6 +39,7 @@ pub fn render_root(
     settings: EditorSettings,
     document: &str,
     about_rows: &[(String, String)],
+    hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     ui!(build {
         <Frame
@@ -38,8 +49,8 @@ pub fn render_root(
             fill={Fill::Solid(CONTENT_BACKGROUND)}
         >
             <Column width={Size::fixed(viewport.width)} height={Size::fixed(viewport.height)}>
-                { top_bar(build, viewport.width, route) }
-                { page(build, viewport, route, settings, document, about_rows) }
+                { top_bar(build, viewport.width, route, hover_key) }
+                { page(build, viewport, route, settings, document, about_rows, hover_key) }
             </Column>
         </Frame>
     })
@@ -50,6 +61,7 @@ fn top_bar(
     build: &mut ViewBuild<EditorAction>,
     width: f32,
     route: Route,
+    hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     ui!(build {
         <Row
@@ -63,32 +75,47 @@ fn top_bar(
             border_width={1.0}
             border_color={BAR_BORDER}
         >
-            { nav_button(build, Route::Editor, "编辑器", route) }
-            { nav_button(build, Route::Settings, "设置", route) }
-            { nav_button(build, Route::About, "关于", route) }
+            { nav_button(build, Route::Editor, "编辑器", route, hover_key) }
+            { nav_button(build, Route::Settings, "设置", route, hover_key) }
+            { nav_button(build, Route::About, "关于", route, hover_key) }
         </Row>
     })
 }
 
+/// 导航按钮：foundation Button + ActionTarget。文本居中由 Button 内部
+/// `Row + [Spacer, content, Spacer]` + `cross_align: Center` 布局保证。
 fn nav_button(
     build: &mut ViewBuild<EditorAction>,
     target: Route,
     label: &str,
     current: Route,
+    hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let selected = target == current;
+    let key = format!("win32.nav.{}", route_name(target));
+    let hovered = hover_key.is_some_and(|k| k.0 == key);
+    let mut node = Button::new(label)
+        .width(72.0)
+        .height(30.0)
+        .border_radius(4.0)
+        .text_metrics(13.0, 18.0)
+        .state(ButtonState {
+            hovered,
+            selected,
+            disabled: false,
+        })
+        .palette(NAV_PALETTE)
+        .into_node();
+    // 语义键使 hover_key（内核 view_state）能稳定匹配到本按钮。
+    node.identity = Some(IdentityConcern {
+        key_strategy: KeyStrategy::SemanticId,
+        semantic_key: Some(SemanticKey(key)),
+        key_segment: None,
+        update_mode: UpdateMode::Dirty,
+    });
     ui!(build {
         <ActionTarget action={EditorAction::Navigate(target)}>
-            <Frame
-                width={Size::fixed(72.0)}
-                height={Size::fixed(30.0)}
-                fill={Fill::Solid(if selected { ACCENT_SOFT } else { BAR_BACKGROUND })}
-                border_width={0.0}
-                clickable={true}
-                hoverable={true}
-            >
-                <Text value={label} font_size={13.0} color={if selected { ACCENT } else { TEXT }} />
-            </Frame>
+            { node }
         </ActionTarget>
     })
 }
@@ -109,10 +136,11 @@ fn page(
     settings: EditorSettings,
     document: &str,
     about_rows: &[(String, String)],
+    hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     match route {
         Route::Editor => render_editor_page(build, viewport, settings, document),
-        Route::Settings => render_settings_page(build, viewport, settings),
+        Route::Settings => render_settings_page(build, viewport, settings, hover_key),
         Route::About => render_about_page(build, viewport, about_rows),
     }
 }
@@ -162,6 +190,7 @@ fn render_settings_page(
     build: &mut ViewBuild<EditorAction>,
     viewport: Viewport,
     settings: EditorSettings,
+    hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     ui!(build {
         <Column
@@ -176,41 +205,51 @@ fn render_settings_page(
             <View key={"win32.divider.font"} width={Size::fixed(viewport.width - CONTENT_INSET * 2.0)}
                   height={Size::fixed(1.0)} fill={Fill::Solid(BAR_BORDER)} />
             <Row gap={12.0} cross_align={CrossAlign::Center}>
-                { step_button(build, "font.small", "减小", EditorAction::SetFontSize(settings.font_size.saturating_sub(2).max(10))) }
+                { step_button(build, "font.small", "减小", EditorAction::SetFontSize(settings.font_size.saturating_sub(2).max(10)), hover_key) }
                 <Text value={format!("{} pt", settings.font_size)} font_size={16.0} color={TEXT} />
-                { step_button(build, "font.large", "增大", EditorAction::SetFontSize((settings.font_size + 2).min(32))) }
+                { step_button(build, "font.large", "增大", EditorAction::SetFontSize((settings.font_size + 2).min(32)), hover_key) }
             </Row>
             <Text value={"行距"} font_size={14.0} color={SECONDARY} />
             <Row gap={12.0} cross_align={CrossAlign::Center}>
-                { step_button(build, "line.small", "减小", EditorAction::SetLineHeight(settings.line_height.saturating_sub(10).max(100))) }
+                { step_button(build, "line.small", "减小", EditorAction::SetLineHeight(settings.line_height.saturating_sub(10).max(100)), hover_key) }
                 <Text value={format!("{:.1}", settings.line_height as f32 / 100.0)} font_size={16.0} color={TEXT} />
-                { step_button(build, "line.large", "增大", EditorAction::SetLineHeight((settings.line_height + 10).min(220))) }
+                { step_button(build, "line.large", "增大", EditorAction::SetLineHeight((settings.line_height + 10).min(220)), hover_key) }
             </Row>
         </Column>
     })
 }
 
+/// 设置页步进按钮：foundation Button（无边框，palette 与导航按钮一致）。
 fn step_button(
     build: &mut ViewBuild<EditorAction>,
     key_suffix: &str,
     label: &str,
     action: EditorAction,
+    hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let key = format!("win32.step.{key_suffix}");
+    let hovered = hover_key.is_some_and(|k| k.0 == key);
+    let mut node = Button::new(label)
+        .width(64.0)
+        .height(28.0)
+        .border_radius(4.0)
+        .text_metrics(13.0, 18.0)
+        .state(ButtonState {
+            hovered,
+            selected: false,
+            disabled: false,
+        })
+        .palette(NAV_PALETTE)
+        .into_node();
+    node.identity = Some(IdentityConcern {
+        key_strategy: KeyStrategy::SemanticId,
+        semantic_key: Some(SemanticKey(key)),
+        key_segment: None,
+        update_mode: UpdateMode::Dirty,
+    });
     ui!(build {
         <ActionTarget action={action}>
-            <Frame
-                key={key}
-                width={Size::fixed(64.0)}
-                height={Size::fixed(28.0)}
-                fill={Fill::Solid(BAR_BACKGROUND)}
-                border_width={1.0}
-                border_color={BAR_BORDER}
-                clickable={true}
-                hoverable={true}
-            >
-                <Text value={label} font_size={13.0} color={TEXT} />
-            </Frame>
+            { node }
         </ActionTarget>
     })
 }
