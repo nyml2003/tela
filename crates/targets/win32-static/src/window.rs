@@ -25,12 +25,12 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
             DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-            HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, LoadCursorW, PostMessageW, PostQuitMessage,
-            RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetCursor, SetWindowLongPtrW,
-            ShowWindow, WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-            WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT,
-            WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+            HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, IsZoomed, LoadCursorW, PostMessageW,
+            PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetCursor,
+            SetWindowLongPtrW, ShowWindow, WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED,
+            WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+            WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
+            WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
             WS_THICKFRAME,
         },
     },
@@ -38,13 +38,29 @@ use windows::Win32::{
 
 use crate::gpu::{GpuSession, RenderOutcome};
 
+macro_rules! win32_trace {
+    ($($arg:tt)*) => {
+        if crate::trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// A statically assembled Tela application driven by this shell's message loop.
 pub trait Win32StaticSession {
     /// Ensures the current frame exists (rebuilds after invalidation); the shell calls this
     /// before every paint.
     fn ensure_frame(&mut self) -> bool;
+    /// Whether the active frame is current and safe to render for the current application state.
+    fn frame_is_current(&self) -> bool {
+        false
+    }
     /// Updates the logical content area (CSS points) and the DPI scale.
     fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool;
+    /// Updates whether the native window is currently maximized.
+    fn set_window_maximized(&mut self, _maximized: bool) -> bool {
+        false
+    }
     /// Delivers one normalized pointer event; returns consumed action count.
     fn dispatch_pointer(&mut self, event: PointerEvent) -> u32;
     /// Delivers a physical key event; returns consumed action count.
@@ -63,6 +79,10 @@ pub trait Win32StaticSession {
     fn input_focused(&self) -> bool;
     /// Whether the pointer currently hovers an interactive (hoverable) node.
     fn hover_interactive(&self) -> bool {
+        false
+    }
+    /// Whether a logical pointer position currently hits a hoverable node.
+    fn hit_test_interactive(&mut self, _point: Point) -> bool {
         false
     }
     /// 自绘标题栏待执行的窗口命令（App 经动作产生，shell 消费执行）。
@@ -103,6 +123,15 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr(app, hwnd));
     }
+    // CreateWindowExW can deliver WM_SIZE before GWLP_USERDATA exists. Sync the real client
+    // viewport after installing the application state so the first frame is not built from the
+    // default logical size while the GPU surface already uses the actual client size.
+    unsafe {
+        with_state(hwnd, |state| {
+            state.sync_window_maximized(hwnd, "initial_state");
+            state.update_viewport(hwnd, state.dpi_scale, "initial_state");
+        });
+    }
     // SAFETY: the window belongs to this thread and is fully initialized at this point.
     let _ = unsafe {
         windows::Win32::UI::WindowsAndMessaging::ShowWindow(
@@ -142,24 +171,47 @@ fn execute_window_command(hwnd: HWND) {
     let Some(command) = command else {
         return;
     };
+    win32_trace!("tela-win32-trace: window_command taken={command:?}");
     // SAFETY: hwnd 属于 UI 线程，命令执行是标准的窗口管理调用。
     unsafe {
         match command {
             WindowCommand::Minimize => {
-                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                let result = ShowWindow(hwnd, SW_MINIMIZE);
+                win32_trace!("tela-win32-trace: show_window command=Minimize result={result:?}");
             }
             WindowCommand::Maximize => {
                 let zoomed = windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool();
-                let _ = ShowWindow(hwnd, if zoomed { SW_RESTORE } else { SW_MAXIMIZE });
+                let show = if zoomed { SW_RESTORE } else { SW_MAXIMIZE };
+                let result = ShowWindow(hwnd, show);
+                let zoomed_after =
+                    windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool();
+                win32_trace!(
+                    "tela-win32-trace: show_window command=Maximize before_zoomed={zoomed} show={show:?} result={result:?} after_zoomed={zoomed_after}"
+                );
+                with_state(hwnd, |state| {
+                    if state.sync_window_maximized(hwnd, "show_window") {
+                        let frame_rebuilt = state.session.ensure_frame();
+                        state.trace(
+                            "window_state_frame",
+                            format_args!("source=show_window frame_rebuilt={frame_rebuilt}"),
+                        );
+                        request_redraw(hwnd);
+                    }
+                });
+                let update_result = UpdateWindow(hwnd);
+                win32_trace!(
+                    "tela-win32-trace: update_window command=Maximize result={update_result:?}"
+                );
             }
             WindowCommand::Close => {
                 // 走 WM_CLOSE 完整流程（input_blur 等清理）。
-                let _ = PostMessageW(
+                let result = PostMessageW(
                     Some(hwnd),
                     WM_CLOSE,
                     windows::Win32::Foundation::WPARAM(0),
                     windows::Win32::Foundation::LPARAM(0),
                 );
+                win32_trace!("tela-win32-trace: post_message message=WM_CLOSE result={result:?}");
             }
         }
     }
@@ -205,6 +257,10 @@ struct NoopSession;
 
 impl Win32StaticSession for NoopSession {
     fn ensure_frame(&mut self) -> bool {
+        false
+    }
+
+    fn frame_is_current(&self) -> bool {
         false
     }
 
@@ -296,10 +352,62 @@ unsafe extern "system" fn wnd_proc(
                 let mut point = POINT { x, y };
                 // SAFETY: ScreenToClient 是同步查询，hwnd 属于本线程。
                 let _ = unsafe { ScreenToClient(hwnd, &mut point) };
-                let interactive =
-                    unsafe { with_state(hwnd, |state| state.session.hover_interactive()) };
-                if (point.y as f32) < TITLE_BAR_DRAG_H && !interactive {
+                let (interactive, logical_point) = unsafe {
+                    with_state(hwnd, |state| {
+                        let scale = state.dpi_scale;
+                        let logical_point = Point {
+                            x: point.x as f32 / scale,
+                            y: point.y as f32 / scale,
+                        };
+                        (
+                            state.session.hit_test_interactive(logical_point),
+                            logical_point,
+                        )
+                    })
+                };
+                let final_hit = if logical_point.y < TITLE_BAR_DRAG_H && !interactive {
+                    HTCAPTION as isize
+                } else {
+                    HTCLIENT as isize
+                };
+                unsafe {
+                    with_state(hwnd, |state| {
+                        state.trace(
+                            "wm_nchittest",
+                            format_args!(
+                                "def={} screen=({}, {}) client=({}, {}) logical=({:.1}, {:.1}) dpr={:.2} interactive={} final={}",
+                                hit_test_name(hit.0),
+                                x,
+                                y,
+                                point.x,
+                                point.y,
+                                logical_point.x,
+                                logical_point.y,
+                                state.dpi_scale,
+                                interactive,
+                                hit_test_name(final_hit)
+                            ),
+                        );
+                    });
+                }
+                if final_hit == HTCAPTION as isize {
                     return LRESULT(HTCAPTION as isize);
+                }
+            } else {
+                let (x, y) = screen_point(lparam);
+                unsafe {
+                    with_state(hwnd, |state| {
+                        state.trace(
+                            "wm_nchittest",
+                            format_args!(
+                                "def={} final={} screen=({}, {}) (no client hit-test)",
+                                hit_test_name(hit.0),
+                                hit_test_name(hit.0),
+                                x,
+                                y
+                            ),
+                        );
+                    });
                 }
             }
             hit
@@ -311,7 +419,20 @@ unsafe extern "system" fn wnd_proc(
         WM_SIZE => {
             unsafe {
                 with_state(hwnd, |state| {
-                    state.update_viewport(hwnd, state.dpi_scale);
+                    state.trace(
+                        "wm_size",
+                        format_args!("wparam={} lparam=0x{:x}", wparam.0, lparam.0),
+                    );
+                    let window_state_changed = state.sync_window_maximized(hwnd, "WM_SIZE");
+                    let viewport_changed = state.update_viewport(hwnd, state.dpi_scale, "WM_SIZE");
+                    if window_state_changed && !viewport_changed {
+                        let frame_rebuilt = state.session.ensure_frame();
+                        state.trace(
+                            "window_state_frame",
+                            format_args!("source=WM_SIZE frame_rebuilt={frame_rebuilt}"),
+                        );
+                        request_redraw(hwnd);
+                    }
                 });
             }
             LRESULT(0)
@@ -321,8 +442,12 @@ unsafe extern "system" fn wnd_proc(
                 with_state(hwnd, |state| {
                     let new_dpr = (wparam.0 as u16) as f32 / 96.0;
                     eprintln!("tela win32-static: DPI changed -> {:.2}", new_dpr);
+                    state.trace(
+                        "wm_dpichanged",
+                        format_args!("wparam={} new_dpr={new_dpr:.2}", wparam.0),
+                    );
                     state.dpi_scale = new_dpr;
-                    state.update_viewport(hwnd, new_dpr);
+                    state.update_viewport(hwnd, new_dpr, "WM_DPICHANGED");
                 });
             }
             LRESULT(0)
@@ -334,7 +459,15 @@ unsafe extern "system" fn wnd_proc(
                     let _ = BeginPaint(hwnd, &mut paint);
                     // The first paint can arrive synchronously from UpdateWindow before any
                     // input/viewport event; ensure the frame exists before rendering.
-                    let frame_ready = state.session.ensure_frame();
+                    let frame_rebuilt = state.session.ensure_frame();
+                    let frame_current = state.session.frame_is_current();
+                    state.trace(
+                        "wm_paint",
+                        format_args!(
+                            "ensure_frame={frame_rebuilt} frame_current={frame_current} gpu_before_init={}",
+                            state.gpu.is_some(),
+                        ),
+                    );
                     if state.gpu.is_none() {
                         let (width, height) = client_size(hwnd);
                         // GetClientRect 返回物理像素：surface config 直接用物理尺寸。
@@ -351,8 +484,22 @@ unsafe extern "system" fn wnd_proc(
                     }
                     let mut presented_this_frame = false;
                     let mut presented_suboptimal = false;
+                    let surface_size = state
+                        .gpu
+                        .as_ref()
+                        .map(|gpu| (gpu.config.width, gpu.config.height));
+                    if frame_current {
+                        let frame_viewport = state.session.frame().viewport;
+                        state.trace(
+                            "render_input",
+                            format_args!(
+                                "frame_viewport={:.1}x{:.1} surface={surface_size:?}",
+                                frame_viewport.width, frame_viewport.height
+                            ),
+                        );
+                    }
                     if let Some(gpu) = state.gpu.as_mut() {
-                        if frame_ready {
+                        if frame_current {
                             match gpu.render(state.session.frame()) {
                                 Ok(RenderOutcome::Presented { suboptimal }) => {
                                     state.render_retries = 0;
@@ -393,6 +540,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     if presented_this_frame {
+                        state.trace("present", format_args!("suboptimal={presented_suboptimal}"));
                         // 常规呈现节流；suboptimal 是异常路径必须立即打印。
                         if presented_suboptimal {
                             eprintln!("tela win32-static: presented suboptimal=true");
@@ -421,7 +569,18 @@ unsafe extern "system" fn wnd_proc(
                     );
                     // 有动作（hover 变化/焦点/路由）才重绘；纯移动无状态变化时跳过，
                     // 避免无意义的空 paint。
-                    if state.session.dispatch_pointer(event) > 0 {
+                    let consumed = state.session.dispatch_pointer(event);
+                    if consumed > 0 {
+                        state.trace(
+                            "mouse_move",
+                            format_args!(
+                                "timestamp={} logical=({:.1}, {:.1}) captured={} consumed={consumed}",
+                                event.timestamp_micros,
+                                event.position.x,
+                                event.position.y,
+                                state.pointer_captured
+                            ),
+                        );
                         request_redraw(hwnd);
                     }
                     // 实时刷新客户区光标：拖拽缩放（sizing loop）结束等场景系统不再
@@ -438,7 +597,17 @@ unsafe extern "system" fn wnd_proc(
                 with_state(hwnd, |state| {
                     let event =
                         state.mouse_pointer_event(PointerPhase::Move, -1.0, -1.0, 0, 0.0, 0.0);
-                    state.session.dispatch_pointer(event);
+                    let consumed = state.session.dispatch_pointer(event);
+                    if consumed > 0 {
+                        state.trace(
+                            "nc_mouse_move",
+                            format_args!(
+                                "timestamp={} consumed={consumed}",
+                                event.timestamp_micros
+                            ),
+                        );
+                        request_redraw(hwnd);
+                    }
                 });
             }
             LRESULT(0)
@@ -450,7 +619,17 @@ unsafe extern "system" fn wnd_proc(
                     state.mouse_leave_tracking = false;
                     let event =
                         state.mouse_pointer_event(PointerPhase::Move, -1.0, -1.0, 0, 0.0, 0.0);
-                    state.session.dispatch_pointer(event);
+                    let consumed = state.session.dispatch_pointer(event);
+                    if consumed > 0 {
+                        state.trace(
+                            "mouse_leave",
+                            format_args!(
+                                "timestamp={} consumed={consumed}",
+                                event.timestamp_micros
+                            ),
+                        );
+                        request_redraw(hwnd);
+                    }
                 });
             }
             LRESULT(0)
@@ -459,8 +638,9 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 let _ = SetFocus(Some(hwnd));
                 with_state(hwnd, |state| {
+                    let captured_before = state.pointer_captured;
                     state.pointer_captured = true;
-                    let _ = SetCapture(hwnd);
+                    let capture_result = SetCapture(hwnd);
                     let (x, y) = client_point(lparam);
                     let scale = state.dpi_scale;
                     let event = state.mouse_pointer_event(
@@ -471,8 +651,20 @@ unsafe extern "system" fn wnd_proc(
                         0.0,
                         0.0,
                     );
+                    let timestamp = event.timestamp_micros;
+                    let position = event.position;
+                    let consumed = state.session.dispatch_pointer(event);
+                    state.trace(
+                        "mouse_down",
+                        format_args!(
+                            "timestamp={timestamp} logical=({:.1}, {:.1}) captured_before={captured_before} captured_after={} set_capture={capture_result:?} consumed={consumed}",
+                            position.x,
+                            position.y,
+                            state.pointer_captured
+                        ),
+                    );
                     // 点击会改变路由/焦点；有动作才重绘，否则画面停在旧帧。
-                    if state.session.dispatch_pointer(event) > 0 {
+                    if consumed > 0 {
                         request_redraw(hwnd);
                     }
                 });
@@ -492,9 +684,21 @@ unsafe extern "system" fn wnd_proc(
                         0.0,
                         0.0,
                     );
+                    let timestamp = event.timestamp_micros;
+                    let position = event.position;
+                    let captured_before = state.pointer_captured;
                     let consumed = state.session.dispatch_pointer(event);
                     state.pointer_captured = false;
-                    let _ = ReleaseCapture();
+                    let release_result = ReleaseCapture();
+                    state.trace(
+                        "mouse_up",
+                        format_args!(
+                            "timestamp={timestamp} logical=({:.1}, {:.1}) captured_before={captured_before} captured_after={} release_capture={release_result:?} consumed={consumed}",
+                            position.x,
+                            position.y,
+                            state.pointer_captured
+                        ),
+                    );
                     // 有动作（路由/焦点/输入）才重绘。
                     if consumed > 0 {
                         request_redraw(hwnd);
@@ -516,7 +720,14 @@ unsafe extern "system" fn wnd_proc(
                             0.0,
                             0.0,
                         );
-                        state.session.dispatch_pointer(event);
+                        let consumed = state.session.dispatch_pointer(event);
+                        state.trace(
+                            "pointer_cancel",
+                            format_args!(
+                                "timestamp={} consumed={consumed}",
+                                event.timestamp_micros
+                            ),
+                        );
                     }
                 });
             }
@@ -585,15 +796,21 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_CLOSE => {
             unsafe {
-                with_state(hwnd, |state| {
-                    state.session.input_blur();
+                let blur_consumed = with_state(hwnd, |state| {
+                    let consumed = state.session.input_blur();
+                    state.trace("wm_close", format_args!("input_blur_consumed={consumed}"));
+                    consumed
                 });
-                let _ = DestroyWindow(hwnd);
+                let result = DestroyWindow(hwnd);
+                eprintln!(
+                    "tela-win32-trace: wm_close destroy_window result={result:?} blur_consumed={blur_consumed}"
+                );
             }
             LRESULT(0)
         }
         WM_DESTROY => {
             unsafe {
+                eprintln!("tela-win32-trace: wm_destroy begin");
                 let value = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if value != 0 {
                     drop(Box::from_raw(value as *mut StaticWindowState));
@@ -607,16 +824,51 @@ unsafe extern "system" fn wnd_proc(
 }
 
 impl StaticWindowState {
+    fn trace(&self, event: &str, details: impl std::fmt::Display) {
+        eprintln!(
+            "tela-win32-trace: t={} event={event} {details}",
+            self.input_epoch.elapsed().as_micros()
+        );
+    }
+
     /// 统一视口更新：GetClientRect 返回物理像素，逻辑尺寸 = 物理 / dpr；
     /// surface config 用物理像素。尺寸真正变化时才请求重绘。
-    fn update_viewport(&mut self, hwnd: HWND, dpr: f32) {
+    fn sync_window_maximized(&mut self, hwnd: HWND, source: &str) -> bool {
+        let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+        let changed = self.session.set_window_maximized(maximized);
+        self.trace(
+            "window_state_update",
+            format_args!("source={source} maximized={maximized} changed={changed}"),
+        );
+        changed
+    }
+
+    fn update_viewport(&mut self, hwnd: HWND, dpr: f32, source: &str) -> bool {
         let (physical_w, physical_h) = client_size(hwnd);
         let logical_w = physical_w / dpr;
         let logical_h = physical_h / dpr;
+        let gpu_before = self
+            .gpu
+            .as_ref()
+            .map(|gpu| (gpu.config.width, gpu.config.height));
         let changed = self.session.set_viewport(logical_w, logical_h, dpr);
+        let frame_rebuilt = changed && self.session.ensure_frame();
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.reconfigure(physical_w as u32, physical_h as u32);
         }
+        let gpu_after = self
+            .gpu
+            .as_ref()
+            .map(|gpu| (gpu.config.width, gpu.config.height));
+        self.trace(
+            "viewport_update",
+            format_args!(
+                "source={source} logical={logical_w:.1}x{logical_h:.1} physical={}x{} dpr={dpr:.2} changed={changed} frame_rebuilt={frame_rebuilt} frame_current={} gpu_before={gpu_before:?} gpu_after={gpu_after:?}",
+                physical_w as u32,
+                physical_h as u32,
+                self.session.frame_is_current()
+            ),
+        );
         if changed {
             // 拖拽缩放时 WM_SIZE 高频触发（每像素一次）；尺寸变化超过阈值才打印，
             // 避免日志刷屏（跨显示器 DPI 变化由 WM_DPICHANGED 日志覆盖）。
@@ -624,34 +876,39 @@ impl StaticWindowState {
             let jump_w = (logical_w - last_w).abs();
             let jump_h = (logical_h - last_h).abs();
             if jump_w > 24.0 || jump_h > 24.0 {
-                eprintln!(
+                win32_trace!(
                     "tela win32-static: viewport {:.0}x{:.0} logical, {}x{} physical, dpr={:.2}",
-                    logical_w, logical_h, physical_w as u32, physical_h as u32, dpr
+                    logical_w,
+                    logical_h,
+                    physical_w as u32,
+                    physical_h as u32,
+                    dpr
                 );
                 self.last_logged_viewport = (logical_w, logical_h);
             }
             request_redraw(hwnd);
         }
+        changed
     }
 
     /// 高频诊断日志时间节流（500ms）：拖拽缩放期间 WM_PAINT 每帧触发。
     fn log_throttled(&mut self, message: impl FnOnce() -> String) {
         if self.last_log_at.elapsed().as_millis() >= 500 {
             self.last_log_at = Instant::now();
-            eprintln!("{}", message());
+            win32_trace!("{}", message());
         }
     }
 
     /// 重绘或熔断：连续失败达到阈值后暂停自动重绘，避免 Outdated/Suboptimal 忙循环。
     fn redraw_or_backoff(&mut self, hwnd: HWND, reason: &str) {
         if self.render_retries >= 5 {
-            eprintln!(
+            win32_trace!(
                 "tela win32-static: render backoff after {} retries ({reason}); waiting for the next viewport/input event",
                 self.render_retries
             );
             return;
         }
-        eprintln!(
+        win32_trace!(
             "tela win32-static: render retry #{}/5 ({reason})",
             self.render_retries
         );
@@ -781,6 +1038,14 @@ fn client_size(hwnd: HWND) -> (f32, f32) {
 
 fn screen_point(lparam: LPARAM) -> (i32, i32) {
     client_point(lparam)
+}
+
+fn hit_test_name(hit: isize) -> &'static str {
+    match hit {
+        value if value == HTCLIENT as isize => "HTCLIENT",
+        value if value == HTCAPTION as isize => "HTCAPTION",
+        _ => "other",
+    }
 }
 
 fn client_point(lparam: LPARAM) -> (i32, i32) {

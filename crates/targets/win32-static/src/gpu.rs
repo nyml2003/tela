@@ -2,6 +2,8 @@
 
 #![allow(unsafe_code)]
 
+use std::time::Instant;
+
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
     Win32WindowHandle,
@@ -9,6 +11,14 @@ use raw_window_handle::{
 use tela_contract::UiFrame;
 use tela_render_wgpu::WgpuRenderer;
 use windows::Win32::Foundation::HWND;
+
+macro_rules! gpu_trace {
+    ($($arg:tt)*) => {
+        if crate::trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// Outcome of one surface presentation attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +52,13 @@ pub struct GpuSession {
 impl GpuSession {
     /// Creates the renderer and configures the surface for the given client size.
     pub fn new(hwnd: HWND, width: u32, height: u32, dpr: f32) -> Result<Self, String> {
+        let init_started = Instant::now();
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=begin width={} height={} dpr={:.2}",
+            width,
+            height,
+            dpr
+        );
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::default(),
@@ -50,14 +67,41 @@ impl GpuSession {
             // wgpu 30 requires an explicit display owner for native presentation.
             display: Some(Box::new(Win32Display)),
         });
-        let surface = create_surface(&instance, hwnd)?;
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=instance_ready elapsed_us={}",
+            init_started.elapsed().as_micros()
+        );
+        let surface = create_surface(&instance, hwnd).map_err(|error| {
+            gpu_trace!(
+                "tela-win32-trace: event=gpu_init stage=surface_failed elapsed_us={} error={}",
+                init_started.elapsed().as_micros(),
+                error
+            );
+            error
+        })?;
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=surface_ready elapsed_us={}",
+            init_started.elapsed().as_micros()
+        );
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))
-        .map_err(|error| format!("request WGPU adapter: {error}"))?;
+        .map_err(|error| {
+            gpu_trace!(
+                "tela-win32-trace: event=gpu_init stage=adapter_failed elapsed_us={} error={}",
+                init_started.elapsed().as_micros(),
+                error
+            );
+            format!("request WGPU adapter: {error}")
+        })?;
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=adapter_ready elapsed_us={} info={:?}",
+            init_started.elapsed().as_micros(),
+            adapter.get_info()
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("tela static win32"),
             required_features: wgpu::Features::empty(),
@@ -66,14 +110,35 @@ impl GpuSession {
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::Off,
         }))
-        .map_err(|error| format!("create WGPU device: {error}"))?;
+        .map_err(|error| {
+            gpu_trace!(
+                "tela-win32-trace: event=gpu_init stage=device_failed elapsed_us={} error={}",
+                init_started.elapsed().as_micros(),
+                error
+            );
+            format!("create WGPU device: {error}")
+        })?;
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=device_ready elapsed_us={}",
+            init_started.elapsed().as_micros()
+        );
+        let capabilities = surface.get_capabilities(&adapter);
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=capabilities_ready elapsed_us={} formats={} alpha_modes={}",
+            init_started.elapsed().as_micros(),
+            capabilities.formats.len(),
+            capabilities.alpha_modes.len()
+        );
         let renderer = WgpuRenderer::new(
             device,
             queue,
-            surface.get_capabilities(&adapter).formats[0],
+            capabilities.formats[0],
             tela_contract::Color::rgba(1.0, 1.0, 1.0, 1.0),
         );
-        let capabilities = surface.get_capabilities(&adapter);
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=renderer_ready elapsed_us={}",
+            init_started.elapsed().as_micros()
+        );
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: capabilities.formats[0],
@@ -86,7 +151,17 @@ impl GpuSession {
             color_space: wgpu::SurfaceColorSpace::Srgb,
         };
         surface.configure(renderer.device(), &config);
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=surface_configured elapsed_us={} physical={}x{}",
+            init_started.elapsed().as_micros(),
+            config.width,
+            config.height
+        );
         let _ = dpr;
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_init stage=complete elapsed_us={}",
+            init_started.elapsed().as_micros()
+        );
         Ok(Self {
             instance,
             surface,

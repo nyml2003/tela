@@ -321,7 +321,7 @@ pub fn rasterize_glyphs(
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{Color, TextContent, TextStyleRef};
+    use tela_contract::{Color, IconName, TextContent, TextStyleRef};
 
     use super::{
         GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, glyph_ink_metrics, rasterize_glyphs,
@@ -342,6 +342,7 @@ mod tests {
         for content in [
             text(TextStyleRef::body(), "A"),
             text(TextStyleRef::icon(), "\u{e145}"),
+            text(TextStyleRef::icon(), "\u{e3c6}\u{e3e0}\u{e931}\u{e5cd}"),
         ] {
             let mut events = Vec::new();
             rasterize_glyphs(
@@ -360,6 +361,151 @@ mod tests {
                     .any(|event| matches!(event, GlyphRasterEvent::Coverage { .. })),
                 "{content:?} 应产生至少一个字形覆盖像素"
             );
+        }
+    }
+
+    #[test]
+    fn every_registered_icon_has_a_drawable_subset_glyph() {
+        for name in IconName::ALL {
+            let content = text(
+                TextStyleRef::icon(),
+                &char::from_u32(icon_codepoint(*name)).unwrap().to_string(),
+            );
+            let mut events = Vec::new();
+            rasterize_glyphs(
+                &content,
+                GlyphRasterOptions {
+                    origin_x: 0.0,
+                    baseline_y: 20.0,
+                    scale: 1.0,
+                    wrap_width: 64.0,
+                },
+                |event| events.push(event),
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, GlyphRasterEvent::Coverage { .. })),
+                "registered icon {} must have a drawable subset glyph",
+                name.key()
+            );
+        }
+    }
+
+    fn icon_codepoint(name: IconName) -> u32 {
+        match name {
+            IconName::Add => 0xe145,
+            IconName::Delete | IconName::Trash => 0xe92e,
+            IconName::Edit => 0xf097,
+            IconName::Copy => 0xe14d,
+            IconName::Move | IconName::DriveFileMove => 0xe9a1,
+            IconName::Restore => 0xe938,
+            IconName::Favorite => 0xf09a,
+            IconName::Tag => 0xe893,
+            IconName::Undo => 0xe166,
+            IconName::Search => 0xef7a,
+            IconName::Folder => 0xe2c7,
+            IconName::FolderOpen => 0xe2c8,
+            IconName::Document => 0xe873,
+            IconName::Image => 0xe3f4,
+            IconName::Archive | IconName::FolderZip => 0xeb2c,
+            IconName::AllFiles | IconName::Home => 0xe9b2,
+            IconName::List | IconName::ViewList => 0xe8ef,
+            IconName::Grid | IconName::GridView => 0xe9b0,
+            IconName::Sort => 0xe164,
+            IconName::Filter => 0xe152,
+            IconName::ChevronRight => 0xe5cc,
+            IconName::ArrowBack => 0xe5c4,
+            IconName::Menu => 0xe5d2,
+            IconName::More => 0xe5d3,
+            IconName::Close => 0xe5cd,
+            IconName::Minimize => 0xe931,
+            IconName::Maximize => 0xe3c6,
+            IconName::WindowRestore => 0xe3e0,
+            IconName::Redo => 0xe15a,
+            IconName::Cut => 0xf08b,
+            IconName::Paste => 0xe14f,
+            IconName::Save => 0xe161,
+            IconName::SaveAs => 0xeb60,
+            IconName::SelectAll => 0xe162,
+            IconName::FindReplace => 0xe881,
+            IconName::FormatBold => 0xe238,
+            IconName::FormatItalic => 0xe23f,
+            IconName::FormatUnderlined => 0xe249,
+            IconName::FormatAlignLeft => 0xe236,
+            IconName::FormatAlignCenter => 0xe234,
+            IconName::FormatAlignRight => 0xe237,
+            IconName::FormatSize => 0xe245,
+            IconName::Spellcheck => 0xe8ce,
+            IconName::Remove => 0xe15b,
+            IconName::RemoveCircle => 0xf08f,
+            IconName::DeleteForever => 0xe92b,
+            IconName::FileCopy => 0xe173,
+            IconName::Article => 0xef87,
+            IconName::Draft => 0xe674,
+            IconName::PictureAsPdf => 0xe415,
+            IconName::CreateNewFolder => 0xe2cc,
+            IconName::AttachFile => 0xe226,
+            IconName::Link => 0xe250,
+            IconName::LinkOff => 0xe16f,
+            IconName::Download => 0xf090,
+            IconName::Upload => 0xf09b,
+            IconName::Cloud => 0xf15c,
+            IconName::CloudDownload => 0xe2c0,
+            IconName::CloudUpload => 0xe2c3,
+            IconName::Unarchive => 0xe169,
+            IconName::Print => 0xe8ad,
+            IconName::ArrowForward => 0xe5c8,
+            IconName::ArrowUpward => 0xe5d8,
+            IconName::ArrowDownward => 0xe5db,
+            IconName::ChevronLeft => 0xe5cb,
+            IconName::ExpandLess => 0xe5ce,
+            IconName::ExpandMore => 0xe5cf,
+            IconName::Fullscreen => 0xe5d0,
+            IconName::FullscreenExit => 0xe5d1,
+            IconName::OpenInNew | IconName::Launch => 0xe89e,
+            IconName::MenuOpen => 0xe9bd,
+            IconName::Check => 0xe668,
+            IconName::CheckCircle => 0xf0be,
+            IconName::Cancel => 0xe888,
+            IconName::Error => 0xf8b6,
+            IconName::Warning => 0xf083,
+            IconName::Info => 0xe88e,
+            IconName::Help => 0xe8fd,
+            IconName::Verified => 0xef76,
+            IconName::Lock => 0xe899,
+            IconName::LockOpen => 0xe898,
+            IconName::Visibility => 0xe8f4,
+            IconName::VisibilityOff => 0xe8f5,
+            IconName::Refresh => 0xe5d5,
+            IconName::Sync => 0xe627,
+            IconName::History => 0xe8b3,
+            IconName::ViewModule => 0xe8f0,
+            IconName::ViewQuilt => 0xe8f1,
+            IconName::FilterAlt => 0xef4f,
+            IconName::FilterAltOff => 0xeb32,
+            IconName::Tune => 0xe429,
+            IconName::TableChart => 0xe265,
+            IconName::ZoomIn => 0xe8ff,
+            IconName::ZoomOut => 0xe900,
+            IconName::Person => 0xf0d3,
+            IconName::People | IconName::Group => 0xea21,
+            IconName::AccountCircle => 0xf20b,
+            IconName::Mail => 0xe159,
+            IconName::Chat => 0xe0c9,
+            IconName::Comment => 0xe24c,
+            IconName::Share => 0xe80d,
+            IconName::Notifications => 0xe7f5,
+            IconName::PlayArrow => 0xe037,
+            IconName::Pause => 0xe034,
+            IconName::Stop => 0xe047,
+            IconName::SkipNext => 0xe044,
+            IconName::SkipPrevious => 0xe045,
+            IconName::VolumeUp => 0xe050,
+            IconName::VolumeOff => 0xe04f,
+            IconName::Mic => 0xe31d,
+            IconName::Movie => 0xe684,
+            IconName::CameraAlt => 0xe412,
         }
     }
 

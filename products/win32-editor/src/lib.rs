@@ -6,7 +6,7 @@
 #![warn(missing_docs)]
 
 #[cfg(target_os = "windows")]
-use tela_contract::{PointerEvent, UiFrame, UiResourceSet};
+use tela_contract::{Point, PointerEvent, UiFrame, UiResourceSet};
 #[cfg(target_os = "windows")]
 use tela_desktop_runtime::bridge::common::BuildConstants;
 #[cfg(target_os = "windows")]
@@ -17,6 +17,27 @@ use tela_target_win32_static::{Win32StaticSession, build_dispatcher};
 use tela_text_resources::ControlledTextMeasurer;
 #[cfg(target_os = "windows")]
 use tela_win32_editor::App;
+
+#[cfg(target_os = "windows")]
+const APP_NAME: &str = "Tela 文本编辑器";
+#[cfg(target_os = "windows")]
+const APP_VERSION: &str = "0.1.0";
+#[cfg(target_os = "windows")]
+const BUNDLE_VERSION: &str = "0.1.0";
+
+#[cfg(target_os = "windows")]
+fn app_build_id() -> u32 {
+    option_env!("TELA_APP_BUILD_ID")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+}
+
+#[cfg(target_os = "windows")]
+fn bundle_build_id() -> u32 {
+    option_env!("TELA_BUNDLE_BUILD_ID")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+}
 
 #[cfg(target_os = "windows")]
 static RESOURCES: UiResourceSet<ControlledTextMeasurer, MaterialIconFontProvider> =
@@ -36,11 +57,11 @@ impl ProductSession {
                 tela_target_win32_static::WindowMetrics::default(),
             )),
             &BuildConstants {
-                app_name: "Tela 文本编辑器".to_owned(),
+                app_name: APP_NAME.to_owned(),
                 app_version: tela_utils::Version::new(0, 1, 0),
-                app_build_id: 1,
+                app_build_id: app_build_id(),
                 bundle_version: tela_utils::Version::new(0, 1, 0),
-                bundle_build_id: 1,
+                bundle_build_id: bundle_build_id(),
             },
             vec![],
         );
@@ -56,8 +77,16 @@ impl Win32StaticSession for ProductSession {
         self.app.ensure_frame()
     }
 
+    fn frame_is_current(&self) -> bool {
+        self.app.frame_is_current()
+    }
+
     fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool {
         self.app.set_viewport(width, height, dpr)
+    }
+
+    fn set_window_maximized(&mut self, maximized: bool) -> bool {
+        self.app.set_window_maximized(maximized)
     }
 
     fn dispatch_pointer(&mut self, event: PointerEvent) -> u32 {
@@ -96,6 +125,14 @@ impl Win32StaticSession for ProductSession {
         self.app.hover_interactive()
     }
 
+    fn hit_test_interactive(&mut self, point: Point) -> bool {
+        self.app.hit_test_interactive_at(point)
+    }
+
+    fn take_window_command(&mut self) -> Option<tela_contract::WindowCommand> {
+        self.app.take_window_command()
+    }
+
     fn input_value(&self) -> String {
         self.app.input_value()
     }
@@ -108,5 +145,13 @@ impl Win32StaticSession for ProductSession {
 /// 启动 Win32 静态编辑器窗口（阻塞至窗口关闭）。
 #[cfg(target_os = "windows")]
 pub fn run() -> Result<(), String> {
+    eprintln!(
+        "tela-win32-editor: build app_name=\"{}\" app_version={} app_build_id={} bundle_version={} bundle_build_id={}",
+        APP_NAME,
+        APP_VERSION,
+        app_build_id(),
+        BUNDLE_VERSION,
+        bundle_build_id()
+    );
     tela_target_win32_static::run_static_window(Box::new(ProductSession::new()))
 }

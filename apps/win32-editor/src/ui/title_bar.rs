@@ -64,15 +64,12 @@ pub fn window_item(
     build: &mut ViewBuild<EditorAction>,
     command: WindowCommand,
     key_suffix: &str,
+    window_maximized: bool,
     hover_key: &Option<String>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let key = format!("win32.window.{key_suffix}");
     let hovered = hover_key.as_deref() == Some(key.as_str());
-    let icon = match command {
-        WindowCommand::Minimize => IconName::Minimize,
-        WindowCommand::Maximize => IconName::Maximize,
-        WindowCommand::Close => IconName::Close,
-    };
+    let icon = window_icon(command, window_maximized);
     ui!(build {
         <ActionTarget action={EditorAction::Window(command)}>
             <WindowButton
@@ -83,6 +80,20 @@ pub fn window_item(
             />
         </ActionTarget>
     })
+}
+
+fn window_icon(command: WindowCommand, window_maximized: bool) -> IconName {
+    match command {
+        WindowCommand::Minimize => IconName::Minimize,
+        WindowCommand::Maximize => {
+            if window_maximized {
+                IconName::WindowRestore
+            } else {
+                IconName::Maximize
+            }
+        }
+        WindowCommand::Close => IconName::Close,
+    }
 }
 
 /// 窗口控制按钮组件：foundation Button 包装 Material 图标（关闭按钮 hover 红色）。
@@ -135,5 +146,23 @@ impl WindowButton {
             });
         }
         Ok(ViewOutput::opaque(node))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_icon;
+    use tela_contract::{IconName, WindowCommand};
+
+    #[test]
+    fn maximize_control_switches_between_maximize_and_restore_icons() {
+        assert_eq!(
+            window_icon(WindowCommand::Maximize, false),
+            IconName::Maximize
+        );
+        assert_eq!(
+            window_icon(WindowCommand::Maximize, true),
+            IconName::WindowRestore
+        );
     }
 }

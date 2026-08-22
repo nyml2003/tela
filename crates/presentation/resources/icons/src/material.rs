@@ -76,7 +76,102 @@ fn material_codepoint(name: IconName) -> char {
         IconName::More => '\u{e5d3}',
         IconName::Close => '\u{e5cd}',
         IconName::Minimize => '\u{e931}',
-        IconName::Maximize => '\u{e92c}',
+        // The rounded font's `maximize` codepoint is rendered as a horizontal
+        // rule at the fixed axes used by this subset. A rounded square is the
+        // intended native window maximize control.
+        IconName::Maximize => '\u{e3c6}',
+        IconName::WindowRestore => '\u{e3e0}',
+        IconName::Redo => '\u{e15a}',
+        IconName::Cut => '\u{f08b}',
+        IconName::Paste => '\u{e14f}',
+        IconName::Save => '\u{e161}',
+        IconName::SaveAs => '\u{eb60}',
+        IconName::SelectAll => '\u{e162}',
+        IconName::FindReplace => '\u{e881}',
+        IconName::FormatBold => '\u{e238}',
+        IconName::FormatItalic => '\u{e23f}',
+        IconName::FormatUnderlined => '\u{e249}',
+        IconName::FormatAlignLeft => '\u{e236}',
+        IconName::FormatAlignCenter => '\u{e234}',
+        IconName::FormatAlignRight => '\u{e237}',
+        IconName::FormatSize => '\u{e245}',
+        IconName::Spellcheck => '\u{e8ce}',
+        IconName::Remove => '\u{e15b}',
+        IconName::RemoveCircle => '\u{f08f}',
+        IconName::DeleteForever => '\u{e92b}',
+        IconName::FileCopy => '\u{e173}',
+        IconName::Article => '\u{ef87}',
+        IconName::Draft => '\u{e674}',
+        IconName::PictureAsPdf => '\u{e415}',
+        IconName::CreateNewFolder => '\u{e2cc}',
+        IconName::AttachFile => '\u{e226}',
+        IconName::Link => '\u{e250}',
+        IconName::LinkOff => '\u{e16f}',
+        IconName::Download => '\u{f090}',
+        IconName::Upload => '\u{f09b}',
+        IconName::Cloud => '\u{f15c}',
+        IconName::CloudDownload => '\u{e2c0}',
+        IconName::CloudUpload => '\u{e2c3}',
+        IconName::DriveFileMove => '\u{e9a1}',
+        IconName::FolderZip => '\u{eb2c}',
+        IconName::Unarchive => '\u{e169}',
+        IconName::Print => '\u{e8ad}',
+        IconName::ArrowForward => '\u{e5c8}',
+        IconName::ArrowUpward => '\u{e5d8}',
+        IconName::ArrowDownward => '\u{e5db}',
+        IconName::ChevronLeft => '\u{e5cb}',
+        IconName::ExpandLess => '\u{e5ce}',
+        IconName::ExpandMore => '\u{e5cf}',
+        IconName::Fullscreen => '\u{e5d0}',
+        IconName::FullscreenExit => '\u{e5d1}',
+        IconName::OpenInNew => '\u{e89e}',
+        IconName::Launch => '\u{e89e}',
+        IconName::Home => '\u{e9b2}',
+        IconName::MenuOpen => '\u{e9bd}',
+        IconName::Check => '\u{e668}',
+        IconName::CheckCircle => '\u{f0be}',
+        IconName::Cancel => '\u{e888}',
+        IconName::Error => '\u{f8b6}',
+        IconName::Warning => '\u{f083}',
+        IconName::Info => '\u{e88e}',
+        IconName::Help => '\u{e8fd}',
+        IconName::Verified => '\u{ef76}',
+        IconName::Lock => '\u{e899}',
+        IconName::LockOpen => '\u{e898}',
+        IconName::Visibility => '\u{e8f4}',
+        IconName::VisibilityOff => '\u{e8f5}',
+        IconName::Refresh => '\u{e5d5}',
+        IconName::Sync => '\u{e627}',
+        IconName::History => '\u{e8b3}',
+        IconName::ViewList => '\u{e8ef}',
+        IconName::ViewModule => '\u{e8f0}',
+        IconName::ViewQuilt => '\u{e8f1}',
+        IconName::GridView => '\u{e9b0}',
+        IconName::FilterAlt => '\u{ef4f}',
+        IconName::FilterAltOff => '\u{eb32}',
+        IconName::Tune => '\u{e429}',
+        IconName::TableChart => '\u{e265}',
+        IconName::ZoomIn => '\u{e8ff}',
+        IconName::ZoomOut => '\u{e900}',
+        IconName::Person => '\u{f0d3}',
+        IconName::People => '\u{ea21}',
+        IconName::Group => '\u{ea21}',
+        IconName::AccountCircle => '\u{f20b}',
+        IconName::Mail => '\u{e159}',
+        IconName::Chat => '\u{e0c9}',
+        IconName::Comment => '\u{e24c}',
+        IconName::Share => '\u{e80d}',
+        IconName::Notifications => '\u{e7f5}',
+        IconName::PlayArrow => '\u{e037}',
+        IconName::Pause => '\u{e034}',
+        IconName::Stop => '\u{e047}',
+        IconName::SkipNext => '\u{e044}',
+        IconName::SkipPrevious => '\u{e045}',
+        IconName::VolumeUp => '\u{e050}',
+        IconName::VolumeOff => '\u{e04f}',
+        IconName::Mic => '\u{e31d}',
+        IconName::Movie => '\u{e684}',
+        IconName::CameraAlt => '\u{e412}',
     }
 }
 
@@ -91,6 +186,10 @@ mod tests {
     #[test]
     fn provider_maps_every_standard_semantic_icon_to_the_controlled_icon_font() {
         let provider = MaterialIconFontProvider;
+        assert_eq!(IconName::ALL.len(), 120);
+        let keys: std::collections::HashSet<_> =
+            IconName::ALL.iter().map(|name| name.key()).collect();
+        assert_eq!(keys.len(), IconName::ALL.len(), "icon keys must be unique");
         for name in IconName::ALL {
             let node = provider
                 .resolve(IconRequest {
@@ -115,5 +214,16 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn window_controls_use_the_material_window_control_codepoints() {
+        assert_eq!(super::material_codepoint(IconName::Minimize), '\u{e931}');
+        assert_eq!(super::material_codepoint(IconName::Maximize), '\u{e3c6}');
+        assert_eq!(
+            super::material_codepoint(IconName::WindowRestore),
+            '\u{e3e0}'
+        );
+        assert_eq!(super::material_codepoint(IconName::Close), '\u{e5cd}');
     }
 }

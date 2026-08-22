@@ -39,6 +39,22 @@ pub fn handle_input(
     actions
 }
 
+/// Returns whether the current frame contains a hoverable node at `position`.
+///
+/// Hosts use this query before dispatching a native hit-test result. It must use the current
+/// pointer position rather than the previously committed hover state, otherwise a custom title
+/// bar can classify the first pointer entry as non-client and never deliver `WM_MOUSEMOVE`.
+pub(crate) fn hit_test_interactive(tree: &UiTree, frame: &UiFrame, position: Point) -> bool {
+    let (nodes, _, _) = tree.node_table();
+    frame.hit_regions.iter().rev().any(|region| {
+        hit_contains(&region.rect, &region.clip, &position)
+            && nodes
+                .get(region.node_id.0 as usize)
+                .and_then(|node| node.interact.as_ref())
+                .is_some_and(|interact| interact.hoverable)
+    })
+}
+
 /// 显式保存当前焦点入视图状态仓库（见 008-2.10 Save/Restore）。
 pub fn save_focus(state: &mut ViewStateStore) {
     let current = state.current_focus_key().cloned();

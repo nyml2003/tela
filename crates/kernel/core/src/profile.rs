@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    FocusAppearance, InputEvent, ScrollState, SemanticKey, TextMeasurer, UiAction, UiFrame,
+    FocusAppearance, InputEvent, Point, ScrollState, SemanticKey, TextMeasurer, UiAction, UiFrame,
     UiLayoutError, Viewport,
 };
 
@@ -101,6 +101,14 @@ impl DefaultApplicationProfile {
         handle_input(tree, frame, view_state, event)
     }
 
+    /// Tests whether a logical pointer position hits a hoverable node in the current frame.
+    ///
+    /// This is the coordinate-aware counterpart to the committed hover state and is intended for
+    /// native hosts that must choose between a client-area and non-client hit-test result.
+    pub fn hit_test_interactive(&self, tree: &UiTree, frame: &UiFrame, position: Point) -> bool {
+        crate::interact::hit_test_interactive(tree, frame, position)
+    }
+
     /// Discards only cached layout results; view state and application data remain intact.
     pub fn clear_layout_cache(&mut self) {
         self.layout_cache.clear();
@@ -122,8 +130,8 @@ mod tests {
     use std::collections::HashMap;
 
     use tela_contract::{
-        Color, Fill, FocusAppearance, Insets, LayoutConcern, Size, TextContent, UiNode, Viewport,
-        VisualConcern,
+        Color, Fill, FocusAppearance, Insets, InteractConcern, LayoutConcern, Point, Size,
+        TextContent, UiNode, Viewport, VisualConcern,
     };
 
     use crate::{IdentityAllocator, UiTree, ViewStateStore, builder::Primitive};
@@ -166,6 +174,26 @@ mod tests {
         })
         .into();
         UiTree::new_with_allocator(root, &mut IdentityAllocator::new()).expect("valid tree")
+    }
+
+    fn hoverable_tree() -> UiTree {
+        let root: UiNode = Primitive::rect()
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(40.0)),
+                height: Some(Size::fixed(24.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::WHITE)),
+                ..VisualConcern::default()
+            })
+            .interact(InteractConcern {
+                hoverable: true,
+                clickable: true,
+                ..InteractConcern::default()
+            })
+            .into();
+        UiTree::new(root).expect("valid hoverable tree")
     }
 
     #[test]
@@ -223,5 +251,28 @@ mod tests {
             .expect("published frame");
 
         assert_eq!(candidate, published);
+    }
+
+    #[test]
+    fn coordinate_hit_test_does_not_depend_on_committed_hover_state() {
+        let tree = hoverable_tree();
+        let state = ViewStateStore::new();
+        let mut profile = DefaultApplicationProfile::new();
+        let frame = profile
+            .resolve(
+                &tree,
+                Viewport {
+                    width: 100.0,
+                    height: 80.0,
+                },
+                &FixedText,
+                &HashMap::new(),
+                &state,
+                None,
+            )
+            .expect("hoverable frame");
+
+        assert!(profile.hit_test_interactive(&tree, &frame, Point { x: 12.0, y: 8.0 }));
+        assert!(!profile.hit_test_interactive(&tree, &frame, Point { x: 41.0, y: 8.0 }));
     }
 }

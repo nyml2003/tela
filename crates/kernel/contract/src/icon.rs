@@ -103,6 +103,190 @@ pub enum IconName {
     Minimize,
     /// 最大化（窗口控制）。
     Maximize,
+    /// 还原窗口（窗口控制）。
+    WindowRestore,
+    /// 重做。
+    Redo,
+    /// 剪切。
+    Cut,
+    /// 粘贴。
+    Paste,
+    /// 保存。
+    Save,
+    /// 另存为。
+    SaveAs,
+    /// 全选。
+    SelectAll,
+    /// 查找替换。
+    FindReplace,
+    /// 粗体。
+    FormatBold,
+    /// 斜体。
+    FormatItalic,
+    /// 下划线。
+    FormatUnderlined,
+    /// 左对齐。
+    FormatAlignLeft,
+    /// 居中对齐。
+    FormatAlignCenter,
+    /// 右对齐。
+    FormatAlignRight,
+    /// 字体大小。
+    FormatSize,
+    /// 拼写检查。
+    Spellcheck,
+    /// 移除。
+    Remove,
+    /// 圆形移除。
+    RemoveCircle,
+    /// 永久删除。
+    DeleteForever,
+    /// 文件复制。
+    FileCopy,
+    /// 文章。
+    Article,
+    /// 草稿。
+    Draft,
+    /// PDF 文档。
+    PictureAsPdf,
+    /// 新建文件夹。
+    CreateNewFolder,
+    /// 附件。
+    AttachFile,
+    /// 链接。
+    Link,
+    /// 取消链接。
+    LinkOff,
+    /// 下载。
+    Download,
+    /// 上传。
+    Upload,
+    /// 云。
+    Cloud,
+    /// 云下载。
+    CloudDownload,
+    /// 云上传。
+    CloudUpload,
+    /// 移动文件。
+    DriveFileMove,
+    /// 压缩文件夹。
+    FolderZip,
+    /// 解压。
+    Unarchive,
+    /// 打印。
+    Print,
+    /// 向前。
+    ArrowForward,
+    /// 向上。
+    ArrowUpward,
+    /// 向下。
+    ArrowDownward,
+    /// 向左展开。
+    ChevronLeft,
+    /// 收起。
+    ExpandLess,
+    /// 展开。
+    ExpandMore,
+    /// 全屏。
+    Fullscreen,
+    /// 退出全屏。
+    FullscreenExit,
+    /// 在新窗口打开。
+    OpenInNew,
+    /// 启动。
+    Launch,
+    /// 首页。
+    Home,
+    /// 打开菜单。
+    MenuOpen,
+    /// 确认。
+    Check,
+    /// 确认圆标。
+    CheckCircle,
+    /// 取消。
+    Cancel,
+    /// 错误。
+    Error,
+    /// 警告。
+    Warning,
+    /// 信息。
+    Info,
+    /// 帮助。
+    Help,
+    /// 已验证。
+    Verified,
+    /// 锁定。
+    Lock,
+    /// 解锁。
+    LockOpen,
+    /// 可见。
+    Visibility,
+    /// 不可见。
+    VisibilityOff,
+    /// 刷新。
+    Refresh,
+    /// 同步。
+    Sync,
+    /// 历史记录。
+    History,
+    /// 列表视图。
+    ViewList,
+    /// 模块视图。
+    ViewModule,
+    /// 拼图视图。
+    ViewQuilt,
+    /// 网格视图。
+    GridView,
+    /// 高级筛选。
+    FilterAlt,
+    /// 关闭高级筛选。
+    FilterAltOff,
+    /// 调整。
+    Tune,
+    /// 表格。
+    TableChart,
+    /// 放大。
+    ZoomIn,
+    /// 缩小。
+    ZoomOut,
+    /// 用户。
+    Person,
+    /// 多个用户。
+    People,
+    /// 用户组。
+    Group,
+    /// 用户账户。
+    AccountCircle,
+    /// 邮件。
+    Mail,
+    /// 聊天。
+    Chat,
+    /// 评论。
+    Comment,
+    /// 分享。
+    Share,
+    /// 通知。
+    Notifications,
+    /// 播放。
+    PlayArrow,
+    /// 暂停。
+    Pause,
+    /// 停止。
+    Stop,
+    /// 下一个。
+    SkipNext,
+    /// 上一个。
+    SkipPrevious,
+    /// 音量。
+    VolumeUp,
+    /// 静音。
+    VolumeOff,
+    /// 麦克风。
+    Mic,
+    /// 电影。
+    Movie,
+    /// 相机。
+    CameraAlt,
 }
 
 impl IconName {
@@ -136,6 +320,98 @@ impl IconName {
         Self::Close,
         Self::Minimize,
         Self::Maximize,
+        Self::WindowRestore,
+        Self::Redo,
+        Self::Cut,
+        Self::Paste,
+        Self::Save,
+        Self::SaveAs,
+        Self::SelectAll,
+        Self::FindReplace,
+        Self::FormatBold,
+        Self::FormatItalic,
+        Self::FormatUnderlined,
+        Self::FormatAlignLeft,
+        Self::FormatAlignCenter,
+        Self::FormatAlignRight,
+        Self::FormatSize,
+        Self::Spellcheck,
+        Self::Remove,
+        Self::RemoveCircle,
+        Self::DeleteForever,
+        Self::FileCopy,
+        Self::Article,
+        Self::Draft,
+        Self::PictureAsPdf,
+        Self::CreateNewFolder,
+        Self::AttachFile,
+        Self::Link,
+        Self::LinkOff,
+        Self::Download,
+        Self::Upload,
+        Self::Cloud,
+        Self::CloudDownload,
+        Self::CloudUpload,
+        Self::DriveFileMove,
+        Self::FolderZip,
+        Self::Unarchive,
+        Self::Print,
+        Self::ArrowForward,
+        Self::ArrowUpward,
+        Self::ArrowDownward,
+        Self::ChevronLeft,
+        Self::ExpandLess,
+        Self::ExpandMore,
+        Self::Fullscreen,
+        Self::FullscreenExit,
+        Self::OpenInNew,
+        Self::Launch,
+        Self::Home,
+        Self::MenuOpen,
+        Self::Check,
+        Self::CheckCircle,
+        Self::Cancel,
+        Self::Error,
+        Self::Warning,
+        Self::Info,
+        Self::Help,
+        Self::Verified,
+        Self::Lock,
+        Self::LockOpen,
+        Self::Visibility,
+        Self::VisibilityOff,
+        Self::Refresh,
+        Self::Sync,
+        Self::History,
+        Self::ViewList,
+        Self::ViewModule,
+        Self::ViewQuilt,
+        Self::GridView,
+        Self::FilterAlt,
+        Self::FilterAltOff,
+        Self::Tune,
+        Self::TableChart,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::Person,
+        Self::People,
+        Self::Group,
+        Self::AccountCircle,
+        Self::Mail,
+        Self::Chat,
+        Self::Comment,
+        Self::Share,
+        Self::Notifications,
+        Self::PlayArrow,
+        Self::Pause,
+        Self::Stop,
+        Self::SkipNext,
+        Self::SkipPrevious,
+        Self::VolumeUp,
+        Self::VolumeOff,
+        Self::Mic,
+        Self::Movie,
+        Self::CameraAlt,
     ];
 
     /// 返回稳定、来源无关的语义名。
@@ -169,6 +445,98 @@ impl IconName {
             Self::Close => "close",
             Self::Minimize => "minimize",
             Self::Maximize => "maximize",
+            Self::WindowRestore => "window-restore",
+            Self::Redo => "redo",
+            Self::Cut => "cut",
+            Self::Paste => "paste",
+            Self::Save => "save",
+            Self::SaveAs => "save-as",
+            Self::SelectAll => "select-all",
+            Self::FindReplace => "find-replace",
+            Self::FormatBold => "format-bold",
+            Self::FormatItalic => "format-italic",
+            Self::FormatUnderlined => "format-underlined",
+            Self::FormatAlignLeft => "format-align-left",
+            Self::FormatAlignCenter => "format-align-center",
+            Self::FormatAlignRight => "format-align-right",
+            Self::FormatSize => "format-size",
+            Self::Spellcheck => "spellcheck",
+            Self::Remove => "remove",
+            Self::RemoveCircle => "remove-circle",
+            Self::DeleteForever => "delete-forever",
+            Self::FileCopy => "file-copy",
+            Self::Article => "article",
+            Self::Draft => "draft",
+            Self::PictureAsPdf => "picture-as-pdf",
+            Self::CreateNewFolder => "create-new-folder",
+            Self::AttachFile => "attach-file",
+            Self::Link => "link",
+            Self::LinkOff => "link-off",
+            Self::Download => "download",
+            Self::Upload => "upload",
+            Self::Cloud => "cloud",
+            Self::CloudDownload => "cloud-download",
+            Self::CloudUpload => "cloud-upload",
+            Self::DriveFileMove => "drive-file-move",
+            Self::FolderZip => "folder-zip",
+            Self::Unarchive => "unarchive",
+            Self::Print => "print",
+            Self::ArrowForward => "arrow-forward",
+            Self::ArrowUpward => "arrow-upward",
+            Self::ArrowDownward => "arrow-downward",
+            Self::ChevronLeft => "chevron-left",
+            Self::ExpandLess => "expand-less",
+            Self::ExpandMore => "expand-more",
+            Self::Fullscreen => "fullscreen",
+            Self::FullscreenExit => "fullscreen-exit",
+            Self::OpenInNew => "open-in-new",
+            Self::Launch => "launch",
+            Self::Home => "home",
+            Self::MenuOpen => "menu-open",
+            Self::Check => "check",
+            Self::CheckCircle => "check-circle",
+            Self::Cancel => "cancel",
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+            Self::Help => "help",
+            Self::Verified => "verified",
+            Self::Lock => "lock",
+            Self::LockOpen => "lock-open",
+            Self::Visibility => "visibility",
+            Self::VisibilityOff => "visibility-off",
+            Self::Refresh => "refresh",
+            Self::Sync => "sync",
+            Self::History => "history",
+            Self::ViewList => "view-list",
+            Self::ViewModule => "view-module",
+            Self::ViewQuilt => "view-quilt",
+            Self::GridView => "grid-view",
+            Self::FilterAlt => "filter-alt",
+            Self::FilterAltOff => "filter-alt-off",
+            Self::Tune => "tune",
+            Self::TableChart => "table-chart",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
+            Self::Person => "person",
+            Self::People => "people",
+            Self::Group => "group",
+            Self::AccountCircle => "account-circle",
+            Self::Mail => "mail",
+            Self::Chat => "chat",
+            Self::Comment => "comment",
+            Self::Share => "share",
+            Self::Notifications => "notifications",
+            Self::PlayArrow => "play-arrow",
+            Self::Pause => "pause",
+            Self::Stop => "stop",
+            Self::SkipNext => "skip-next",
+            Self::SkipPrevious => "skip-previous",
+            Self::VolumeUp => "volume-up",
+            Self::VolumeOff => "volume-off",
+            Self::Mic => "mic",
+            Self::Movie => "movie",
+            Self::CameraAlt => "camera-alt",
         }
     }
 

@@ -2,10 +2,12 @@
 //! action frame. The About page reads build information through the in-process bridge
 //! dispatcher (static-path semantics, see docs/桥/000 §7.3).
 
+use std::sync::OnceLock;
+
 use tela_bridge::{BridgeDispatcher, BridgeEvent, BridgeRequest, BridgeResult, VersionPolicy};
 use tela_contract::{
-    FocusAppearance, InputEvent, PointerEvent, TextInputEvent, TextSelection, UiAction, UiFrame,
-    UiLayoutError, UiResources, Value, Viewport,
+    FocusAppearance, InputEvent, Point, PointerEvent, TextInputEvent, TextSelection, UiAction,
+    UiFrame, UiLayoutError, UiResources, Value, Viewport,
 };
 use tela_core::DefaultApplicationProfile;
 use tela_ui_dsl::{FrameCoordinator, FrameToken, FramedUiAction, Signal};
@@ -20,11 +22,31 @@ pub const DEFAULT_VIEWPORT: Viewport = Viewport {
 
 /// 编辑器输入绑定 key。
 pub const EDITOR_INPUT_KEY: &str = "win32.editor.input";
+/// 图标页搜索输入绑定 key。
+pub const ICON_SEARCH_INPUT_KEY: &str = "win32.icons.search";
 const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
     color: tela_contract::Color::rgba(0.0, 0.47, 0.83, 1.0),
     width: 2.0,
     inset: 1.0,
 };
+
+fn win32_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("TELA_WIN32_TRACE").ok().as_deref(),
+            Some("1" | "true" | "yes")
+        )
+    })
+}
+
+macro_rules! win32_trace {
+    ($($arg:tt)*) => {
+        if win32_trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// 顶部导航路由。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,8 +56,32 @@ pub enum Route {
     Editor,
     /// 设置页。
     Settings,
+    /// 图标浏览页。
+    Icons,
     /// 关于页。
     About,
+}
+
+/// 图标浏览页分类。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IconCategory {
+    /// 全部图标。
+    #[default]
+    All,
+    /// 编辑操作。
+    Editing,
+    /// 文件操作。
+    Files,
+    /// 导航和窗口。
+    Navigation,
+    /// 状态反馈。
+    Status,
+    /// 视图和设计。
+    View,
+    /// 通信和用户。
+    Communication,
+    /// 媒体和设备。
+    Media,
 }
 
 /// DSL 产生的应用动作。
@@ -49,6 +95,10 @@ pub enum EditorAction {
     SetLineHeight(u32),
     /// 编辑器输入绑定值变化。
     EditorInput(String),
+    /// 图标页搜索值变化。
+    IconSearch(String),
+    /// 图标页分类变化。
+    SetIconCategory(IconCategory),
     /// 自绘标题栏窗口命令（shell 消费执行）。
     Window(tela_contract::WindowCommand),
 }
@@ -75,11 +125,14 @@ impl Default for EditorSettings {
 pub struct App {
     resources: &'static dyn UiResources,
     viewport: Viewport,
+    window_maximized: bool,
     profile: DefaultApplicationProfile,
     view_state: tela_core::ViewStateStore,
     route: Signal<Route>,
     settings: Signal<EditorSettings>,
     document: Signal<String>,
+    icon_query: Signal<String>,
+    icon_category: Signal<IconCategory>,
     frames: FrameCoordinator<EditorAction>,
     /// 静态路径桥 dispatcher（构造时查询关于页信息；后续页面桥请求复用）。
     #[allow(dead_code)]
@@ -103,6 +156,7 @@ impl App {
         Self {
             resources,
             viewport: DEFAULT_VIEWPORT,
+            window_maximized: false,
             profile: DefaultApplicationProfile::new(),
             view_state: tela_core::ViewStateStore::new(),
             route: Signal::new(Route::Editor),
@@ -110,6 +164,8 @@ impl App {
             document: Signal::new(
                 "欢迎使用 Tela 文本编辑器\n\n在上方选择设置可调整字体大小与行距。\n".to_owned(),
             ),
+            icon_query: Signal::new(String::new()),
+            icon_category: Signal::new(IconCategory::All),
             frames: FrameCoordinator::new(),
             bridge,
             about_cache,
@@ -121,15 +177,42 @@ impl App {
     }
 
     /// Updates the logical content area.
-    pub fn set_viewport(&mut self, width: f32, height: f32, _dpr: f32) -> bool {
+    pub fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool {
         let viewport = Viewport {
             width: width.max(320.0),
             height: height.max(240.0),
         };
+        let active_frame_viewport = self.frames.active().map(|frame| frame.frame().viewport);
         if self.viewport == viewport {
+            win32_trace!(
+                "tela-win32-trace: app_set_viewport unchanged requested={:.1}x{:.1} dpr={dpr:.2} active_frame={active_frame_viewport:?}",
+                viewport.width,
+                viewport.height
+            );
             return false;
         }
+        win32_trace!(
+            "tela-win32-trace: app_set_viewport old={:.1}x{:.1} requested={:.1}x{:.1} dpr={dpr:.2} active_frame_before={active_frame_viewport:?}",
+            self.viewport.width,
+            self.viewport.height,
+            viewport.width,
+            viewport.height
+        );
         self.viewport = viewport;
+        self.invalidate_frame();
+        true
+    }
+
+    /// Updates the native window state used by the title-bar projection.
+    pub fn set_window_maximized(&mut self, maximized: bool) -> bool {
+        if self.window_maximized == maximized {
+            return false;
+        }
+        win32_trace!(
+            "tela-win32-trace: app_set_window_maximized old={} new={maximized}",
+            self.window_maximized
+        );
+        self.window_maximized = maximized;
         self.invalidate_frame();
         true
     }
@@ -144,11 +227,18 @@ impl App {
         }
         self.frames.runtime().begin_frame();
         let dirty = self.frames.runtime().take_dirty();
+        win32_trace!(
+            "tela-win32-trace: app_ensure_frame begin viewport={:.1}x{:.1} invalidated={} dirty={dirty:?} active_before={:?}",
+            self.viewport.width,
+            self.viewport.height,
+            self.projection_invalidated,
+            self.frames.active().map(|frame| frame.frame().viewport)
+        );
         // 拖拽缩放时每帧 rebuild，日志 500ms 节流；rebuild 与 layout 统计同批打印。
         let log_this_frame = self.last_rebuild_log_at.elapsed().as_millis() >= 500;
         if log_this_frame {
             self.last_rebuild_log_at = std::time::Instant::now();
-            eprintln!(
+            win32_trace!(
                 "tela-win32-editor: rebuild invalidated={} dirty={:?} route={:?}",
                 self.projection_invalidated,
                 dirty,
@@ -160,6 +250,7 @@ impl App {
             Ok(prepared) => prepared,
             Err(error) => {
                 eprintln!("tela-win32-editor: retain previous frame: {error}");
+                win32_trace!("tela-win32-trace: app_ensure_frame result=retain_projection_error");
                 self.frames.runtime().restore_dirty(dirty);
                 return false;
             }
@@ -182,6 +273,7 @@ impl App {
             Ok(frame) => frame,
             Err(error) => {
                 eprintln!("tela-win32-editor: retain previous frame: {error:?}");
+                win32_trace!("tela-win32-trace: app_ensure_frame result=retain_layout_error");
                 self.frames.runtime().restore_dirty(dirty);
                 return false;
             }
@@ -192,7 +284,7 @@ impl App {
         // measure_count 是累计值（LayoutCache 内部从不重置），这里打印本次增量：
         // 首次 rebuild 为全量节点数，之后应稳定在小数值（Dirty 缓存命中）。
         if log_this_frame {
-            eprintln!(
+            win32_trace!(
                 "tela-win32-editor: layout measured {measured_this_frame} nodes (cumulative {total_measures}, entries {})",
                 self.profile.layout_entry_count()
             );
@@ -206,7 +298,20 @@ impl App {
             *view_state = candidate_state;
             *projection_invalidated = false;
         });
+        let committed_viewport = self.frames.active().map(|frame| frame.frame().viewport);
+        win32_trace!(
+            "tela-win32-trace: app_ensure_frame result=committed frame_viewport={committed_viewport:?}"
+        );
         true
+    }
+
+    /// Whether the active frame can be rendered for the current application state.
+    pub fn frame_is_current(&self) -> bool {
+        self.frames.active().is_some_and(|active| {
+            active.frame().viewport == self.viewport
+                && !self.projection_invalidated
+                && !self.frames.runtime().has_dirty()
+        })
     }
 
     /// The resolved frame for the current page.
@@ -237,6 +342,24 @@ impl App {
         let changed = self.handle_framed_actions(token, &actions);
         if changed {
             self.invalidate_frame();
+        }
+        if !actions.is_empty()
+            || matches!(
+                event.phase,
+                tela_contract::PointerPhase::Down
+                    | tela_contract::PointerPhase::Up
+                    | tela_contract::PointerPhase::Cancel
+            )
+        {
+            let action_kinds: Vec<_> = actions.iter().map(action_kind).collect();
+            win32_trace!(
+                "tela-win32-trace: app_pointer phase={:?} timestamp={} logical=({:.1}, {:.1}) actions={action_kinds:?} changed={changed} pending_command={:?}",
+                event.phase,
+                event.timestamp_micros,
+                event.position.x,
+                event.position.y,
+                self.pending_window_command
+            );
         }
         actions.len() as u32
     }
@@ -289,7 +412,7 @@ impl App {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let value = self.document.get();
+        let value = self.input_value();
         u32::from(self.dispatch_text_input(
             token,
             TextInputEvent::Commit {
@@ -304,7 +427,7 @@ impl App {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let value = self.document.get();
+        let value = self.input_value();
         let canceled = self.dispatch_text_input(
             token,
             TextInputEvent::Cancel {
@@ -318,12 +441,30 @@ impl App {
     pub fn input_focused(&self) -> bool {
         self.view_state
             .current_focus_key()
-            .is_some_and(|key| key.0 == EDITOR_INPUT_KEY)
+            .is_some_and(|key| key.0 == EDITOR_INPUT_KEY || key.0 == ICON_SEARCH_INPUT_KEY)
     }
 
-    /// Current controlled editor value.
+    /// Current controlled value for the focused text input.
     pub fn input_value(&self) -> String {
-        self.document.get()
+        match self
+            .view_state
+            .current_focus_key()
+            .map(|key| key.0.as_str())
+        {
+            Some(EDITOR_INPUT_KEY) => self.document.get(),
+            Some(ICON_SEARCH_INPUT_KEY) => self.icon_query.get(),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether a logical pointer position currently hits a hoverable node.
+    pub fn hit_test_interactive_at(&mut self, point: Point) -> bool {
+        self.ensure_frame();
+        let Some(active) = self.frames.active() else {
+            return false;
+        };
+        self.profile
+            .hit_test_interactive(active.tree(), active.frame(), point)
     }
 
     /// Whether the pointer currently hovers an interactive (hoverable) node; the shell uses
@@ -334,7 +475,11 @@ impl App {
 
     /// 自绘标题栏待执行窗口命令（shell 每次输入 dispatch 后消费）。
     pub fn take_window_command(&mut self) -> Option<tela_contract::WindowCommand> {
-        self.pending_window_command.take()
+        let command = self.pending_window_command.take();
+        if let Some(command) = command {
+            win32_trace!("tela-win32-trace: app_take_window_command command={command:?}");
+        }
+        command
     }
 
     /// About page rows (cached at construction; build constants are static per session).
@@ -351,10 +496,14 @@ impl App {
         let root = render_root(
             &mut build,
             self.viewport,
+            self.window_maximized,
             route,
             settings,
             &document,
             &self.about_cache,
+            self.icon_query.get(),
+            self.icon_category.get(),
+            self.resources.icon_provider(),
             hover_key,
         )
         .map_err(|error| error.to_string())?;
@@ -441,7 +590,27 @@ impl App {
                 self.invalidate_frame();
                 true
             }
+            EditorAction::IconSearch(value) => {
+                if self.icon_query.get() == value {
+                    return false;
+                }
+                self.icon_query.set(value);
+                self.invalidate_frame();
+                true
+            }
+            EditorAction::SetIconCategory(category) => {
+                if self.icon_category.get() == category {
+                    return false;
+                }
+                self.icon_category.set(category);
+                self.invalidate_frame();
+                true
+            }
             EditorAction::Window(command) => {
+                win32_trace!(
+                    "tela-win32-trace: app_window_action command={command:?} pending_before={:?}",
+                    self.pending_window_command
+                );
                 self.pending_window_command = Some(command);
                 true
             }
@@ -449,17 +618,40 @@ impl App {
     }
 
     fn handle_value_change(&mut self, bind_id: String, value: Value) -> bool {
-        if bind_id != EDITOR_INPUT_KEY {
-            return false;
-        }
         let Value::String(value) = value else {
             return false;
         };
-        self.handle_application_action(EditorAction::EditorInput(value))
+        match bind_id.as_str() {
+            EDITOR_INPUT_KEY => self.handle_application_action(EditorAction::EditorInput(value)),
+            ICON_SEARCH_INPUT_KEY => {
+                self.handle_application_action(EditorAction::IconSearch(value))
+            }
+            _ => false,
+        }
     }
 
     fn invalidate_frame(&mut self) {
         self.projection_invalidated = true;
+    }
+}
+
+fn action_kind(action: &UiAction) -> &'static str {
+    match action {
+        UiAction::Pointer { .. } => "Pointer",
+        UiAction::Click { .. } => "Click",
+        UiAction::Hover { .. } => "Hover",
+        UiAction::RequestFocus { .. } => "RequestFocus",
+        UiAction::FocusChanged { .. } => "FocusChanged",
+        UiAction::ValueChange { .. } => "ValueChange",
+        UiAction::Scroll { .. } => "Scroll",
+        UiAction::Gesture { .. } => "Gesture",
+        UiAction::TextInput { .. } => "TextInput",
+        UiAction::OpenModal { .. } => "OpenModal",
+        UiAction::CloseModal { .. } => "CloseModal",
+        UiAction::TeleportClickOutside { .. } => "TeleportClickOutside",
+        UiAction::ShortcutActivated { .. } => "ShortcutActivated",
+        UiAction::SaveFocus => "SaveFocus",
+        UiAction::RestoreFocus => "RestoreFocus",
     }
 }
 
@@ -553,13 +745,172 @@ mod tests {
     }
 
     #[test]
+    fn close_button_is_hit_testable_before_hover_state_exists() {
+        let mut app = app();
+        assert!(app.ensure_frame());
+        let point = {
+            let active = app.frames.active().expect("editor frame");
+            let index = active
+                .tree()
+                .keys()
+                .iter()
+                .position(|key| key.0 == "win32.window.close")
+                .expect("close button key");
+            let node_id = active.tree().node_ids()[index];
+            let region = active
+                .frame()
+                .hit_regions
+                .iter()
+                .find(|region| region.node_id == node_id)
+                .expect("close button hit region");
+            Point {
+                x: region.rect.x + region.rect.w / 2.0,
+                y: region.rect.y + region.rect.h / 2.0,
+            }
+        };
+
+        assert!(app.view_state.hover_key().is_none());
+        assert!(app.hit_test_interactive_at(point));
+    }
+
+    #[test]
+    fn close_button_click_publishes_window_command() {
+        let mut app = app();
+        assert!(app.ensure_frame());
+        let point = {
+            let active = app.frames.active().expect("editor frame");
+            let index = active
+                .tree()
+                .keys()
+                .iter()
+                .position(|key| key.0 == "win32.window.close")
+                .expect("close button key");
+            let node_id = active.tree().node_ids()[index];
+            let region = active
+                .frame()
+                .hit_regions
+                .iter()
+                .find(|region| region.node_id == node_id)
+                .expect("close button hit region");
+            Point {
+                x: region.rect.x + region.rect.w / 2.0,
+                y: region.rect.y + region.rect.h / 2.0,
+            }
+        };
+
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
+        assert_eq!(
+            app.take_window_command(),
+            Some(tela_contract::WindowCommand::Close)
+        );
+    }
+
+    #[test]
+    fn viewport_change_is_committed_before_render_consumes_the_frame() {
+        let mut app = app();
+        assert!(app.ensure_frame());
+        assert!(app.frame_is_current());
+        assert!(app.set_viewport(940.0, 620.0, 1.0));
+        assert!(!app.frame_is_current());
+        assert!(app.ensure_frame());
+        assert!(app.frame_is_current());
+        assert_eq!(
+            app.frame().viewport,
+            Viewport {
+                width: 940.0,
+                height: 620.0
+            }
+        );
+    }
+
+    #[test]
+    fn window_maximized_state_invalidates_frame_and_is_idempotent() {
+        let mut app = app();
+        assert!(app.ensure_frame());
+        assert!(!app.window_maximized);
+        assert!(app.set_window_maximized(true));
+        assert!(app.window_maximized);
+        assert!(!app.frame_is_current());
+        assert!(!app.set_window_maximized(true));
+        assert!(app.ensure_frame());
+        assert!(app.frame_is_current());
+        assert!(app.set_window_maximized(false));
+        assert!(!app.window_maximized);
+        assert!(!app.frame_is_current());
+    }
+
+    #[test]
     fn navigation_switches_pages() {
         let mut app = app();
         assert!(app.handle_application_action(EditorAction::Navigate(Route::Settings)));
         assert_eq!(app.route.get(), Route::Settings);
+        assert!(app.handle_application_action(EditorAction::Navigate(Route::Icons)));
+        assert_eq!(app.route.get(), Route::Icons);
         assert!(app.handle_application_action(EditorAction::Navigate(Route::About)));
         assert_eq!(app.route.get(), Route::About);
         assert!(!app.handle_application_action(EditorAction::Navigate(Route::About)));
+    }
+
+    #[test]
+    fn icons_page_search_and_category_invalidate_the_projection() {
+        let mut app = app();
+        assert!(app.handle_application_action(EditorAction::Navigate(Route::Icons)));
+        assert!(app.ensure_frame());
+        assert!(
+            app.frames
+                .active()
+                .expect("icons frame")
+                .tree()
+                .keys()
+                .iter()
+                .any(|key| key.0 == "win32.icons")
+        );
+        assert_eq!(
+            app.frames
+                .active()
+                .expect("icons frame")
+                .tree()
+                .keys()
+                .iter()
+                .filter(|key| key.0.starts_with("win32.icons.card."))
+                .count(),
+            120
+        );
+        let scroll = app
+            .frames
+            .active()
+            .expect("icons frame")
+            .frame()
+            .scroll_bounds
+            .iter()
+            .find(|bounds| bounds.key.0 == "win32.icons.scroll")
+            .expect("icons scroll bounds");
+        assert!(
+            scroll.content_height > scroll.viewport.h + 88.0,
+            "icon cards should wrap into multiple rows: content_height={} viewport_height={}",
+            scroll.content_height,
+            scroll.viewport.h
+        );
+        assert!(app.handle_application_action(EditorAction::IconSearch("search".to_owned())));
+        assert_eq!(app.icon_query.get(), "search");
+        assert!(!app.frame_is_current());
+        assert!(app.handle_application_action(EditorAction::SetIconCategory(IconCategory::View)));
+        assert_eq!(app.icon_category.get(), IconCategory::View);
+        assert!(!app.frame_is_current());
+        assert!(app.ensure_frame());
+        assert!(app.frame_is_current());
+        assert_eq!(
+            app.frames
+                .active()
+                .expect("filtered icons frame")
+                .tree()
+                .keys()
+                .iter()
+                .filter(|key| key.0.starts_with("win32.icons.card."))
+                .count(),
+            0
+        );
     }
 
     #[test]

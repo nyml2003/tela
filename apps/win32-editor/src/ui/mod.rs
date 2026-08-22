@@ -6,6 +6,7 @@
 
 pub mod about_page;
 pub mod editor_page;
+pub mod icons_page;
 pub mod nav_button;
 pub mod settings_page;
 pub mod theme;
@@ -13,6 +14,7 @@ pub mod title_bar;
 
 pub use about_page::{AboutPage, AboutRows};
 pub use editor_page::EditorPage;
+pub use icons_page::render_icons_page;
 pub use nav_button::{NavButton, nav_item};
 pub use settings_page::{SettingsPage, StepButton, step_item};
 pub use title_bar::{TitleBar, window_item};

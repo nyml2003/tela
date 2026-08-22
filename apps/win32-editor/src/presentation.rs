@@ -1,24 +1,32 @@
 //! Editor presentation 装配入口：render_root 在 EditorAction 上下文组合动作结构，
 //! 布局/页面组件（`ui/` 目录，一个组件一个文件）经 children 注入动作节点。
 
-use tela_contract::{CrossAlign, Fill, SemanticKey, Viewport, WindowCommand};
+use tela_contract::{CrossAlign, Fill, IconProvider, SemanticKey, Viewport, WindowCommand};
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, ui};
 
-use crate::application::{EditorAction, EditorSettings, Route};
+use crate::application::{EditorAction, EditorSettings, IconCategory, Route};
 
 use crate::ui::theme::{CONTENT_BACKGROUND, TEXT};
-use crate::ui::{AboutPage, EditorPage, SettingsPage, TitleBar, nav_item, step_item, window_item};
+use crate::ui::{
+    AboutPage, EditorPage, SettingsPage, TitleBar, nav_item, render_icons_page, step_item,
+    window_item,
+};
 
 /// 渲染当前页面（含顶部导航栏）。App 装配入口：动作结构在 EditorAction 上下文组合，
 /// 布局/页面为 DSL 组件（children 注入动作节点）。
+#[allow(clippy::too_many_arguments)]
 pub fn render_root(
     build: &mut ViewBuild<EditorAction>,
     viewport: Viewport,
+    window_maximized: bool,
     route: Route,
     settings: EditorSettings,
     document: &str,
     about_rows: &[(String, String)],
+    icon_query: String,
+    icon_category: IconCategory,
+    icon_provider: &dyn IconProvider,
     hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let hover = hover_key.map(|key| key.0.clone());
@@ -32,12 +40,13 @@ pub fn render_root(
             <Column width={viewport.width} height={viewport.height}>
                 <TitleBar width={viewport.width}>
                     { nav_item(build, Route::Editor, "编辑器", route, &hover) }
+                    { nav_item(build, Route::Icons, "图标", route, &hover) }
                     { nav_item(build, Route::Settings, "设置", route, &hover) }
                     { nav_item(build, Route::About, "关于", route, &hover) }
                     { tela_ui_dsl::into_view_child::<EditorAction, tela_contract::UiNode>(tela_core::LayoutContainer::spacer().into())? }
-                    { window_item(build, WindowCommand::Minimize, "minimize", &hover) }
-                    { window_item(build, WindowCommand::Maximize, "maximize", &hover) }
-                    { window_item(build, WindowCommand::Close, "close", &hover) }
+                    { window_item(build, WindowCommand::Minimize, "minimize", window_maximized, &hover) }
+                    { window_item(build, WindowCommand::Maximize, "maximize", window_maximized, &hover) }
+                    { window_item(build, WindowCommand::Close, "close", window_maximized, &hover) }
                 </TitleBar>
                 { match route {
                     Route::Editor => ui!(build {
@@ -57,6 +66,14 @@ pub fn render_root(
                             </Row>
                         </SettingsPage>
                     }),
+                    Route::Icons => render_icons_page(
+                        build,
+                        viewport,
+                        &icon_query,
+                        icon_category,
+                        icon_provider,
+                        hover.as_ref(),
+                    ),
                     Route::About => ui!(build {
                         <AboutPage viewport={viewport} rows={about_rows} />
                     }),

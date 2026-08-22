@@ -79,6 +79,7 @@ impl NavButton {
 fn route_name(route: Route) -> &'static str {
     match route {
         Route::Editor => "editor",
+        Route::Icons => "icons",
         Route::Settings => "settings",
         Route::About => "about",
     }
