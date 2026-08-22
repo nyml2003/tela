@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use tela_contract::{
     Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase, UiFrame,
+    WindowCommand,
 };
 use windows::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -24,12 +25,13 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
             DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-            HTCLIENT, IDC_ARROW, IDC_HAND, LoadCursorW, PostQuitMessage, RegisterClassW,
-            SetCursor, SetWindowLongPtrW,
-            WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
-            WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-            WM_MOUSEWHEEL, WM_NCCREATE, WM_NCMOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE,
-            WNDCLASSW, WS_OVERLAPPEDWINDOW,
+            HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, LoadCursorW, PostMessageW, PostQuitMessage,
+            RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetCursor, SetWindowLongPtrW,
+            ShowWindow, WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+            WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT,
+            WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
+            WS_THICKFRAME,
         },
     },
 };
@@ -62,6 +64,10 @@ pub trait Win32StaticSession {
     /// Whether the pointer currently hovers an interactive (hoverable) node.
     fn hover_interactive(&self) -> bool {
         false
+    }
+    /// 自绘标题栏待执行的窗口命令（App 经动作产生，shell 消费执行）。
+    fn take_window_command(&mut self) -> Option<WindowCommand> {
+        None
     }
     /// Current controlled text value.
     fn input_value(&self) -> String;
@@ -119,10 +125,44 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
         }
         // SAFETY: dispatch is the standard loop step for the owning thread.
         unsafe { DispatchMessageW(&message) };
+        // 自绘标题栏命令（最小化/最大化/关闭）在每次 dispatch 后统一执行。
+        execute_window_command(hwnd);
         message_count += 1;
     }
     eprintln!("tela win32-static: message loop exited after {message_count} messages");
     Ok(())
+}
+
+/// 自绘标题栏拖动带高度（逻辑像素，与应用的 TITLE_BAR_H 主题常量对齐）。
+const TITLE_BAR_DRAG_H: f32 = 40.0;
+
+/// 消费并执行自绘标题栏的窗口命令（最小化/最大化/关闭）。
+fn execute_window_command(hwnd: HWND) {
+    let command = unsafe { with_state(hwnd, |state| state.session.take_window_command()) };
+    let Some(command) = command else {
+        return;
+    };
+    // SAFETY: hwnd 属于 UI 线程，命令执行是标准的窗口管理调用。
+    unsafe {
+        match command {
+            WindowCommand::Minimize => {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            }
+            WindowCommand::Maximize => {
+                let zoomed = windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd).as_bool();
+                let _ = ShowWindow(hwnd, if zoomed { SW_RESTORE } else { SW_MAXIMIZE });
+            }
+            WindowCommand::Close => {
+                // 走 WM_CLOSE 完整流程（input_blur 等清理）。
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_CLOSE,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        }
+    }
 }
 
 fn state_ptr(app: Box<dyn Win32StaticSession>, hwnd: HWND) -> isize {
@@ -225,7 +265,7 @@ fn create_window(hinstance: HINSTANCE) -> Result<HWND, String> {
             WINDOW_EX_STYLE::default(),
             windows::core::w!("TelaStaticWin32Window"),
             windows::core::w!("Tela 文本编辑器"),
-            WS_OVERLAPPEDWINDOW,
+            WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
             100,
             100,
             960,
@@ -247,6 +287,23 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        WM_NCHITTEST => {
+            // 自绘标题栏：客户区顶部拖动带内、未命中交互节点 → HT_CAPTION
+            // （系统免费提供拖动、双击最大化、右键菜单）；按钮区保持 HTCLIENT。
+            let hit = unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+            if hit.0 == HTCLIENT as isize {
+                let (x, y) = screen_point(lparam);
+                let mut point = POINT { x, y };
+                // SAFETY: ScreenToClient 是同步查询，hwnd 属于本线程。
+                let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+                let interactive =
+                    unsafe { with_state(hwnd, |state| state.session.hover_interactive()) };
+                if (point.y as f32) < TITLE_BAR_DRAG_H && !interactive {
+                    return LRESULT(HTCAPTION as isize);
+                }
+            }
+            hit
+        }
         WM_NCCREATE => {
             // SAFETY: WM_NCCREATE precedes all user-data access; store nothing here.
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -720,6 +777,10 @@ fn client_size(hwnd: HWND) -> (f32, f32) {
         (rect.right - rect.left) as f32,
         (rect.bottom - rect.top) as f32,
     )
+}
+
+fn screen_point(lparam: LPARAM) -> (i32, i32) {
+    client_point(lparam)
 }
 
 fn client_point(lparam: LPARAM) -> (i32, i32) {

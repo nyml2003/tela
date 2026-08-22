@@ -12,6 +12,7 @@
 extern crate self as tela_ui_dsl;
 
 mod action;
+mod component;
 mod context;
 mod frame;
 mod runtime;
@@ -19,6 +20,8 @@ mod signal;
 mod view;
 
 pub use action::{ActionFrame, ActionRegistry, DslTrigger, TextActionMap, with_context};
+pub use component::DslComponent;
+pub use component::prelude;
 pub use context::{ProvidedValue, ViewContext};
 pub use frame::{
     ActiveFrame, FrameCoordinator, FramePrepareError, FrameToken, FramedUiAction, PreparedFrame,
@@ -26,7 +29,7 @@ pub use frame::{
 };
 pub use runtime::{ComponentRuntime, FrameInvalidator};
 pub use signal::{Signal, SignalId, SignalSubscription};
-pub use tela_ui_dsl_macros::ui;
+pub use tela_ui_dsl_macros::{DslComponent, ui};
 pub use view::{
     ActionTarget, Body, IntoViewChild, ItemKey, ViewBuild, ViewBuildError, ViewChild, ViewNode,
     ViewOutput, ViewResult, ViewSite, into_view_child,
@@ -43,6 +46,7 @@ pub mod __private {
 
 #[cfg(test)]
 mod macro_hygiene_tests {
+    use super::prelude::*;
     use super::{ViewBuild, ViewOutput, ViewResult, ui};
 
     #[allow(dead_code)]
@@ -52,7 +56,7 @@ mod macro_hygiene_tests {
     fn render(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
         ui!(build {
             <Frame>
-                <Text>{"runtime crate"}</Text>
+                <Text value={"runtime crate"} />
             </Frame>
         })
     }

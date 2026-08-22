@@ -29,6 +29,38 @@ ui!(build {
 
 参考实现：`apps/win32-editor/`（三页 + 导航 + 多行编辑器，桌面静态壳）、`apps/mobile-demo/`（列表 + 搜索 + 虚拟化）。
 
+## 自定义组件（033 方案）
+
+DSL 只有一个概念——**组件**：所有 UI 元素（原语 Row/Column/Text 与自定义组件）实现
+`DslComponent`，标签可见性由 Rust `use` 决定，宏只做属性搬运工（零白名单、零注册表）。
+
+```rust
+use tela_ui_dsl::prelude::*;
+
+#[derive(DslComponent)]
+struct NavButton {
+    key: Option<String>,
+    label: String,
+    #[prop(default = 72.0)]
+    width: f32,
+    selected: bool,
+    hovered: bool,
+}
+
+impl NavButton {
+    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>)
+        -> ViewResult<ViewOutput<A>> { /* 构建子树 */ }
+}
+
+// 使用：<NavButton label={"设置"} selected={...} hovered={...} />
+```
+
+- 字段属性：`#[prop(default = expr)]`（默认值）、`#[prop(option)]`（类型必须 Option<U>）、
+  `#[inject]`（Context 注入，T: Clone）、`#[provide]`（压入子作用域）、`#[watch]`
+  （订阅 Signal 字段，变化重建）。
+- `ActionTarget`/`For`/`VirtualList`/`Fragment` 保留宏级（控制流与动作绑定语法）。
+- 完整设计见 `docs/033-DSL组件化与派生宏方案.md`。
+
 ## 开发环境：Zed 中宏内跳转
 
 `ui!` 是 proc macro；Zed（rust-analyzer）对它支持情况：

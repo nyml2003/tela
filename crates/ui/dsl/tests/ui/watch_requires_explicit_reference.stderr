@@ -1,5 +1,0 @@
-error: @watch requires an explicit Signal reference: @watch(name, &signal);
- --> tests/ui/watch_requires_explicit_reference.rs:7:23
-  |
-7 |         @watch(value, count);
-  |                       ^^^^^

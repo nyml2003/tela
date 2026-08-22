@@ -16,7 +16,7 @@ fonttools varLib.instancer MaterialSymbolsRounded[FILL,GRAD,opsz,wght].ttf \
   -o /tmp/MaterialSymbolsRounded-static.ttf
 pyftsubset /tmp/MaterialSymbolsRounded-static.ttf \
   --output-file=assets/fonts/MaterialSymbolsRounded-subset.ttf \
-  --unicodes=U+E145,U+E92E,U+F097,U+E14D,U+E9A1,U+E938,U+F09A,U+E893,U+E166,U+EF7A,U+E2C7,U+E2C8,U+E873,U+E3F4,U+EB2C,U+E9B2,U+E8EF,U+E9B0,U+E164,U+E152,U+E5CC,U+E5D2,U+E5D3 \
+  --unicodes=U+E145,U+E92E,U+F097,U+E14D,U+E9A1,U+E938,U+F09A,U+E893,U+E166,U+EF7A,U+E2C7,U+E2C8,U+E873,U+E3F4,U+EB2C,U+E9B2,U+E8EF,U+E9B0,U+E164,U+E152,U+E5CC,U+E5D2,U+E5D3,U+E5CD,U+E931,U+E92C \
   --no-hinting
 ```
 

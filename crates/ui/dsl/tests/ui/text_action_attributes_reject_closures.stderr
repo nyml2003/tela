@@ -1,5 +1,91 @@
-error: DSL action attributes cannot contain closures; use a function path or with_context(value, mapper)
- --> tests/ui/text_action_attributes_reject_closures.rs:6:66
+error[E0425]: cannot find type `Text` in this scope
+  --> tests/ui/text_action_attributes_reject_closures.rs:10:18
+   |
+10 |                 <Text>{"edit"}</Text>
+   |                  ^^^^ not found in this scope
+
+error[E0425]: cannot find type `Frame` in this scope
+ --> tests/ui/text_action_attributes_reject_closures.rs:9:14
   |
-6 |         <ActionTarget on_input={tela_ui_dsl::with_context(7_u32, |id, value| {
-  |                                                                  ^
+9 |             <Frame>
+  |              ^^^^^ not found in this scope
+
+error[E0277]: the trait bound `&str: IntoViewChild<_>` is not satisfied
+  --> tests/ui/text_action_attributes_reject_closures.rs:10:24
+   |
+ 5 |       let _ = ui!(build {
+   |  _____________-
+ 6 | |         <ActionTarget on_input={tela_ui_dsl::with_context(7_u32, |id, value| {
+ 7 | |             let _ = (id, value);
+ 8 | |         })}>
+ 9 | |             <Frame>
+10 | |                 <Text>{"edit"}</Text>
+   | |                        ^^^^^^ the trait `IntoViewChild<_>` is not implemented for `&str`
+11 | |             </Frame>
+12 | |         </ActionTarget>
+13 | |     });
+   | |______- required by a bound introduced by this call
+   |
+help: the following other types implement trait `IntoViewChild<A>`
+  --> src/view.rs
+   |
+   | impl<A> IntoViewChild<A> for ViewResult<UiNode> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<tela_ui_dsl::__private::UiNode, ViewBuildError>`
+...
+   | impl<A> IntoViewChild<A> for ViewOutput<A> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ViewOutput<A>`
+...
+   | impl<A> IntoViewChild<A> for ViewResult<ViewOutput<A>> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<ViewOutput<A>, ViewBuildError>`
+note: required by a bound in `tela_ui_dsl::into_view_child`
+  --> src/view.rs
+   |
+   | pub fn into_view_child<A, V>(child: V) -> ViewResult<ViewChild<A>>
+   |        --------------- required by a bound in this function
+   | where
+   |     V: IntoViewChild<A>,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `into_view_child`
+
+error[E0277]: the `?` operator can only be used in a function that returns `Result` or `Option` (or another type that implements `FromResidual`)
+  --> tests/ui/text_action_attributes_reject_closures.rs:13:6
+   |
+ 3 | fn main() {
+   | --------- this function should return `Result` or `Option` to accept `?`
+...
+13 |     });
+   |      ^ cannot use the `?` operator in a function that returns `()`
+   |
+   = note: this error originates in the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider adding return type
+   |
+ 3 ~ fn main() -> Result<(), Box<dyn std::error::Error>> {
+ 4 |     let mut build = ViewBuild::<()>::new();
+...
+13 |     });
+14 +     Ok(())
+   |
+
+error[E0308]: mismatched types
+  --> tests/ui/text_action_attributes_reject_closures.rs:5:13
+   |
+ 5 |       let _ = ui!(build {
+   |  _____________^
+ 6 | |         <ActionTarget on_input={tela_ui_dsl::with_context(7_u32, |id, value| {
+ 7 | |             let _ = (id, value);
+ 8 | |         })}>
+...  |
+12 | |         </ActionTarget>
+13 | |     });
+   | |      ^
+   | |      |
+   | |______expected `&mut ViewBuild<_>`, found `ViewBuild<()>`
+   |        arguments to this function are incorrect
+   |
+   = note: expected mutable reference `&mut ViewBuild<_>`
+                         found struct `ViewBuild<()>`
+note: associated function defined here
+  --> src/component.rs
+   |
+   |     fn render<A>(
+   |        ^^^^^^
+   = note: this error originates in the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,5 +1,0 @@
-error: @inject requires an explicit type: @inject(name: Type);
- --> tests/ui/inject_requires_explicit_type.rs:6:22
-  |
-6 |         @inject(label);
-  |                      ^

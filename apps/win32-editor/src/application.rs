@@ -27,9 +27,10 @@ const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
 };
 
 /// 顶部导航路由。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Route {
     /// 文本编辑器（默认页）。
+    #[default]
     Editor,
     /// 设置页。
     Settings,
@@ -48,6 +49,8 @@ pub enum EditorAction {
     SetLineHeight(u32),
     /// 编辑器输入绑定值变化。
     EditorInput(String),
+    /// 自绘标题栏窗口命令（shell 消费执行）。
+    Window(tela_contract::WindowCommand),
 }
 
 /// 应用设置（内存态，不持久化）。
@@ -85,6 +88,8 @@ pub struct App {
     projection_invalidated: bool,
     /// 上次 rebuild 的布局缓存累计测量数（用于打印本次增量）。
     last_layout_measures: usize,
+    /// 自绘标题栏待执行窗口命令（shell 经 take_window_command 消费）。
+    pending_window_command: Option<tela_contract::WindowCommand>,
     /// rebuild 日志时间节流（拖拽缩放时每帧 rebuild，避免刷屏）。
     last_rebuild_log_at: std::time::Instant,
 }
@@ -110,6 +115,7 @@ impl App {
             about_cache,
             projection_invalidated: true,
             last_layout_measures: 0,
+            pending_window_command: None,
             last_rebuild_log_at: std::time::Instant::now(),
         }
     }
@@ -326,6 +332,11 @@ impl App {
         self.view_state.hover_key().is_some()
     }
 
+    /// 自绘标题栏待执行窗口命令（shell 每次输入 dispatch 后消费）。
+    pub fn take_window_command(&mut self) -> Option<tela_contract::WindowCommand> {
+        self.pending_window_command.take()
+    }
+
     /// About page rows (cached at construction; build constants are static per session).
     pub fn about_rows(&self) -> &[(String, String)] {
         &self.about_cache
@@ -428,6 +439,10 @@ impl App {
                 }
                 self.document.set(value);
                 self.invalidate_frame();
+                true
+            }
+            EditorAction::Window(command) => {
+                self.pending_window_command = Some(command);
                 true
             }
         }

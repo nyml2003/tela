@@ -74,6 +74,9 @@ fn material_codepoint(name: IconName) -> char {
         IconName::ArrowBack => '\u{e5c4}',
         IconName::Menu => '\u{e5d2}',
         IconName::More => '\u{e5d3}',
+        IconName::Close => '\u{e5cd}',
+        IconName::Minimize => '\u{e931}',
+        IconName::Maximize => '\u{e92c}',
     }
 }
 

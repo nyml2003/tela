@@ -87,6 +87,18 @@ pub enum ViewBuildError {
         /// target 所在位置。
         site: ViewSite,
     },
+    /// `ActionTarget` 组件没有登记任何动作。
+    MissingActionTarget {
+        /// target 所在位置。
+        site: ViewSite,
+    },
+    /// `#[derive(DslComponent)]` 的 `#[watch]` / `#[provide]` 字段缺失（调用点未提供）。
+    MissingRequiredProp {
+        /// 缺失的字段名。
+        name: &'static str,
+        /// 组件所在位置。
+        site: ViewSite,
+    },
     /// 一个 `For` / `VirtualList` item 在 lowering 后没有恰好一个真实子根。
     ForItemRequiresSingleRoot {
         /// 发现的真实根数。
@@ -153,6 +165,16 @@ impl std::fmt::Display for ViewBuildError {
             Self::ActionTargetRequiresSingleRoot { actual, site } => write!(
                 formatter,
                 "ActionTarget requires one real child, found {actual} at {}:{}:{}",
+                site.file, site.line, site.column
+            ),
+            Self::MissingActionTarget { site } => write!(
+                formatter,
+                "ActionTarget requires at least one action attribute at {}:{}:{}",
+                site.file, site.line, site.column
+            ),
+            Self::MissingRequiredProp { name, site } => write!(
+                formatter,
+                "component requires prop '{name}' at {}:{}:{}",
                 site.file, site.line, site.column
             ),
             Self::ForItemRequiresSingleRoot { actual, site } => write!(
@@ -378,6 +400,7 @@ enum UnanchoredAction<A> {
 }
 
 impl<A> ActionTarget<A> {
+    #[allow(dead_code)] // 仅测试使用；生产路径走 action_at/on_input_at 等站点变体
     /// 创建没有动作绑定的透明 target。
     pub fn new() -> Self {
         Self {
@@ -673,6 +696,11 @@ impl<A> Body<A> {
         Self { children, watches }
     }
 
+    /// 真实子节点数量（`Frame` 单子校验等）。
+    pub fn child_count(&self) -> usize {
+        self.children.len()
+    }
+
     fn flatten(self) -> (Vec<ViewNode<A>>, Vec<WatchHandle>) {
         let mut children = Vec::new();
         for child in self.children {
@@ -804,6 +832,18 @@ impl<A> ViewOutput<A> {
         &self.node
     }
 
+    /// 附加组件级订阅（`#[derive(DslComponent)]` 的 `#[watch]` 脚手架使用）。
+    pub fn attach_watches(mut self, watches: Vec<WatchHandle>) -> Self {
+        self.plans
+            .watches
+            .extend(watches.into_iter().map(|watch| PendingWatch {
+                anchor: NodeAnchor::root(),
+                source: watch.source,
+                site: watch.site,
+            }));
+        self
+    }
+
     pub(crate) fn into_parts(self) -> (UiNode, PlanBundle<A>) {
         (self.node, self.plans)
     }
@@ -831,6 +871,12 @@ pub(crate) struct ResolvedPlans<A> {
 pub trait IntoViewChild<A> {
     /// 将当前表达式转换为结构化 child。
     fn into_view_child(self) -> ViewResult<ViewChild<A>>;
+}
+
+impl<A> IntoViewChild<A> for ViewChild<A> {
+    fn into_view_child(self) -> ViewResult<ViewChild<A>> {
+        Ok(self)
+    }
 }
 
 impl<A> IntoViewChild<A> for UiNode {

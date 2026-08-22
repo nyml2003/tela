@@ -9,6 +9,8 @@
 pub mod application;
 #[cfg(any(test, feature = "app-runtime"))]
 pub mod presentation;
+#[cfg(any(test, feature = "app-runtime"))]
+pub mod ui;
 
 #[cfg(feature = "app-runtime")]
 pub use application::App;

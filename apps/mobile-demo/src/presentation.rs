@@ -11,6 +11,7 @@ use tela_mobile_ui_kit::{
     MobileLayout, MobileNavBar, MobileNavBarStyle, MobileScaffold, MobileScaffoldStyle,
     MobileSearchField, MobileSurfaceStyle,
 };
+use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::Icon;
 
@@ -103,8 +104,8 @@ pub fn render(props: MobileViewProps<'_>) -> UiNode {
 pub(crate) fn render_browse_dsl(
     build: &mut ViewBuild<MobileAction>,
     props: MobileViewProps<'_>,
-    route_signal: &Signal<crate::application::Route>,
-    query_signal: &Signal<String>,
+    _route_signal: &Signal<crate::application::Route>,
+    _query_signal: &Signal<String>,
 ) -> ViewResult<ViewOutput<MobileAction>> {
     let layout = MobileLayout::with_chrome(props.viewport, props.safe_area, APP_BAR_H, SEARCH_H);
     let content_width = layout.content_width();
@@ -112,26 +113,23 @@ pub(crate) fn render_browse_dsl(
     let chrome_height = layout.chrome_height();
 
     ui!(build {
-        @watch(route, &route_signal);
-        @watch(query, &query_signal);
-
         <Frame
             key={"mobile.browse"}
-            width={Size::fixed(props.viewport.width)}
-            height={Size::fixed(props.viewport.height)}
+            width={props.viewport.width}
+            height={props.viewport.height}
             padding={props.safe_area}
             fill={Fill::Solid(BACKGROUND)}
         >
             <Column
-                width={Size::fixed(content_width)}
-                height={Size::fixed(chrome_height)}
+                width={content_width}
+                height={chrome_height}
             >
                 { browse_app_bar_dsl(build, &props, content_width) }
                 { search_field_dsl(build, &props, content_width) }
                 <ScrollView
                     key={"mobile.content-scroll"}
-                    width={Size::fixed(content_width)}
-                    height={Size::fixed(content_height)}
+                    width={content_width}
+                    height={content_height}
                     padding={Insets {
                         top: 0.0,
                         right: CONTENT_INSET,
@@ -168,8 +166,8 @@ fn browse_app_bar_dsl(
 
     ui!(build {
         <Row
-            width={Size::fixed(width)}
-            height={Size::fixed(APP_BAR_H)}
+            width={width}
+            height={APP_BAR_H}
             padding={Insets {
                 top: 8.0,
                 right: CONTENT_INSET,
@@ -275,8 +273,8 @@ fn search_field_dsl(
 
     ui!(build {
         <Frame
-            width={Size::fixed(width)}
-            height={Size::fixed(SEARCH_H)}
+            width={width}
+            height={SEARCH_H}
             padding={Insets {
                 top: 8.0,
                 right: CONTENT_INSET,
@@ -304,7 +302,7 @@ fn browse_rows_dsl(
         let empty = empty_state(props.query);
         return ui!(build {
             <Column
-                width={Size::fixed((width - CONTENT_INSET * 2.0).max(1.0))}
+                width={(width - CONTENT_INSET * 2.0).max(1.0)}
                 padding={Insets {
                     top: 8.0,
                     right: 0.0,
@@ -321,7 +319,7 @@ fn browse_rows_dsl(
     let icons = props.icons;
     ui!(build {
         <Column
-            width={Size::fixed((width - CONTENT_INSET * 2.0).max(1.0))}
+            width={(width - CONTENT_INSET * 2.0).max(1.0)}
             padding={Insets {
                 top: 8.0,
                 right: 0.0,

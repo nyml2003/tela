@@ -13,6 +13,7 @@ app-runtime = []
 tela-bridge = { path = "../../crates/delivery/bridge", features = ["host"] }
 tela-contract = { path = "../../crates/kernel/contract" }
 tela-core = { path = "../../crates/kernel/core" }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
 tela-ui-dsl = { path = "../../crates/ui/dsl" }
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
 

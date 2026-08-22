@@ -30,6 +30,7 @@ mod paint;
 mod resource;
 /// 文字度量：`TextMetrics`/`TextMeasurer`。
 mod text;
+mod window;
 
 pub use draw::{
     BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DrawCommand, DrawPayload, FrameSink,
@@ -63,6 +64,7 @@ pub use node::{
 pub use paint::{ColorStop, Fill, Gradient, GradientKind, ShadowSpec};
 pub use resource::{TextStyleRef, TextureId, TextureRef};
 pub use text::{TextMeasureRequest, TextMeasurer, TextMetrics};
+pub use window::WindowCommand;
 
 #[cfg(test)]
 mod tests {

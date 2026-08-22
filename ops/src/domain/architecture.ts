@@ -155,6 +155,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-bridge',
     'tela-contract',
     'tela-core',
+    'tela-icon-resources',
     'tela-ui-dsl',
     'tela-ui-foundation',
   ],

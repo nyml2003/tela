@@ -1,5 +1,0 @@
-error: @provide must appear before @inject, @watch, tags, and child expressions
- --> tests/ui/provide_must_be_leading.rs:7:9
-  |
-7 |         @provide("late".to_owned(): String);
-  |         ^

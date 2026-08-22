@@ -306,7 +306,9 @@ mod tests {
     };
 
     use super::{FrameCoordinator, FramePrepareError, FramedUiAction};
-    use crate::{ActionTarget, Body, ViewBuild, ViewBuildError, ViewChild, ViewOutput, ViewSite};
+    use crate::{
+        Body, ViewBuild, ViewBuildError, ViewChild, ViewOutput, ViewSite, view::ActionTarget,
+    };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Action {

@@ -17,6 +17,7 @@ use std::{
 };
 
 use tela_contract::{UiFrame, Viewport};
+use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{
     FrameCoordinator, FrameInvalidator, Signal, ViewBuild, ViewOutput, ViewResult, ui,
 };
@@ -46,10 +47,8 @@ fn render(
     items: &[BenchmarkItem],
 ) -> ViewResult<ViewOutput<BenchmarkAction>> {
     ui!(build {
-        @watch(current_version, &version);
-
         <Column>
-            <Text value={format!("version={}", current_version.get())} />
+            <Text value={format!("version={}", version.get())} />
             <For each={items} key={item.id}>
                 {|item|
                     <Frame>

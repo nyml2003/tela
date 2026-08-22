@@ -1,5 +1,0 @@
-error: @provide requires an explicit type: @provide(value: Type);
- --> tests/ui/provide_requires_explicit_type.rs:6:37
-  |
-6 |         @provide("browse".to_owned());
-  |                                     ^

@@ -44,9 +44,10 @@ impl From<String> for IconKey {
 /// 枚举只负责把稳定名称投影成 [`IconKey`]；实际字形、SVG 或平台图标由
 /// [`IconProvider`] 决定。业务特有图标应直接使用 [`IconKey::new`]，不应不断扩展
 /// 这个基础目录。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum IconName {
     /// 新增。
+    #[default]
     Add,
     /// 删除。
     Delete,
@@ -96,6 +97,12 @@ pub enum IconName {
     Menu,
     /// 更多操作。
     More,
+    /// 关闭（窗口控制）。
+    Close,
+    /// 最小化（窗口控制）。
+    Minimize,
+    /// 最大化（窗口控制）。
+    Maximize,
 }
 
 impl IconName {
@@ -126,6 +133,9 @@ impl IconName {
         Self::ArrowBack,
         Self::Menu,
         Self::More,
+        Self::Close,
+        Self::Minimize,
+        Self::Maximize,
     ];
 
     /// 返回稳定、来源无关的语义名。
@@ -156,6 +166,9 @@ impl IconName {
             Self::ArrowBack => "arrow-back",
             Self::Menu => "menu",
             Self::More => "more",
+            Self::Close => "close",
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
         }
     }
 
