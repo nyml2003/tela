@@ -5,15 +5,16 @@
 //! [`AppController`] 提供域渲染与动作处理。本模块不触碰任何 Windows API，可在非
 //! Windows 宿主上编译，供多端静态壳复用。
 
-use std::time::Instant;
+use std::{collections::BTreeSet, time::Instant};
 
 use tela_contract::{
-    FocusAppearance, InputEvent, Point, PointerEvent, SemanticKey, TextInputEvent, TextSelection,
-    UiAction, UiFrame, UiLayoutError, UiResources, Value, Viewport, WindowCommand,
+    FocusAppearance, FocusDirection, InputEvent, KeyboardIntent, KeyboardIntentEvent, Modifiers,
+    PhysicalKey, Point, PointerEvent, Rect, SemanticKey, TextInputEvent, TextSelection, UiAction,
+    UiFrame, UiLayoutError, UiResources, Value, Viewport, WindowCommand,
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
 use tela_ui_dsl::{
-    FrameCoordinator, FrameToken, FramedUiAction, ViewBuild, ViewOutput, ViewResult,
+    FrameCoordinator, FrameToken, FramedUiAction, ResolvedFrame, ViewBuild, ViewOutput, ViewResult,
 };
 
 /// 单帧渲染上下文：壳状态中应用渲染需要的只读投影。
@@ -67,6 +68,30 @@ pub trait AppController<A: Clone + 'static> {
         false
     }
 
+    /// 处理当前焦点组件的原始键盘输入；返回 `true` 表示组件消费了该按键。
+    fn handle_keyboard(
+        &mut self,
+        key: &SemanticKey,
+        physical_key: u16,
+        modifier_bits: u8,
+        repeat: bool,
+    ) -> bool {
+        let _ = (key, physical_key, modifier_bits, repeat);
+        false
+    }
+
+    /// 处理没有 `ActionTarget` 的通用可点击组件语义 key。
+    fn handle_semantic_click(&mut self, key: &SemanticKey) -> bool {
+        let _ = key;
+        false
+    }
+
+    /// 处理需要连续坐标的通用指针组件。
+    fn handle_pointer(&mut self, key: &SemanticKey, position: Point, bounds: Rect) -> bool {
+        let _ = (key, position, bounds);
+        false
+    }
+
     /// 该语义 key 是否属于受控文本输入通道（决定原生文本通道的挂接）。
     fn is_text_input(&self, key: &SemanticKey) -> bool {
         let _ = key;
@@ -88,6 +113,14 @@ pub trait AppController<A: Clone + 'static> {
     fn title_bar_drag_height(&self) -> f32 {
         0.0
     }
+
+    /// Host 定时唤醒；应用可在此刷新外部快照或发送安全 heartbeat。
+    fn on_tick(&mut self) -> bool {
+        false
+    }
+
+    /// Host 即将销毁窗口时调用；应用可在此完成外部资源的安全停止。
+    fn on_close(&mut self) {}
 }
 
 fn session_trace_enabled() -> bool {
@@ -117,9 +150,16 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     profile: DefaultApplicationProfile,
     view_state: ViewStateStore,
     frames: FrameCoordinator<A>,
+    pending_frame: Option<PendingFrame<A>>,
     projection_invalidated: bool,
     last_layout_measures: usize,
     last_rebuild_log_at: Instant,
+}
+
+struct PendingFrame<A> {
+    resolved: ResolvedFrame<A>,
+    view_state: ViewStateStore,
+    dirty: BTreeSet<SemanticKey>,
 }
 
 impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
@@ -139,6 +179,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             profile: DefaultApplicationProfile::new(),
             view_state: ViewStateStore::new(),
             frames: FrameCoordinator::new(),
+            pending_frame: None,
             projection_invalidated: true,
             last_layout_measures: 0,
             last_rebuild_log_at: Instant::now(),
@@ -152,6 +193,20 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             self.invalidate_frame();
         }
         changed
+    }
+
+    /// 执行一次 Host 定时唤醒，并在应用状态变化时使当前帧失效。
+    pub fn on_tick(&mut self) -> bool {
+        let changed = self.controller.on_tick();
+        if changed {
+            self.invalidate_frame();
+        }
+        changed
+    }
+
+    /// 让应用在窗口销毁前执行关闭清理。
+    pub fn on_close(&mut self) {
+        self.controller.on_close();
     }
 
     /// 读取应用控制器（域状态查询入口）。
@@ -219,14 +274,24 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 确保当前投影与帧存在；返回是否重建了帧。
     pub fn ensure_frame(&mut self) -> bool {
-        if self.frames.active().is_some()
+        if (self.pending_frame.is_some() || self.frames.active().is_some())
             && !self.projection_invalidated
             && !self.frames.runtime().has_dirty()
         {
             return false;
         }
+
+        // 新失效发生在候选已 resolve、尚未 present 的窗口内时，旧候选树可以直接丢弃，
+        // 但它消费过的 Signal dirty 仍属于这次未完成的发布事务。组件 handler 的 pending
+        // State/Output 则继续保留，由下面重建的新候选接管。
+        let mut inherited_dirty = self
+            .pending_frame
+            .take()
+            .map(|pending| pending.dirty)
+            .unwrap_or_default();
         self.frames.runtime().begin_frame();
-        let dirty = self.frames.runtime().take_dirty();
+        inherited_dirty.extend(self.frames.runtime().take_dirty());
+        let dirty = inherited_dirty;
         session_trace!(
             "session_ensure_frame begin viewport={:.1}x{:.1} invalidated={} dirty={dirty:?} active_before={:?}",
             self.viewport.width,
@@ -249,6 +314,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             Err(error) => {
                 eprintln!("tela-win32-editor: retain previous frame: {error}");
                 session_trace!("session_ensure_frame result=retain_projection_error");
+                self.frames.abort_component_transaction();
                 self.frames.runtime().restore_dirty(dirty);
                 return false;
             }
@@ -272,6 +338,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             Err(error) => {
                 eprintln!("tela-win32-editor: retain previous frame: {error:?}");
                 session_trace!("session_ensure_frame result=retain_layout_error");
+                self.frames.abort_component_transaction();
                 self.frames.runtime().restore_dirty(dirty);
                 return false;
             }
@@ -290,34 +357,82 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let resolved = prepared
             .resolve(|_| Ok::<_, UiLayoutError>(frame))
             .expect("already resolved session candidate cannot fail again");
-        let view_state = &mut self.view_state;
-        let projection_invalidated = &mut self.projection_invalidated;
-        self.frames.commit_with(resolved, |_| {
-            *view_state = candidate_state;
-            *projection_invalidated = false;
+        let candidate_viewport = resolved.frame().viewport;
+        self.pending_frame = Some(PendingFrame {
+            resolved,
+            view_state: candidate_state,
+            dirty,
         });
-        let committed_viewport = self.frames.active().map(|frame| frame.frame().viewport);
-        session_trace!(
-            "session_ensure_frame result=committed frame_viewport={committed_viewport:?}"
-        );
+        self.projection_invalidated = false;
+        session_trace!("session_ensure_frame result=staged frame_viewport={candidate_viewport:?}");
         true
     }
 
-    /// 当前 active frame 是否可安全渲染。
+    /// 通知会话候选帧已经成功 present，并原子发布 tree、State、Output 与 Host 视图状态。
+    ///
+    /// 返回 `true` 表示提交后的组件 Output 改变了应用状态，并已暂存下一候选帧，需要
+    /// Host 再请求一次绘制。
+    pub fn frame_presented(&mut self) -> bool {
+        let Some(pending) = self.pending_frame.take() else {
+            return false;
+        };
+        let PendingFrame {
+            resolved,
+            view_state,
+            dirty: _,
+        } = pending;
+        let committed_viewport = resolved.frame().viewport;
+        let active_view_state = &mut self.view_state;
+        self.frames.commit_with(resolved, |_| {
+            *active_view_state = view_state;
+        });
+
+        let mut output_changed = false;
+        for action in self.frames.take_component_outputs() {
+            output_changed |= self.controller.handle_action(action);
+        }
+        if output_changed {
+            self.invalidate_frame();
+            self.ensure_frame();
+        }
+        session_trace!(
+            "session_frame_presented result=committed frame_viewport={committed_viewport:?} output_changed={output_changed}"
+        );
+        output_changed
+    }
+
+    /// 通知会话候选帧未能 present；旧 active frame 保持不变，候选 State 与 Output 丢弃。
+    pub fn frame_rejected(&mut self) {
+        let Some(pending) = self.pending_frame.take() else {
+            return;
+        };
+        self.frames.abort_component_transaction();
+        self.frames.runtime().restore_dirty(pending.dirty);
+        self.projection_invalidated = true;
+        session_trace!("session_frame_rejected result=retained_active");
+    }
+
+    /// 当前候选或 active frame 是否可安全渲染。
     pub fn frame_is_current(&self) -> bool {
-        self.frames.active().is_some_and(|active| {
-            active.frame().viewport == self.viewport
+        let frame = self
+            .pending_frame
+            .as_ref()
+            .map(|pending| pending.resolved.frame())
+            .or_else(|| self.frames.active().map(|active| active.frame()));
+        frame.is_some_and(|frame| {
+            frame.viewport == self.viewport
                 && !self.projection_invalidated
                 && !self.frames.runtime().has_dirty()
         })
     }
 
-    /// 已 resolve 的当前帧。
+    /// Host 当前应呈现的候选帧；没有候选时返回已发布的 active frame。
     pub fn frame(&self) -> &UiFrame {
-        self.frames
-            .active()
+        self.pending_frame
+            .as_ref()
+            .map(|pending| pending.resolved.frame())
+            .or_else(|| self.frames.active().map(|active| active.frame()))
             .expect("session frame must be ensured")
-            .frame()
     }
 
     /// 派发一个归一化指针事件；返回消费的动作数。
@@ -325,12 +440,12 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let frame = self.frame().clone();
-        let tree = self
+        let active = self
             .frames
             .active()
-            .expect("accepted token requires an active frame")
-            .tree();
+            .expect("accepted token requires an active frame");
+        let frame = active.frame().clone();
+        let tree = active.tree();
         let actions = self.profile.dispatch_input(
             tree,
             &frame,
@@ -362,13 +477,71 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     }
 
     /// 派发一个物理键事件；返回消费的动作数。
-    ///
-    /// MVP 键盘路径：文本编辑经 `set_input_value`（壳的 WM_CHAR 累积）；core 键位表派发
-    /// 留待后续接入。Escape/Enter 由壳在 `input_focused` 时路由到
-    /// `input_cancel`/`input_enter`，其余物理键当前不消费。
     pub fn handle_key(&mut self, physical_key: u16, modifier_bits: u8, repeat: bool) -> u32 {
-        let _ = (physical_key, modifier_bits, repeat);
-        0
+        self.ensure_frame();
+        if let Some(key) = self.view_state.current_focus_key().cloned() {
+            if self
+                .frames
+                .dispatch_component_keyboard(&key, physical_key, modifier_bits, repeat)
+                .is_some()
+            {
+                self.invalidate_frame();
+                return 1;
+            }
+            if self
+                .controller
+                .handle_keyboard(&key, physical_key, modifier_bits, repeat)
+            {
+                self.invalidate_frame();
+                return 1;
+            }
+        }
+        let Some(physical) = PhysicalKey::from_code(physical_key) else {
+            return 0;
+        };
+        let modifiers = Modifiers {
+            shift: modifier_bits & 1 != 0,
+            ctrl: modifier_bits & 2 != 0,
+            alt: modifier_bits & 4 != 0,
+            meta: modifier_bits & 8 != 0,
+        };
+        let intent = match physical {
+            PhysicalKey::Tab => Some(if modifiers.shift {
+                KeyboardIntent::FocusPrevious
+            } else {
+                KeyboardIntent::FocusNext
+            }),
+            PhysicalKey::Enter | PhysicalKey::Space => Some(KeyboardIntent::Activate),
+            PhysicalKey::Escape => Some(KeyboardIntent::Cancel),
+            PhysicalKey::ArrowUp => Some(KeyboardIntent::MoveFocus(FocusDirection::Up)),
+            PhysicalKey::ArrowDown => Some(KeyboardIntent::MoveFocus(FocusDirection::Down)),
+            PhysicalKey::ArrowLeft => Some(KeyboardIntent::MoveFocus(FocusDirection::Left)),
+            PhysicalKey::ArrowRight => Some(KeyboardIntent::MoveFocus(FocusDirection::Right)),
+            _ => None,
+        };
+        let Some(intent) = intent else {
+            return 0;
+        };
+        let Some(token) = self.current_frame_token() else {
+            return 0;
+        };
+        let active = self
+            .frames
+            .active()
+            .expect("accepted token requires an active frame");
+        let frame = active.frame().clone();
+        let tree = active.tree();
+        let actions = self.profile.dispatch_input(
+            tree,
+            &frame,
+            &mut self.view_state,
+            &InputEvent::Keyboard(KeyboardIntentEvent { intent, repeat }),
+        );
+        let changed = self.handle_framed_actions(token, &actions);
+        if changed {
+            self.invalidate_frame();
+        }
+        actions.len() as u32
     }
 
     /// 替换焦点文本输入的值。
@@ -436,16 +609,20 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 当前焦点是否挂在受控文本输入通道上。
     pub fn input_focused(&self) -> bool {
-        self.view_state
-            .current_focus_key()
-            .is_some_and(|key| self.controller.is_text_input(key))
+        self.view_state.current_focus_key().is_some_and(|key| {
+            self.frames.has_component_route(key) || self.controller.is_text_input(key)
+        })
     }
 
     /// 当前受控文本输入通道的值。
     pub fn input_value(&self) -> String {
         self.view_state
             .current_focus_key()
-            .map(|key| self.controller.input_value_for(key))
+            .map(|key| {
+                self.frames
+                    .component_input_value(key)
+                    .unwrap_or_else(|| self.controller.input_value_for(key))
+            })
             .unwrap_or_default()
     }
 
@@ -498,12 +675,12 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     }
 
     fn dispatch_text_input(&mut self, token: FrameToken, event: TextInputEvent) -> bool {
-        let frame = self.frame().clone();
-        let tree = self
+        let active = self
             .frames
             .active()
-            .expect("accepted token requires an active frame")
-            .tree();
+            .expect("accepted token requires an active frame");
+        let frame = active.frame().clone();
+        let tree = active.tree();
         let actions = self.profile.dispatch_input(
             tree,
             &frame,
@@ -528,11 +705,40 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 changed |= self.controller.handle_action(action);
                 continue;
             }
+            if self.frames.dispatch_component(&framed).is_some() {
+                changed = true;
+                continue;
+            }
             match framed.into_parts().1 {
                 UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
                 UiAction::Hover { .. } => changed = true,
                 UiAction::ValueChange { bind_id, value } => {
                     changed |= self.controller.handle_value_change(&bind_id.0, value)
+                }
+                UiAction::Click { node_id } => {
+                    if let Some(key) = self
+                        .frames
+                        .active()
+                        .and_then(|active| active.tree().key_for_node_id(node_id))
+                    {
+                        changed |= self.controller.handle_semantic_click(key);
+                    }
+                }
+                UiAction::Pointer { node_id, event } => {
+                    let active = self.frames.active();
+                    if let (Some(active), Some(key)) = (
+                        active,
+                        active.and_then(|frame| frame.tree().key_for_node_id(node_id)),
+                    ) {
+                        let bounds = active
+                            .frame()
+                            .hit_regions
+                            .iter()
+                            .find(|region| region.node_id == node_id)
+                            .map(|region| region.rect)
+                            .unwrap_or_default();
+                        changed |= self.controller.handle_pointer(key, event.position, bounds);
+                    }
                 }
                 _ => {}
             }

@@ -11,7 +11,7 @@ export type BuildProfile = 'dev' | 'release';
 export type BundleChannel = 'desktop' | 'mobile';
 
 /** 六个显式产品闭包。`core` 是纯 Rust library 闭包，不是虚构的 GUI Target。 */
-export type ProductId = 'core' | 'webview' | 'android' | 'ios' | 'win32' | 'macos';
+export type ProductId = 'core' | 'webview' | 'android' | 'ios' | 'win32' | 'win32-editor' | 'speed-gear' | 'macos';
 
 export type DeliveryRoute = 'none' | 'dynamic-bundle' | 'static-link';
 
@@ -71,6 +71,11 @@ export interface WorkspacePaths {
   win32EditorDistDir(): string;
   win32EditorDistPath(): string;
   win32EditorArtifactPath(profile: BuildProfile): string;
+  speedGearDistDir(): string;
+  speedGearDistPath(): string;
+  speedGearArtifactPath(profile: BuildProfile): string;
+  speedGearHookDistPath(): string;
+  speedGearHookArtifactPath(profile: BuildProfile): string;
   macosAppDir(): string;
   macosContentsDir(): string;
   macosExecutableDir(): string;
@@ -107,6 +112,8 @@ export const ANDROID_TARGET_CRATE = 'tela-target-android';
 export const IOS_PRODUCT_CRATE = 'tela-product-ios';
 export const WIN32_TARGET_CRATE = 'tela-target-win32';
 export const WIN32_EDITOR_CRATE = 'tela-product-win32-editor';
+export const SPEED_GEAR_CRATE = 'tela-product-speed-gear';
+export const SPEED_GEAR_HOOK_CRATE = 'tela-speed-gear-hook';
 export const MACOS_TARGET_CRATE = 'tela-target-macos';
 
 /** 根据仓库根构造路径和产品闭包模型。 */
@@ -159,6 +166,22 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       renderer: 'tela-render-wgpu',
       target: WIN32_TARGET_CRATE,
       packages: [DESKTOP_GUEST_CRATE, WIN32_TARGET_CRATE],
+    },
+    'win32-editor': {
+      id: 'win32-editor',
+      root: productRoot('win32-editor'),
+      application: 'tela-win32-editor',
+      delivery: 'static-link',
+      target: 'tela-target-win32-static',
+      packages: [WIN32_EDITOR_CRATE],
+    },
+    'speed-gear': {
+      id: 'speed-gear',
+      root: productRoot('speed-gear'),
+      application: 'tela-speed-gear',
+      delivery: 'static-link',
+      target: 'tela-target-win32-static',
+      packages: [SPEED_GEAR_CRATE],
     },
     macos: {
       id: 'macos',
@@ -246,6 +269,23 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     win32EditorArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
       return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-win32-editor-host.exe`;
+    },
+    speedGearDistDir() {
+      return `${distDir}/speed-gear`;
+    },
+    speedGearDistPath() {
+      return `${distDir}/speed-gear/tela-speed-gear-host.exe`;
+    },
+    speedGearArtifactPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-speed-gear-host.exe`;
+    },
+    speedGearHookDistPath() {
+      return `${distDir}/speed-gear/tela-speed-gear-hook.dll`;
+    },
+    speedGearHookArtifactPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela_speed_gear_hook.dll`;
     },
     macosAppDir() {
       return `${distDir}/macos/Tela.app`;

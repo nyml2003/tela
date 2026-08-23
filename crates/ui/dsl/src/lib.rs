@@ -15,6 +15,8 @@ mod action;
 mod component;
 mod context;
 mod frame;
+mod lifecycle;
+mod owner;
 mod runtime;
 mod signal;
 mod view;
@@ -27,12 +29,20 @@ pub use frame::{
     ActiveFrame, FrameCoordinator, FramePrepareError, FrameToken, FramedUiAction, PreparedFrame,
     ResolvedFrame,
 };
+pub use lifecycle::{
+    ComponentOutcome, ComponentRenderContext, ComponentSetupContext, render_component,
+    render_component_with_output,
+};
+pub use owner::{
+    ComponentActionSpec, ComponentDispatch, ComponentIdentity, ComponentInput, ComponentRoute,
+    component_action_route,
+};
 pub use runtime::{ComponentRuntime, FrameInvalidator};
 pub use signal::{Signal, SignalId, SignalSubscription};
 pub use tela_ui_dsl_macros::{DslComponent, ui};
 pub use view::{
-    ActionTarget, Body, IntoViewChild, ItemKey, ViewBuild, ViewBuildError, ViewChild, ViewNode,
-    ViewOutput, ViewResult, ViewSite, into_view_child,
+    ActionTarget, Body, Children, IntoViewChild, ItemKey, ViewBuild, ViewBuildError, ViewChild,
+    ViewNode, ViewOutput, ViewResult, ViewSite, into_view_child,
 };
 
 /// 由过程宏生成代码使用的稳定内部 re-export。

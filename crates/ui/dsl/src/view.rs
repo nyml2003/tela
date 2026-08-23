@@ -1,8 +1,10 @@
 //! `ViewBuild`、词法 Context、临时锚点与 DSL 附属帧计划。
 
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -15,6 +17,10 @@ use tela_core::UiTree;
 use crate::{
     DslTrigger, ProvidedValue, Signal, TextActionMap, ViewContext,
     action::PendingAction,
+    owner::{
+        ComponentActionRoute, ComponentIdentity, ComponentOwnerFrame, ComponentRoute,
+        ComponentState,
+    },
     runtime::{ResolvedWatch, SignalWatch, WatchSource},
 };
 
@@ -99,6 +105,13 @@ pub enum ViewBuildError {
         /// 组件所在位置。
         site: ViewSite,
     },
+    /// 纯展示组件被声明了 `output={...}`，但没有实现本地事件路由。
+    UnsupportedComponentOutput {
+        /// 组件 Rust 类型名。
+        component: &'static str,
+        /// 组件所在位置。
+        site: ViewSite,
+    },
     /// 一个 `For` / `VirtualList` item 在 lowering 后没有恰好一个真实子根。
     ForItemRequiresSingleRoot {
         /// 发现的真实根数。
@@ -135,6 +148,20 @@ pub enum ViewBuildError {
         /// 重复的 trigger。
         trigger: DslTrigger,
         /// 后一个绑定所在位置。
+        site: ViewSite,
+    },
+    /// 组件本地事件路由引用了候选树中不存在的语义 key。
+    UnresolvedComponentAction {
+        /// 路由 key。
+        key: SemanticKey,
+        /// 路由声明位置。
+        site: ViewSite,
+    },
+    /// 同一语义 key 重复登记了组件本地事件路由。
+    DuplicateComponentAction {
+        /// 重复的路由 key。
+        key: SemanticKey,
+        /// 后一个路由声明位置。
         site: ViewSite,
     },
 }
@@ -177,6 +204,11 @@ impl std::fmt::Display for ViewBuildError {
                 "component requires prop '{name}' at {}:{}:{}",
                 site.file, site.line, site.column
             ),
+            Self::UnsupportedComponentOutput { component, site } => write!(
+                formatter,
+                "component `{component}` does not support output binding at {}:{}:{}",
+                site.file, site.line, site.column
+            ),
             Self::ForItemRequiresSingleRoot { actual, site } => write!(
                 formatter,
                 "For item requires one real child, found {actual} at {}:{}:{}",
@@ -205,6 +237,16 @@ impl std::fmt::Display for ViewBuildError {
             Self::DuplicateActionBinding { key, trigger, site } => write!(
                 formatter,
                 "duplicate {trigger:?} action binding for `{}` at {}:{}:{}",
+                key.0, site.file, site.line, site.column
+            ),
+            Self::UnresolvedComponentAction { key, site } => write!(
+                formatter,
+                "unresolved component action `{}` at {}:{}:{}",
+                key.0, site.file, site.line, site.column
+            ),
+            Self::DuplicateComponentAction { key, site } => write!(
+                formatter,
+                "duplicate component action `{}` at {}:{}:{}",
                 key.0, site.file, site.line, site.column
             ),
         }
@@ -513,6 +555,7 @@ pub struct ViewNode<A> {
     node: UiNode,
     watches: Vec<PendingWatch>,
     actions: Vec<PendingAction<A>>,
+    component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
 }
 
 impl<A> ViewNode<A> {
@@ -522,12 +565,14 @@ impl<A> ViewNode<A> {
             node,
             watches: Vec::new(),
             actions: Vec::new(),
+            component_actions: Vec::new(),
         }
     }
 
     fn with_plan_bundle(mut self, bundle: PlanBundle<A>) -> Self {
         self.watches = bundle.watches;
         self.actions = bundle.actions;
+        self.component_actions = bundle.component_actions;
         self
     }
 
@@ -619,7 +664,8 @@ enum ViewChildInner<A> {
 
 impl<A> ViewChild<A> {
     /// 用一个普通 node 创建 child。
-    pub(crate) fn node(node: UiNode) -> Self {
+    #[doc(hidden)]
+    pub fn node(node: UiNode) -> Self {
         Self::view_node(ViewNode::<A>::opaque(node))
     }
 
@@ -690,6 +736,30 @@ pub struct Body<A> {
     watches: Vec<WatchHandle>,
 }
 
+/// 由 `ui!` 延迟到父组件 render 阶段才展开的 children。
+#[doc(hidden)]
+pub struct Children<'a, A> {
+    build: Option<ChildrenBuilder<'a, A>>,
+}
+
+type ChildrenBuilder<'a, A> = Box<dyn FnOnce(&mut ViewBuild<A>) -> ViewResult<Body<A>> + 'a>;
+
+impl<'a, A> Children<'a, A> {
+    /// 创建惰性 children 描述。
+    pub fn new(build: impl FnOnce(&mut ViewBuild<A>) -> ViewResult<Body<A>> + 'a) -> Self {
+        Self {
+            build: Some(Box::new(build)),
+        }
+    }
+
+    /// 在当前父作用域中展开 children。
+    pub fn build(mut self, build: &mut ViewBuild<A>) -> ViewResult<Body<A>> {
+        self.build
+            .take()
+            .expect("DSL children can only be expanded once")(build)
+    }
+}
+
 impl<A> Body<A> {
     /// 由宏 lowering 创建一个 body。
     pub fn new(children: Vec<ViewChild<A>>, watches: Vec<WatchHandle>) -> Self {
@@ -715,6 +785,7 @@ impl<A> Body<A> {
 pub struct PlanBundle<A> {
     watches: Vec<PendingWatch>,
     actions: Vec<PendingAction<A>>,
+    component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
 }
 
 impl<A> PlanBundle<A> {
@@ -722,6 +793,7 @@ impl<A> PlanBundle<A> {
         Self {
             watches: Vec::new(),
             actions: Vec::new(),
+            component_actions: Vec::new(),
         }
     }
 
@@ -752,7 +824,11 @@ impl<A> PlanBundle<A> {
             })
             .collect();
 
-        Ok(ResolvedPlans { watches, actions })
+        Ok(ResolvedPlans {
+            watches,
+            actions,
+            component_actions: self.component_actions,
+        })
     }
 
     fn validate(&self, resolver: &AnchorResolver<'_>, tree: &UiTree) -> ViewResult<()> {
@@ -800,8 +876,37 @@ impl<A> PlanBundle<A> {
                 });
             }
         }
+        let mut component_keys = BTreeSet::new();
+        for route in &self.component_actions {
+            if tree.node_id_for_key(route.key()).is_none()
+                && tree.interact_for_key(route.key()).is_none()
+                && !tree_contains_bind_id(tree.root(), &route.key().0)
+            {
+                return Err(ViewBuildError::UnresolvedComponentAction {
+                    key: route.key().clone(),
+                    site: route.site(),
+                });
+            }
+            if !component_keys.insert(route.key().clone()) {
+                return Err(ViewBuildError::DuplicateComponentAction {
+                    key: route.key().clone(),
+                    site: route.site(),
+                });
+            }
+        }
         Ok(())
     }
+}
+
+fn tree_contains_bind_id(node: &UiNode, bind_id: &str) -> bool {
+    node.interact
+        .as_ref()
+        .and_then(|interact| interact.bind_id.as_ref())
+        .is_some_and(|candidate| candidate.0 == bind_id)
+        || node
+            .children
+            .iter()
+            .any(|child| tree_contains_bind_id(child, bind_id))
 }
 
 /// 一个可组合的 DSL 子视图结果。
@@ -813,6 +918,7 @@ impl<A> PlanBundle<A> {
 pub struct ViewOutput<A> {
     node: UiNode,
     plans: PlanBundle<A>,
+    pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
 }
 
 impl<A> ViewOutput<A> {
@@ -824,6 +930,7 @@ impl<A> ViewOutput<A> {
         Self {
             node,
             plans: PlanBundle::empty(),
+            owner_frame: None,
         }
     }
 
@@ -841,6 +948,12 @@ impl<A> ViewOutput<A> {
                 source: watch.source,
                 site: watch.site,
             }));
+        self
+    }
+
+    /// 附加一个由组件私有 State 消费的静态事件路由。
+    pub fn attach_component_action(mut self, route: ComponentRoute<A>) -> Self {
+        self.plans.component_actions.push(route.inner);
         self
     }
 
@@ -862,6 +975,7 @@ impl<A> From<UiNode> for ViewOutput<A> {
 pub(crate) struct ResolvedPlans<A> {
     pub(crate) watches: Vec<ResolvedWatch>,
     pub(crate) actions: Vec<crate::action::ResolvedAction<A>>,
+    pub(crate) component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
 }
 
 /// 将一个表达式显式收窄为可放入 DSL 子位置的值。
@@ -918,6 +1032,8 @@ where
 /// 一次 `ui!(build)` 调用的 Application 构建上下文。
 pub struct ViewBuild<A> {
     scope: Arc<ViewContext>,
+    component_identity_scopes: Vec<String>,
+    pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
     marker: std::marker::PhantomData<A>,
 }
 
@@ -932,6 +1048,8 @@ impl<A> ViewBuild<A> {
     pub fn new() -> Self {
         Self {
             scope: ViewContext::root(),
+            component_identity_scopes: Vec::new(),
+            owner_frame: None,
             marker: std::marker::PhantomData,
         }
     }
@@ -939,6 +1057,76 @@ impl<A> ViewBuild<A> {
     /// 返回当前词法 Context 的 owned snapshot。
     pub fn current_scope(&self) -> Arc<ViewContext> {
         Arc::clone(&self.scope)
+    }
+
+    /// 将本次构建绑定到组件运行时提供的候选 owner 帧。
+    pub(crate) fn with_owner_frame(
+        mut self,
+        owner_frame: Rc<RefCell<ComponentOwnerFrame>>,
+    ) -> Self {
+        self.owner_frame = Some(owner_frame);
+        self
+    }
+
+    pub(crate) fn local_state_for<T: Clone + 'static>(
+        &mut self,
+        identity: ComponentIdentity,
+        initial: impl FnOnce() -> T,
+    ) -> ComponentState<T> {
+        let owner_frame = self
+            .owner_frame
+            .get_or_insert_with(|| Rc::new(RefCell::new(ComponentOwnerFrame::default())));
+        owner_frame.borrow_mut().state_at(identity, initial)
+    }
+
+    /// 为当前 DSL 调用点生成包含外围集合业务 key 的组件身份。
+    #[doc(hidden)]
+    pub fn component_identity(
+        &self,
+        type_name: impl Into<String>,
+        site: ViewSite,
+        key: Option<impl Into<String>>,
+    ) -> ComponentIdentity {
+        ComponentIdentity::from_scoped_site(type_name, &self.component_identity_scopes, site, key)
+    }
+
+    /// 在一个 `<For>` item 的业务身份范围内惰性构造子树。
+    #[doc(hidden)]
+    pub fn with_item_identity<T: ItemKey + ?Sized, R>(
+        &mut self,
+        collection_scope: u32,
+        key: &T,
+        operation: impl FnOnce(&mut Self) -> ViewResult<R>,
+    ) -> ViewResult<R> {
+        self.component_identity_scopes.push(format!(
+            "collection:{collection_scope}:{}",
+            key.encode_item_key()
+        ));
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        self.component_identity_scopes
+            .pop()
+            .expect("item identity scope was pushed immediately above");
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
+
+    pub(crate) fn with_component_identity<R>(
+        &mut self,
+        identity: &ComponentIdentity,
+        operation: impl FnOnce(&mut Self) -> ViewResult<R>,
+    ) -> ViewResult<R> {
+        self.component_identity_scopes
+            .push(identity.scope_segment());
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        self.component_identity_scopes
+            .pop()
+            .expect("component identity scope was pushed immediately above");
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        }
     }
 
     /// 在一个不可变 child Context 中执行构建操作，并在 Ok、Err 与 panic unwind 后恢复父 scope。
@@ -972,11 +1160,13 @@ impl<A> ViewBuild<A> {
         let mut lowered_children = Vec::with_capacity(children.len());
         let mut merged_watches = Vec::new();
         let mut merged_actions = Vec::new();
+        let mut merged_component_actions = Vec::new();
         for (index, mut child) in children.into_iter().enumerate() {
             child.rebase(&[index]);
             lowered_children.push(child.node);
             merged_watches.extend(child.watches);
             merged_actions.extend(child.actions);
+            merged_component_actions.extend(child.component_actions);
         }
         node.children = lowered_children;
         let node = Self::attach_body_watches(
@@ -984,6 +1174,7 @@ impl<A> ViewBuild<A> {
                 node,
                 watches: merged_watches,
                 actions: merged_actions,
+                component_actions: merged_component_actions,
             },
             watches,
         );
@@ -1058,7 +1249,9 @@ impl<A> ViewBuild<A> {
             plans: PlanBundle {
                 watches: node.watches,
                 actions: node.actions,
+                component_actions: node.component_actions,
             },
+            owner_frame: self.owner_frame.clone(),
         })
     }
 

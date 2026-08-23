@@ -58,6 +58,22 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
 
     // `#[tela(tag = "...")]` 别名不支持（033 定稿：默认标签名 = struct 名）。
     let props_name = format_ident!("{}Props", name);
+    let identity_key = specs
+        .iter()
+        .find(|spec| spec.ident == "key")
+        .map(|spec| {
+            let value = if is_option_type(&spec.ty) && spec.kind != FieldKind::Option {
+                quote!(props.key.clone().flatten())
+            } else {
+                quote!(props.key.clone())
+            };
+            quote! {
+                fn identity_key(props: &Self::Props) -> Option<String> {
+                    #value
+                }
+            }
+        })
+        .unwrap_or_default();
 
     // ---- Props 镜像字段 ----
     let props_fields = specs.iter().map(|spec| {
@@ -188,11 +204,17 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
             __tela_build.with_scope(
                 vec![#(#provided_values),*],
                 __tela_site,
-                |__tela_build| __tela_inst.view(__tela_build, __tela_body),
+                |__tela_build| {
+                    let __tela_body = __tela_children.build(__tela_build)?;
+                    __tela_inst.view(__tela_build, __tela_body)
+                },
             )
         }
     } else {
-        quote!(__tela_inst.view(__tela_build, __tela_body))
+        quote!({
+            let __tela_body = __tela_children.build(__tela_build)?;
+            __tela_inst.view(__tela_build, __tela_body)
+        })
     };
     let watch_attach = if specs.iter().any(|spec| spec.kind == FieldKind::Watch) {
         quote! {
@@ -213,13 +235,20 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
     let impl_block = quote! {
         impl #dsl::DslComponent for #name {
             type Props = #props_name;
+            type State = ();
+            type Event = ();
+            type Output = ();
 
-            fn render<A>(
-                __tela_build: &mut #dsl::ViewBuild<A>,
+            #identity_key
+
+            fn render<'__tela_children, A>(
+                __tela_context: &mut #dsl::ComponentRenderContext<'_, A>,
                 props: Self::Props,
-                __tela_body: #dsl::Body<A>,
+                _state: &Self::State,
+                __tela_children: #dsl::Children<'__tela_children, A>,
             ) -> #dsl::ViewResult<#dsl::ViewOutput<A>> {
-                let __tela_site = #dsl::ViewSite::new(file!(), line!(), column!());
+                let __tela_site = __tela_context.site();
+                let __tela_build = __tela_context.build();
                 #(#inject_code)*
                 #(#watch_code)*
                 #(#provide_code)*

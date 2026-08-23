@@ -38,6 +38,21 @@ pub struct DraftInputSnapshot {
 }
 
 impl DraftInputSnapshot {
+    /// 从生命周期包装层持有的只读草稿字段构造快照。
+    pub fn from_parts(
+        value: impl Into<String>,
+        dirty: bool,
+        composing: bool,
+        conflicted: bool,
+    ) -> Self {
+        Self {
+            value: value.into(),
+            dirty,
+            composing,
+            conflicted,
+        }
+    }
+
     /// 当前要显示的局部草稿。
     pub fn value(&self) -> &str {
         &self.value

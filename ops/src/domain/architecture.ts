@@ -54,6 +54,12 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-ui-headless',
     'tela-ui-foundation',
   ],
+  'tela-desktop-ui-dsl': [
+    'tela-contract',
+    'tela-desktop-ui-kit',
+    'tela-ui-dsl',
+    'tela-ui-foundation',
+  ],
   'tela-guest-runtime': [
     'serde_json',
     'tela-app-abi',
@@ -99,6 +105,13 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-target-win32-static',
     'tela-text-resources',
     'tela-win32-editor',
+  ],
+  'tela-product-speed-gear': [
+    'tela-contract',
+    'tela-icon-resources',
+    'tela-speed-gear',
+    'tela-target-win32-static',
+    'tela-text-resources',
   ],
   'tela-product-mobile-guest': [
     'tela-app-abi',
@@ -160,6 +173,17 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-ui-dsl',
     'tela-ui-foundation',
   ],
+  'tela-speed-gear': [
+    'tela-contract',
+    'tela-core',
+    'tela-desktop-ui-kit',
+    'tela-desktop-ui-dsl',
+    'tela-speed-gear-protocol',
+    'tela-target-win32-static',
+    'tela-ui-dsl',
+    'tela-ui-foundation',
+    'windows',
+  ],
   'tela-target-win32-static': [
     'pollster',
     'raw-window-handle',
@@ -202,6 +226,8 @@ const ALLOWED_NORMAL: AllowedDeps = {
   'tela-ui-dsl': ['tela-contract', 'tela-core', 'tela-ui-dsl-macros'],
   'tela-ui-dsl-macros': ['proc-macro-crate', 'proc-macro2', 'quote', 'syn'],
   'tela-ui-foundation': ['tela-contract', 'tela-core'],
+  'tela-speed-gear-protocol': [],
+  'tela-speed-gear-hook': ['tela-speed-gear-protocol', 'windows'],
 };
 
 /** 单元/像素测试可在边界外读取下层实现，但不能扩大生产依赖闭包。 */
@@ -218,6 +244,7 @@ const ALLOWED_DEV: AllowedDeps = {
   'tela-render-raster': ['tela-core'],
   'tela-render-wgpu': ['naga', 'pollster'],
   'tela-ui-dsl': ['trybuild'],
+  'tela-speed-gear': ['tela-icon-resources', 'tela-text-resources'],
 };
 
 const TARGET_CRATES = new Set([
@@ -228,11 +255,16 @@ const TARGET_CRATES = new Set([
   'tela-target-win32',
 ]);
 
-const APPLICATION_CRATES = new Set(['tela-desktop-demo', 'tela-mobile-demo']);
+const APPLICATION_CRATES = new Set([
+  'tela-desktop-demo',
+  'tela-mobile-demo',
+  'tela-speed-gear',
+]);
 const PRODUCT_CRATES = new Set([
   'tela-product-desktop-guest',
   'tela-product-ios',
   'tela-product-mobile-guest',
+  'tela-product-speed-gear',
 ]);
 const DELIVERY_CRATES = new Set([
   'tela-app-abi',

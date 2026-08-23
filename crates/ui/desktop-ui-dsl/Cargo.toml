@@ -1,0 +1,15 @@
+[package]
+name = "tela-desktop-ui-dsl"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Tela DSL lifecycle adapters for the desktop UI kit"
+
+[dependencies]
+tela-contract = { path = "../../kernel/contract" }
+tela-desktop-ui-kit = { path = "../desktop-kit" }
+tela-ui-dsl = { path = "../dsl" }
+tela-ui-foundation = { path = "../foundation" }
+
+[lints]
+workspace = true

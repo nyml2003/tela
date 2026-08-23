@@ -327,6 +327,11 @@ mod tests {
         )
     }
 
+    fn ensure_and_present(app: &mut Application<EditorAction, EditorController>) {
+        assert!(app.ensure_frame());
+        assert!(!app.frame_presented());
+    }
+
     #[test]
     fn frame_uses_the_default_application_profile() {
         let mut app = app();
@@ -337,7 +342,7 @@ mod tests {
     #[test]
     fn close_button_is_hit_testable_before_hover_state_exists() {
         let mut app = app();
-        assert!(app.ensure_frame());
+        ensure_and_present(&mut app);
         let point = {
             let (tree, frame) = app.active().expect("editor frame");
             let index = tree
@@ -364,7 +369,7 @@ mod tests {
     #[test]
     fn close_button_click_publishes_window_command() {
         let mut app = app();
-        assert!(app.ensure_frame());
+        ensure_and_present(&mut app);
         let point = {
             let (tree, frame) = app.active().expect("editor frame");
             let index = tree
@@ -393,10 +398,12 @@ mod tests {
     }
 
     #[test]
-    fn viewport_change_is_committed_before_render_consumes_the_frame() {
+    fn viewport_candidate_only_becomes_active_after_present() {
         let mut app = app();
         assert!(app.ensure_frame());
         assert!(app.frame_is_current());
+        assert!(app.active().is_none());
+        assert!(!app.frame_presented());
         assert!(app.set_viewport(940.0, 620.0, 1.0));
         assert!(!app.frame_is_current());
         assert!(app.ensure_frame());
@@ -407,6 +414,15 @@ mod tests {
                 width: 940.0,
                 height: 620.0
             }
+        );
+        assert_ne!(
+            app.active().expect("old active frame").1.viewport,
+            app.frame().viewport
+        );
+        assert!(!app.frame_presented());
+        assert_eq!(
+            app.active().expect("presented frame").1.viewport,
+            app.frame().viewport
         );
     }
 
@@ -442,7 +458,7 @@ mod tests {
     fn icons_page_search_and_category_invalidate_the_projection() {
         let mut app = app();
         assert!(app.dispatch_action(EditorAction::Navigate(Route::Icons)));
-        assert!(app.ensure_frame());
+        ensure_and_present(&mut app);
         assert!(
             app.active()
                 .expect("icons frame")
@@ -483,6 +499,7 @@ mod tests {
         assert!(!app.frame_is_current());
         assert!(app.ensure_frame());
         assert!(app.frame_is_current());
+        assert!(!app.frame_presented());
         assert_eq!(
             app.active()
                 .expect("filtered icons frame")

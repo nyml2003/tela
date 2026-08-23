@@ -9,6 +9,7 @@ members = [
     "crates/ui/headless",
     "crates/ui/mobile-kit",
     "crates/ui/desktop-kit",
+    "crates/ui/desktop-ui-dsl",
     "crates/presentation/resources/fonts",
     "crates/presentation/resources/text",
     "crates/presentation/resources/icons",
@@ -32,10 +33,14 @@ members = [
     "apps/desktop-demo",
     "apps/mobile-demo",
     "apps/win32-editor",
+    "apps/speed-gear",
+    "apps/speed-gear-protocol",
+    "apps/speed-gear-hook",
     "products/desktop-guest",
     "products/mobile-guest",
     "products/ios",
     "products/win32-editor",
+    "products/speed-gear",
 ]
 
 [workspace.package]

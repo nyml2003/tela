@@ -25,13 +25,13 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
             DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-            HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, IsZoomed, LoadCursorW, PostMessageW,
-            PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetCursor,
-            SetWindowLongPtrW, ShowWindow, WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED,
-            WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
-            WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
-            WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP,
-            WS_THICKFRAME,
+            HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, IsZoomed, KillTimer, LoadCursorW,
+            PostMessageW, PostQuitMessage, RegisterClassW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+            SetCursor, SetTimer, SetWindowLongPtrW, ShowWindow, WINDOW_EX_STYLE, WM_CANCELMODE,
+            WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN,
+            WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+            WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_TIMER, WNDCLASSW,
+            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_THICKFRAME,
         },
     },
 };
@@ -58,6 +58,12 @@ pub trait Win32StaticSession {
     fn frame_is_current(&self) -> bool {
         false
     }
+    /// Confirms that the frame returned by [`Self::frame`] was successfully presented.
+    fn frame_presented(&mut self) -> bool {
+        false
+    }
+    /// Rejects the pending frame after a renderer or surface failure.
+    fn frame_rejected(&mut self) {}
     /// Updates the logical content area (CSS points) and the DPI scale.
     fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool;
     /// Updates whether the native window is currently maximized.
@@ -96,6 +102,12 @@ pub trait Win32StaticSession {
     fn title_bar_drag_height(&self) -> f32 {
         0.0
     }
+    /// Host timer tick for application-owned refresh and heartbeat work.
+    fn on_tick(&mut self) -> bool {
+        false
+    }
+    /// Host 即将销毁窗口时调用。
+    fn on_close(&mut self) {}
     /// Current controlled text value.
     fn input_value(&self) -> String;
     /// The latest resolved frame to render.
@@ -114,12 +126,28 @@ impl<A: Clone + 'static, C: crate::session::AppController<A>> Win32StaticSession
         self.frame_is_current()
     }
 
+    fn frame_presented(&mut self) -> bool {
+        self.frame_presented()
+    }
+
+    fn frame_rejected(&mut self) {
+        self.frame_rejected();
+    }
+
     fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool {
         self.set_viewport(width, height, dpr)
     }
 
     fn set_window_maximized(&mut self, maximized: bool) -> bool {
         self.set_window_maximized(maximized)
+    }
+
+    fn on_tick(&mut self) -> bool {
+        self.on_tick()
+    }
+
+    fn on_close(&mut self) {
+        self.on_close()
     }
 
     fn dispatch_pointer(&mut self, event: PointerEvent) -> u32 {
@@ -224,6 +252,8 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
         )
     };
     let _ = unsafe { UpdateWindow(hwnd) };
+    // Host owns the wake-up cadence. Applications decide whether a tick changes state.
+    let _ = unsafe { SetTimer(Some(hwnd), 1, 500, None) };
 
     // SAFETY: standard message loop on the thread that owns hwnd.
     let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -623,6 +653,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     if presented_this_frame {
+                        let output_staged_frame = state.session.frame_presented();
                         state.trace("present", format_args!("suboptimal={presented_suboptimal}"));
                         // 常规呈现节流；suboptimal 是异常路径必须立即打印。
                         if presented_suboptimal {
@@ -630,8 +661,23 @@ unsafe extern "system" fn wnd_proc(
                         } else {
                             state.log_throttled(|| "tela win32-static: presented".to_owned());
                         }
+                        if output_staged_frame {
+                            request_redraw(hwnd);
+                        }
+                    } else if frame_current {
+                        state.session.frame_rejected();
                     }
                     let _ = EndPaint(hwnd, &paint);
+                });
+            }
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            unsafe {
+                with_state(hwnd, |state| {
+                    if state.session.on_tick() {
+                        request_redraw(hwnd);
+                    }
                 });
             }
             LRESULT(0)
@@ -880,6 +926,7 @@ unsafe extern "system" fn wnd_proc(
         WM_CLOSE => {
             unsafe {
                 let blur_consumed = with_state(hwnd, |state| {
+                    state.session.on_close();
                     let consumed = state.session.input_blur();
                     state.trace("wm_close", format_args!("input_blur_consumed={consumed}"));
                     consumed
@@ -894,6 +941,7 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             unsafe {
                 eprintln!("tela-win32-trace: wm_destroy begin");
+                let _ = KillTimer(Some(hwnd), 1);
                 let value = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if value != 0 {
                     drop(Box::from_raw(value as *mut StaticWindowState));

@@ -22,7 +22,9 @@ mod table;
 mod text;
 mod theme;
 mod toolbar;
+mod transfer;
 mod virtual_window;
+mod windows_title_bar;
 
 pub use dialog::{Dialog, DialogAction, DialogActionKind, DialogStyle};
 pub use draft_input::DraftInput;
@@ -41,4 +43,6 @@ pub use table::{CellAlign, Table, TableStyle, Td, Tr};
 pub use text::{InlineSlot, Text};
 pub use theme::DesktopTheme;
 pub use toolbar::{Toolbar, ToolbarItem, ToolbarOverflow, ToolbarStyle};
+pub use transfer::{Transfer, TransferEvent, TransferItem, TransferOutcome, TransferState};
 pub use virtual_window::VirtualWindow;
+pub use windows_title_bar::WindowsTitleBar;

@@ -4,11 +4,20 @@
 //! `ActionFrame`。它不拥有窗口、renderer、GUI loop 或 Host 的 `ViewStateStore`；Host 在
 //! 调用候选 resolve 闭包时必须自行保证没有不可回滚的副作用。
 
+use std::{cell::RefCell, rc::Rc};
+
 use tela_contract::{UiAction, UiBuildError, UiFrame};
 use tela_core::{IdentityAllocator, UiTree};
 
 use crate::view::ResolvedPlans;
-use crate::{ActionFrame, ActionRegistry, ComponentRuntime, ViewBuild, ViewBuildError, ViewOutput};
+use crate::{
+    ActionFrame, ActionRegistry, ComponentDispatch, ComponentInput, ComponentRuntime, ViewBuild,
+    ViewBuildError, ViewOutput,
+    owner::{
+        ComponentActionRoute, ComponentOwnerFrame, ComponentOwnerRuntime, ComponentRouteOutcome,
+        OwnerFrameToken,
+    },
+};
 
 /// Host 在成功发布一个 active frame 时分配的单调来源标识。
 ///
@@ -95,6 +104,7 @@ pub struct PreparedFrame<A> {
     tree: UiTree,
     allocator: IdentityAllocator,
     plans: ResolvedPlans<A>,
+    owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
 }
 
 impl<A> PreparedFrame<A> {
@@ -126,12 +136,23 @@ pub struct ResolvedFrame<A> {
     frame: UiFrame,
 }
 
+impl<A> ResolvedFrame<A> {
+    /// 读取候选绘制帧，供 Host 在正式提交前执行 renderer preflight 与 present。
+    ///
+    /// 此入口不会暴露候选树或动作计划；只有 [`FrameCoordinator::commit`] 才会把这些
+    /// 内容连同组件 State 和 Output 一起发布为 active frame。
+    pub fn frame(&self) -> &UiFrame {
+        &self.frame
+    }
+}
+
 /// 当前已发布的、彼此一致的 Kernel tree、绘制帧和 DSL 动作快照。
 pub struct ActiveFrame<A> {
     token: FrameToken,
     tree: UiTree,
     frame: UiFrame,
     actions: ActionFrame<A>,
+    component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
 }
 
 impl<A: 'static> ActiveFrame<A> {
@@ -164,8 +185,11 @@ impl<A: 'static> ActiveFrame<A> {
 pub struct FrameCoordinator<A: Clone + 'static> {
     allocator: IdentityAllocator,
     runtime: ComponentRuntime,
+    owners: ComponentOwnerRuntime,
     registry: ActionRegistry<A>,
     active: Option<ActiveFrame<A>>,
+    pending_component_outputs: RefCell<Vec<A>>,
+    committed_component_outputs: Vec<A>,
     next_token: u64,
 }
 
@@ -175,15 +199,18 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         Self {
             allocator: IdentityAllocator::new(),
             runtime: ComponentRuntime::new(),
+            owners: ComponentOwnerRuntime::new(),
             registry: ActionRegistry::new(),
             active: None,
+            pending_component_outputs: RefCell::new(Vec::new()),
+            committed_component_outputs: Vec::new(),
             next_token: 0,
         }
     }
 
     /// 创建一个从空 Context 开始的本帧 `ViewBuild`。
     pub fn begin_build(&self) -> ViewBuild<A> {
-        ViewBuild::new()
+        ViewBuild::new().with_owner_frame(Rc::new(RefCell::new(self.owners.begin_frame())))
     }
 
     /// 构建并验证候选 tree，再将随 [`ViewOutput`] 携带的锚点计划解析为最终 `SemanticKey`。
@@ -194,15 +221,29 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         &self,
         root: impl Into<ViewOutput<A>>,
     ) -> Result<PreparedFrame<A>, FramePrepareError> {
-        let (root, plans) = root.into().into_parts();
+        let root = root.into();
+        let owner_frame = root.owner_frame.clone();
+        let (root, plans) = root.into_parts();
         let mut allocator = self.allocator.clone();
-        let tree =
-            UiTree::new_with_allocator(root, &mut allocator).map_err(FramePrepareError::Tree)?;
-        let plans = plans.resolve(&tree).map_err(FramePrepareError::Plans)?;
+        let tree = match UiTree::new_with_allocator(root, &mut allocator) {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.abort_component_transaction();
+                return Err(FramePrepareError::Tree(error));
+            }
+        };
+        let plans = match plans.resolve(&tree) {
+            Ok(plans) => plans,
+            Err(error) => {
+                self.abort_component_transaction();
+                return Err(FramePrepareError::Plans(error));
+            }
+        };
         Ok(PreparedFrame {
             tree,
             allocator,
             plans,
+            owner_frame,
         })
     }
 
@@ -229,11 +270,20 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         resolved: ResolvedFrame<A>,
         commit_host: impl FnOnce(FrameToken),
     ) -> &ActiveFrame<A> {
+        self.commit_parts(resolved, commit_host)
+    }
+
+    fn commit_parts(
+        &mut self,
+        resolved: ResolvedFrame<A>,
+        commit_host: impl FnOnce(FrameToken),
+    ) -> &ActiveFrame<A> {
         let ResolvedFrame { prepared, frame } = resolved;
         let PreparedFrame {
             tree,
             allocator,
             plans,
+            owner_frame: prepared_owner,
         } = prepared;
         let token = FrameToken(
             self.next_token
@@ -242,9 +292,19 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         );
         self.runtime.reconcile(plans.watches);
         let actions = self.registry.install(&tree, plans.actions);
+        let component_actions = plans.component_actions;
         // No fallible work remains after this callback. The Host candidate and all DSL snapshots
         // therefore become externally visible as one GUI-loop transaction.
         commit_host(token);
+        if let Some(owner_frame) = prepared_owner.map(|frame| frame.borrow().clone()) {
+            self.owners.commit(
+                owner_frame,
+                OwnerFrameToken::from_frame_token(token.get())
+                    .expect("successful FrameToken is non-zero"),
+            );
+        }
+        self.committed_component_outputs
+            .append(self.pending_component_outputs.get_mut());
         self.next_token = token.get();
         self.allocator = allocator;
         self.active = Some(ActiveFrame {
@@ -252,6 +312,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             tree,
             frame,
             actions,
+            component_actions,
         });
         self.active
             .as_ref()
@@ -269,6 +330,20 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
     /// `FrameInvalidator` 也通过这个引用完成。
     pub fn runtime(&self) -> &ComponentRuntime {
         &self.runtime
+    }
+
+    /// 丢弃本次输入产生、但尚未随成功帧提交的组件 State 与 Output。
+    ///
+    /// Host 在 layout、renderer preflight、surface 或 present 失败而保留旧 active frame 时
+    /// 必须调用此方法。
+    pub fn abort_component_transaction(&self) {
+        self.owners.discard_pending();
+        self.pending_component_outputs.borrow_mut().clear();
+    }
+
+    /// 取得成功提交后才可见的组件 Output。
+    pub fn take_component_outputs(&mut self) -> Vec<A> {
+        std::mem::take(&mut self.committed_component_outputs)
     }
 
     /// 判断一个 Target 输入是否来自当前 active frame。
@@ -289,6 +364,100 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         let active = self.active.as_ref()?;
         (active.token == action.token).then_some(())?;
         self.registry.dispatch(&active.actions, &action.action)
+    }
+
+    /// 将输入路由到 active frame 的组件本地 handler。
+    pub fn dispatch_component(&self, action: &FramedUiAction) -> Option<ComponentDispatch> {
+        let active = self.active.as_ref()?;
+        (active.token == action.token).then_some(())?;
+        let key = match &action.action {
+            UiAction::Click { node_id }
+            | UiAction::Pointer { node_id, .. }
+            | UiAction::TextInput { node_id, .. }
+            | UiAction::Hover { node_id, .. } => active.tree.key_for_node_id(*node_id)?.clone(),
+            UiAction::ValueChange { bind_id, .. } => tela_contract::SemanticKey(bind_id.0.clone()),
+            _ => return None,
+        };
+        let owner_token = OwnerFrameToken::from_frame_token(active.token.get())?;
+        let bounds = match &action.action {
+            UiAction::Pointer { node_id, .. } => active
+                .frame
+                .hit_regions
+                .iter()
+                .find(|region| region.node_id == *node_id)
+                .map(|region| region.rect),
+            _ => None,
+        };
+        let dispatch = active
+            .component_actions
+            .iter()
+            .find(|route| route.key() == &key)
+            .and_then(|route| {
+                route.dispatch(
+                    &self.owners,
+                    owner_token,
+                    ComponentInput::Ui {
+                        action: &action.action,
+                        bounds,
+                    },
+                )
+            })?;
+        Some(self.stage_component_dispatch(dispatch))
+    }
+
+    /// 将当前焦点组件的原始键盘输入交给组件 handler。
+    pub fn dispatch_component_keyboard(
+        &self,
+        key: &tela_contract::SemanticKey,
+        physical_key: u16,
+        modifier_bits: u8,
+        repeat: bool,
+    ) -> Option<ComponentDispatch> {
+        let active = self.active.as_ref()?;
+        let owner_token = OwnerFrameToken::from_frame_token(active.token.get())?;
+        let dispatch = active
+            .component_actions
+            .iter()
+            .find(|route| route.key() == key)
+            .and_then(|route| {
+                route.dispatch(
+                    &self.owners,
+                    owner_token,
+                    ComponentInput::Keyboard {
+                        physical_key,
+                        modifier_bits,
+                        repeat,
+                    },
+                )
+            })?;
+        Some(self.stage_component_dispatch(dispatch))
+    }
+
+    /// 判断语义 key 是否由组件本地事件路由拥有。
+    pub fn has_component_route(&self, key: &tela_contract::SemanticKey) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active
+                .component_actions
+                .iter()
+                .any(|route| route.key() == key)
+        })
+    }
+
+    /// 读取组件拥有的受控文本输入值。
+    pub fn component_input_value(&self, key: &tela_contract::SemanticKey) -> Option<String> {
+        let active = self.active.as_ref()?;
+        active
+            .component_actions
+            .iter()
+            .find(|route| route.key() == key)
+            .and_then(|route| route.input_value(&self.owners))
+    }
+
+    fn stage_component_dispatch(&self, dispatch: ComponentRouteOutcome<A>) -> ComponentDispatch {
+        if let ComponentRouteOutcome::Output(output) = dispatch {
+            self.pending_component_outputs.borrow_mut().push(output);
+        }
+        ComponentDispatch::Consumed
     }
 }
 

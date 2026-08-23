@@ -2392,6 +2392,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-desktop-ui-dsl"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-desktop-ui-kit",
+ "tela-ui-dsl",
+ "tela-ui-foundation",
+]
+
+[[package]]
 name = "tela-desktop-ui-kit"
 version = "0.1.0"
 dependencies = [
@@ -2489,6 +2499,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-product-speed-gear"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-speed-gear",
+ "tela-target-win32-static",
+ "tela-text-resources",
+]
+
+[[package]]
 name = "tela-product-win32-editor"
 version = "0.1.0"
 dependencies = [
@@ -2538,6 +2559,35 @@ version = "0.1.0"
 dependencies = [
  "tela-contract",
 ]
+
+[[package]]
+name = "tela-speed-gear"
+version = "0.1.0"
+dependencies = [
+ "tela-contract",
+ "tela-core",
+ "tela-desktop-ui-dsl",
+ "tela-desktop-ui-kit",
+ "tela-icon-resources",
+ "tela-speed-gear-protocol",
+ "tela-target-win32-static",
+ "tela-text-resources",
+ "tela-ui-dsl",
+ "tela-ui-foundation",
+ "windows",
+]
+
+[[package]]
+name = "tela-speed-gear-hook"
+version = "0.1.0"
+dependencies = [
+ "tela-speed-gear-protocol",
+ "windows",
+]
+
+[[package]]
+name = "tela-speed-gear-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "tela-target-android"

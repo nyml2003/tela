@@ -1,0 +1,11 @@
+[package]
+name = "tela-speed-gear-protocol"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Shared controller/target protocol for the Tela speed gear"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"

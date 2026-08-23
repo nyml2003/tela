@@ -1,14 +1,14 @@
-error[E0425]: cannot find type `Text` in this scope
-  --> tests/ui/text_action_attributes_reject_closures.rs:10:18
-   |
-10 |                 <Text>{"edit"}</Text>
-   |                  ^^^^ not found in this scope
-
 error[E0425]: cannot find type `Frame` in this scope
  --> tests/ui/text_action_attributes_reject_closures.rs:9:14
   |
 9 |             <Frame>
   |              ^^^^^ not found in this scope
+
+error[E0425]: cannot find type `Text` in this scope
+  --> tests/ui/text_action_attributes_reject_closures.rs:10:18
+   |
+10 |                 <Text>{"edit"}</Text>
+   |                  ^^^^ not found in this scope
 
 error[E0277]: the trait bound `&str: IntoViewChild<_>` is not satisfied
   --> tests/ui/text_action_attributes_reject_closures.rs:10:24
@@ -46,25 +46,6 @@ note: required by a bound in `tela_ui_dsl::into_view_child`
    |     V: IntoViewChild<A>,
    |        ^^^^^^^^^^^^^^^^ required by this bound in `into_view_child`
 
-error[E0277]: the `?` operator can only be used in a function that returns `Result` or `Option` (or another type that implements `FromResidual`)
-  --> tests/ui/text_action_attributes_reject_closures.rs:13:6
-   |
- 3 | fn main() {
-   | --------- this function should return `Result` or `Option` to accept `?`
-...
-13 |     });
-   |      ^ cannot use the `?` operator in a function that returns `()`
-   |
-   = note: this error originates in the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)
-help: consider adding return type
-   |
- 3 ~ fn main() -> Result<(), Box<dyn std::error::Error>> {
- 4 |     let mut build = ViewBuild::<()>::new();
-...
-13 |     });
-14 +     Ok(())
-   |
-
 error[E0308]: mismatched types
   --> tests/ui/text_action_attributes_reject_closures.rs:5:13
    |
@@ -83,9 +64,28 @@ error[E0308]: mismatched types
    |
    = note: expected mutable reference `&mut ViewBuild<_>`
                          found struct `ViewBuild<()>`
-note: associated function defined here
-  --> src/component.rs
+note: function defined here
+  --> src/lifecycle.rs
    |
-   |     fn render<A>(
-   |        ^^^^^^
+   | pub fn render_component<'a, C, A>(
+   |        ^^^^^^^^^^^^^^^^
    = note: this error originates in the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the `?` operator can only be used in a function that returns `Result` or `Option` (or another type that implements `FromResidual`)
+  --> tests/ui/text_action_attributes_reject_closures.rs:13:6
+   |
+ 3 | fn main() {
+   | --------- this function should return `Result` or `Option` to accept `?`
+...
+13 |     });
+   |      ^ cannot use the `?` operator in a function that returns `()`
+   |
+   = note: this error originates in the macro `ui` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider adding return type
+   |
+ 3 ~ fn main() -> Result<(), Box<dyn std::error::Error>> {
+ 4 |     let mut build = ViewBuild::<()>::new();
+...
+13 |     });
+14 +     Ok(())
+   |

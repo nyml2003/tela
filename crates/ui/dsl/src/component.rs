@@ -9,23 +9,74 @@ use tela_contract::{
     VisualConcern,
 };
 
-use crate::{Body, ViewBuild, ViewBuildError, ViewChild, ViewOutput, ViewResult, ViewSite};
+use crate::{
+    Body, Children, ComponentIdentity, ComponentOutcome, ComponentRenderContext,
+    ComponentSetupContext, ViewBuild, ViewBuildError, ViewChild, ViewOutput, ViewResult, ViewSite,
+};
 
-/// 组件契约：`type Props` 的字段名即标签属性名（snake_case），`render` 负责构建子树。
+/// 声明式组件的统一 setup/render/handler 生命周期契约。
 ///
-/// `render` 是泛型方法（动作类型 `A` 由 `ViewBuild<A>` 推断），因此组件实现不绑定
-/// 具体动作类型；`type Props` 也因此不依赖 `A`，调用点可以按名称构造 Props。
-/// `children` 以 [`Body`] 传入，容器组件直接交给 `build.container`，watch 计划不会丢失。
+/// Props 字段构成标签属性；State 由 DSL 候选帧保存；render 只能读取 State；handler 是
+/// 修改私有 State 和产生类型化 Output 的唯一入口。children 保持惰性，父组件可以先建立
+/// provide 作用域，再决定是否展开子树。
 pub trait DslComponent {
     /// 组件 Props。约定字段一律为 `Option<T>`（未提供走 `Default` 的 `None`）。
     type Props: Default;
+    /// 组件私有跨帧状态。
+    type State: Clone + Default + 'static;
+    /// 组件内部事件。
+    type Event;
+    /// 允许离开组件边界的语义输出。
+    type Output;
 
-    /// 用已解析的 props 与子节点构建本组件。
-    fn render<A>(
-        build: &mut ViewBuild<A>,
+    /// 从 Props 提取显式实例 key。默认组件没有显式 key。
+    fn identity_key(_props: &Self::Props) -> Option<String> {
+        None
+    }
+
+    /// 首次建立该组件身份时初始化 State。
+    fn setup(_context: &ComponentSetupContext, _props: &Self::Props) -> Self::State {
+        Self::State::default()
+    }
+
+    /// 用只读 State、Props 和惰性 children 构建候选子树。
+    fn render<'a, A>(
+        context: &mut ComponentRenderContext<'_, A>,
         props: Self::Props,
-        children: Body<A>,
+        state: &Self::State,
+        children: Children<'a, A>,
     ) -> ViewResult<ViewOutput<A>>;
+
+    /// 在候选状态上处理本地事件。
+    fn handle(
+        _state: &mut Self::State,
+        _props: &Self::Props,
+        _event: Self::Event,
+    ) -> ComponentOutcome<Self::Output> {
+        ComponentOutcome::Consumed
+    }
+
+    /// 把组件声明的本地事件路由附着到候选视图，并静态映射类型化 Output。
+    ///
+    /// 具有交互 Output 的组件覆盖此方法；纯展示组件若被错误地声明 `output={...}`，会
+    /// 得到结构化构建错误。映射只能是函数项，不能捕获组件 State 或 Host 对象。
+    fn bind_output<A: 'static>(
+        view: ViewOutput<A>,
+        _identity: ComponentIdentity,
+        _props: &Self::Props,
+        _output: fn(Self::Output) -> Option<A>,
+        site: ViewSite,
+    ) -> ViewResult<ViewOutput<A>>
+    where
+        Self: Sized + 'static,
+        Self::Props: Clone + 'static,
+    {
+        let _ = view;
+        Err(ViewBuildError::UnsupportedComponentOutput {
+            component: std::any::type_name::<Self>(),
+            site,
+        })
+    }
 }
 
 /// 把公共 Props 字段应用到原语节点（布局/视觉/交互三段式）。
@@ -146,13 +197,23 @@ macro_rules! primitive_component {
 
         impl DslComponent for $name {
             type Props = $name;
+            type State = ();
+            type Event = ();
+            type Output = ();
 
-            fn render<A>(
-                build: &mut ViewBuild<A>,
+            fn identity_key(props: &Self::Props) -> Option<String> {
+                props.key.clone()
+            }
+
+            fn render<'a, A>(
+                context: &mut ComponentRenderContext<'_, A>,
                 props: Self::Props,
-                children: Body<A>,
+                _state: &Self::State,
+                children: Children<'a, A>,
             ) -> ViewResult<ViewOutput<A>> {
-                let site = ViewSite::new(file!(), line!(), column!());
+                let site = context.site();
+                let build = context.build();
+                let children = children.build(build)?;
                 if $check_single_child && children.child_count() != 1 {
                     return Err(ViewBuildError::ExpectedSingleRoot {
                         actual: children.child_count(),
@@ -210,13 +271,23 @@ macro_rules! text_component {
 
         impl DslComponent for $name {
             type Props = $name;
+            type State = ();
+            type Event = ();
+            type Output = ();
 
-            fn render<A>(
-                build: &mut ViewBuild<A>,
+            fn identity_key(props: &Self::Props) -> Option<String> {
+                props.key.clone()
+            }
+
+            fn render<'a, A>(
+                context: &mut ComponentRenderContext<'_, A>,
                 props: Self::Props,
-                _children: Body<A>,
+                _state: &Self::State,
+                children: Children<'a, A>,
             ) -> ViewResult<ViewOutput<A>> {
-                let site = ViewSite::new(file!(), line!(), column!());
+                let site = context.site();
+                let build = context.build();
+                let _children = children.build(build)?;
                 let mut node =
                     UiNode::new(NodeKind::Text).with_content(ContentConcern::Text(TextContent {
                         text: props.value.unwrap_or_default(),
@@ -270,13 +341,23 @@ pub struct Image {
 
 impl DslComponent for Image {
     type Props = Image;
+    type State = ();
+    type Event = ();
+    type Output = ();
 
-    fn render<A>(
-        build: &mut ViewBuild<A>,
+    fn identity_key(props: &Self::Props) -> Option<String> {
+        props.key.clone()
+    }
+
+    fn render<'a, A>(
+        context: &mut ComponentRenderContext<'_, A>,
         props: Self::Props,
-        _children: Body<A>,
+        _state: &Self::State,
+        children: Children<'a, A>,
     ) -> ViewResult<ViewOutput<A>> {
-        let site = ViewSite::new(file!(), line!(), column!());
+        let site = context.site();
+        let build = context.build();
+        let _children = children.build(build)?;
         let mut node = UiNode::new(NodeKind::Image).with_content(ContentConcern::Image(
             tela_contract::ImageContent {
                 texture: tela_contract::TextureRef(props.texture.unwrap_or_default()),

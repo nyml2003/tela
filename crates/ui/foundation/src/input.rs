@@ -1,7 +1,8 @@
 //! `Input` / `InputNumber` 组件（AntD 简化）：文本/数字输入框，受控值 + 占位符。
 
 use tela_contract::{
-    BindId, Color, InteractConcern, LayoutConcern, TextInputKind, TextInputSpec, UiNode,
+    BindId, Color, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, SemanticKey,
+    TextInputKind, TextInputSpec, UiNode, UpdateMode,
 };
 use tela_core::LayoutContainer;
 
@@ -94,6 +95,14 @@ impl Input {
             ..LayoutConcern::default()
         })
         .into();
+        if let Some(bind_id) = &self.bind_id {
+            node.identity = Some(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(SemanticKey(bind_id.0.clone())),
+                update_mode: UpdateMode::Dirty,
+                ..IdentityConcern::default()
+            });
+        }
         if !self.disabled {
             node.interact = Some(InteractConcern {
                 clickable: true,

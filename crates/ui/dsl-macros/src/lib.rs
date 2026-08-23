@@ -1,7 +1,8 @@
 //! Procedural macros for Tela's application-composition DSL.
 //!
 //! 033 定稿：DSL 只有一个概念——组件。宏只做属性搬运工（零校验、零白名单）：
-//! 收集标签属性 → `Props` 字面量 → `render` 调用。控制流语法（Fragment/For/
+//! 收集标签属性 → `Props` 字面量 → `render` 调用；保留的 `output={function_path}`
+//! 属性把类型化组件 Output 静态映射为应用动作。控制流语法（Fragment/For/
 //! VirtualList）保留宏级；`@provide/@inject/@watch` 指令已删除（迁移为
 //! `#[derive(DslComponent)]` 字段属性）。
 
@@ -346,7 +347,7 @@ fn generate_element(
     }
 }
 
-/// 组件解析：收集标签属性 → `Props` 字面量 → `render` 调用（零校验、零白名单）。
+/// 组件解析：收集标签属性 → `Props` 字面量 → `render` 调用。
 ///
 /// Props 从 `Default::default()` 起步、逐个覆盖提供的字段（字段均 `pub`）。
 /// 类型位置使用 qualified path（稳定），避免关联类型字面量的实验特性与
@@ -367,24 +368,72 @@ fn generate_component(
     let mut child_scopes = CollectionScopes::default();
     let body = generate_body(&element.children, build, dsl, &mut child_scopes)?;
     let _ = scopes;
-    let assignments = element.attributes.iter().map(|attribute| {
-        let name = &attribute.name;
-        let value = &attribute.value;
-        // 属性值统一 `Some((expr).into())`：Props 字段约定为 Option<T>，
-        // 字符串字面量（&str）经 Into<String> 转换。
-        quote!(__tela_dsl_props.#name = Some((#value).into());)
-    });
+    let mut output_attributes = element
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "output");
+    let output = output_attributes.next();
+    if let Some(duplicate) = output_attributes.next() {
+        return Err(Error::new(
+            duplicate.name.span(),
+            "duplicate attribute output",
+        ));
+    }
+    if let Some(attribute) = output
+        && !matches!(attribute.value, Expr::Path(_))
+    {
+        return Err(Error::new_spanned(
+            &attribute.value,
+            "component output requires a function path",
+        ));
+    }
+    let assignments = element
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name != "output")
+        .map(|attribute| {
+            let name = &attribute.name;
+            let value = &attribute.value;
+            // 属性值统一 `Some((expr).into())`：Props 字段约定为 Option<T>，
+            // 字符串字面量（&str）经 Into<String> 转换。
+            quote!(__tela_dsl_props.#name = Some((#value).into());)
+        });
+    let render = if let Some(attribute) = output {
+        let output = &attribute.value;
+        quote! {
+            {
+                let __tela_dsl_output: fn(<#tag as #dsl::DslComponent>::Output) -> _ = #output;
+                #dsl::render_component_with_output::<#tag, _>(
+                    build,
+                    __tela_dsl_props,
+                    #dsl::Children::new(|#build| {
+                        let _ = &mut *#build;
+                        #body
+                    }),
+                    __tela_dsl_output,
+                    #dsl::ViewSite::new(file!(), line!(), column!())
+                )
+            }
+        }
+    } else {
+        quote! {
+            #dsl::render_component::<#tag, _>(
+                build,
+                __tela_dsl_props,
+                #dsl::Children::new(|#build| {
+                    let _ = &mut *#build;
+                    #body
+                }),
+                #dsl::ViewSite::new(file!(), line!(), column!())
+            )
+        }
+    };
     Ok(quote! {{
-        let __tela_dsl_body = #body?;
         let mut __tela_dsl_props: <#tag as #dsl::DslComponent>::Props =
             Default::default();
         #(#assignments)*
         #dsl::into_view_child(
-            <#tag as #dsl::DslComponent>::render(
-                build,
-                __tela_dsl_props,
-                __tela_dsl_body,
-            )?
+            #render?
         )
     }})
 }
@@ -532,18 +581,23 @@ fn generate_for(
     let mut item_scopes = CollectionScopes::default();
     let item_body = generate_body(&element.children, build, dsl, &mut item_scopes)?;
     let item_site = site(dsl);
+    let collection_scope = scopes.allocate(element.name.span())?;
     let loop_body = quote! {
-        let __tela_dsl_item_body = #item_body?;
+        let __tela_dsl_item_key = &(#key);
+        let __tela_dsl_item_body = #build.with_item_identity(
+            #collection_scope,
+            __tela_dsl_item_key,
+            |#build| #item_body,
+        )?;
         let __tela_dsl_item = #build.for_item(
             __tela_dsl_item_body,
-            &(#key),
+            __tela_dsl_item_key,
             #item_site,
         )?;
         __tela_dsl_items.push(__tela_dsl_item);
     };
 
     if !virtual_list {
-        let collection_scope = scopes.allocate(element.name.span())?;
         return Ok(quote! {{
             let mut __tela_dsl_items = Vec::new();
             for #binding in #source {
@@ -560,7 +614,6 @@ fn generate_for(
     let overscan = required_attribute(&element.attributes, "overscan", element.name.span())?;
     let first_item_index =
         required_attribute(&element.attributes, "first_item_index", element.name.span())?;
-    let collection_scope = scopes.allocate(element.name.span())?;
     Ok(quote! {{
         let mut __tela_dsl_items = Vec::new();
         for #binding in #source {
@@ -683,5 +736,15 @@ mod tests {
         assert!(code.contains("label"));
         assert!(code.contains("width"));
         assert!(code.contains("into"));
+    }
+
+    #[test]
+    fn component_output_lowers_to_the_static_lifecycle_binding() {
+        let input = parse("build { <Transfer items={items} output={map_transfer} /> }");
+        let tokens = expand(input).expect("component output lowering must succeed");
+        let code = tokens.to_string();
+        assert!(code.contains("render_component_with_output"));
+        assert!(code.contains("map_transfer"));
+        assert!(!code.contains("props . output"));
     }
 }
