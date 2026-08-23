@@ -7,8 +7,10 @@ description = "Win32 static-link shell for statically assembled Tela application
 
 [dependencies]
 tela-bridge = { path = "../../delivery/bridge", features = ["host"] }
-tela-desktop-runtime = { path = "../../delivery/desktop-runtime" }
 tela-contract = { path = "../../kernel/contract" }
+tela-core = { path = "../../kernel/core" }
+tela-desktop-runtime = { path = "../../delivery/desktop-runtime" }
+tela-ui-dsl = { path = "../../ui/dsl" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 pollster = "0.4"

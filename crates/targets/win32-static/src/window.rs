@@ -47,6 +47,9 @@ macro_rules! win32_trace {
 }
 
 /// A statically assembled Tela application driven by this shell's message loop.
+///
+/// Implemented once by the cross-application session runtime [`crate::session::Application`]
+/// (blanket impl below); products never hand-write this protocol.
 pub trait Win32StaticSession {
     /// Ensures the current frame exists (rebuilds after invalidation); the shell calls this
     /// before every paint.
@@ -85,14 +88,95 @@ pub trait Win32StaticSession {
     fn hit_test_interactive(&mut self, _point: Point) -> bool {
         false
     }
-    /// 自绘标题栏待执行的窗口命令（App 经动作产生，shell 消费执行）。
+    /// 自绘标题栏待执行的窗口命令（会话经动作产生，shell 消费执行）。
     fn take_window_command(&mut self) -> Option<WindowCommand> {
         None
+    }
+    /// 自绘标题栏可拖动高度（逻辑像素，WM_NCHITTEST 用；`0.0` = 关闭原生拖动）。
+    fn title_bar_drag_height(&self) -> f32 {
+        0.0
     }
     /// Current controlled text value.
     fn input_value(&self) -> String;
     /// The latest resolved frame to render.
     fn frame(&self) -> &UiFrame;
+}
+
+/// 会话运行时一次实现壳协议：任意 `AppController` 应用都可直接驱动。
+impl<A: Clone + 'static, C: crate::session::AppController<A>> Win32StaticSession
+    for crate::session::Application<A, C>
+{
+    fn ensure_frame(&mut self) -> bool {
+        self.ensure_frame()
+    }
+
+    fn frame_is_current(&self) -> bool {
+        self.frame_is_current()
+    }
+
+    fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool {
+        self.set_viewport(width, height, dpr)
+    }
+
+    fn set_window_maximized(&mut self, maximized: bool) -> bool {
+        self.set_window_maximized(maximized)
+    }
+
+    fn dispatch_pointer(&mut self, event: PointerEvent) -> u32 {
+        self.handle_pointer(event)
+    }
+
+    fn dispatch_key(&mut self, physical_key: u16, modifier_bits: u8, repeat: bool) -> u32 {
+        self.handle_key(physical_key, modifier_bits, repeat)
+    }
+
+    fn set_input_value(&mut self, value: String) -> u32 {
+        self.set_input_value(value)
+    }
+
+    fn input_focus(&mut self) -> u32 {
+        self.input_focus()
+    }
+
+    fn input_blur(&mut self) -> u32 {
+        self.input_blur()
+    }
+
+    fn input_enter(&mut self) -> u32 {
+        self.input_enter()
+    }
+
+    fn input_cancel(&mut self) -> u32 {
+        self.input_cancel()
+    }
+
+    fn input_focused(&self) -> bool {
+        self.input_focused()
+    }
+
+    fn hover_interactive(&self) -> bool {
+        self.hover_interactive()
+    }
+
+    fn hit_test_interactive(&mut self, point: Point) -> bool {
+        self.hit_test_interactive_at(point)
+    }
+
+    fn take_window_command(&mut self) -> Option<WindowCommand> {
+        self.take_window_command()
+    }
+
+    fn title_bar_drag_height(&self) -> f32 {
+        self.title_bar_drag_height()
+    }
+
+    fn input_value(&self) -> String {
+        self.input_value()
+    }
+
+    fn frame(&self) -> &UiFrame {
+        self.frame()
+    }
 }
 
 struct StaticWindowState {
@@ -161,9 +245,6 @@ pub fn run_static_window(app: Box<dyn Win32StaticSession>) -> Result<(), String>
     eprintln!("tela win32-static: message loop exited after {message_count} messages");
     Ok(())
 }
-
-/// 自绘标题栏拖动带高度（逻辑像素，与应用的 TITLE_BAR_H 主题常量对齐）。
-const TITLE_BAR_DRAG_H: f32 = 40.0;
 
 /// 消费并执行自绘标题栏的窗口命令（最小化/最大化/关闭）。
 fn execute_window_command(hwnd: HWND) {
@@ -352,7 +433,7 @@ unsafe extern "system" fn wnd_proc(
                 let mut point = POINT { x, y };
                 // SAFETY: ScreenToClient 是同步查询，hwnd 属于本线程。
                 let _ = unsafe { ScreenToClient(hwnd, &mut point) };
-                let (interactive, logical_point) = unsafe {
+                let (interactive, logical_point, drag_height) = unsafe {
                     with_state(hwnd, |state| {
                         let scale = state.dpi_scale;
                         let logical_point = Point {
@@ -362,14 +443,16 @@ unsafe extern "system" fn wnd_proc(
                         (
                             state.session.hit_test_interactive(logical_point),
                             logical_point,
+                            state.session.title_bar_drag_height(),
                         )
                     })
                 };
-                let final_hit = if logical_point.y < TITLE_BAR_DRAG_H && !interactive {
-                    HTCAPTION as isize
-                } else {
-                    HTCLIENT as isize
-                };
+                let final_hit =
+                    if drag_height > 0.0 && logical_point.y < drag_height && !interactive {
+                        HTCAPTION as isize
+                    } else {
+                        HTCLIENT as isize
+                    };
                 unsafe {
                     with_state(hwnd, |state| {
                         state.trace(

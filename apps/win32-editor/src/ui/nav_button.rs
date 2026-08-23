@@ -16,7 +16,7 @@ pub fn nav_item(
     current: Route,
     hover_key: &Option<String>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
-    let key = format!("win32.nav.{}", route_name(target));
+    let key = format!("editor.nav.{}", route_name(target));
     let hovered = hover_key.as_deref() == Some(key.as_str());
     let selected = target == current;
     ui!(build {

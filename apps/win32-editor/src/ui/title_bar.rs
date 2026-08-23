@@ -43,7 +43,7 @@ impl TitleBar {
     ) -> ViewResult<ViewOutput<A>> {
         ui!(build {
             <Row
-                key={"win32.titlebar"}
+                key={"editor.titlebar"}
                 width={self.width}
                 height={TITLE_BAR_H}
                 padding={Insets { top: 0.0, right: 0.0, bottom: 0.0, left: 8.0 }}
@@ -67,7 +67,7 @@ pub fn window_item(
     window_maximized: bool,
     hover_key: &Option<String>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
-    let key = format!("win32.window.{key_suffix}");
+    let key = format!("editor.window.{key_suffix}");
     let hovered = hover_key.as_deref() == Some(key.as_str());
     let icon = window_icon(command, window_maximized);
     ui!(build {

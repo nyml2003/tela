@@ -32,10 +32,7 @@ use tela_bridge::BridgeDispatcher;
 use tela_contract::{Color, UiFrame};
 use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
 use tela_render_wgpu::WgpuRenderer;
-
-#[path = "providers.rs"]
-mod providers;
-use providers::{WindowMetrics, build_dispatcher};
+use tela_target_win32_static::{WindowMetrics, build_dispatcher};
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},

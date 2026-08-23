@@ -32,7 +32,7 @@ pub fn render_root(
     let hover = hover_key.map(|key| key.0.clone());
     ui!(build {
         <Frame
-            key={"win32.root"}
+            key={"editor.root"}
             width={viewport.width}
             height={viewport.height}
             fill={Fill::Solid(CONTENT_BACKGROUND)}

@@ -2,8 +2,8 @@
 
 use tela_contract::{
     BorderRadius, Color, Fill, IconName, IconProvider, Insets, InteractConcern, KeyStrategy,
-    LayoutConcern, SemanticKey, Size, TextContent, TextInputKind, TextInputSpec, TextStyleRef,
-    UiNode, UpdateMode, Viewport, VisualConcern,
+    LayoutConcern, OverlaySpec, SemanticKey, Size, StackAlign, TextContent, TextInputKind,
+    TextInputSpec, TextStyleRef, UiNode, UpdateMode, Viewport, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 use tela_ui_dsl::prelude::*;
@@ -44,7 +44,7 @@ pub fn render_icons_page(
     let hover = hover_key.cloned();
     let mut cards = Vec::with_capacity(entries.len());
     for name in entries.iter().copied() {
-        let key = format!("win32.icons.card.{}", name.key());
+        let key = format!("editor.icons.card.{}", name.key());
         let hovered = hover.as_deref() == Some(key.as_str());
         let icon = tela_ui_foundation::Icon::new(name)
             .size(ICON_SIZE)
@@ -76,7 +76,7 @@ pub fn render_icons_page(
     let result_count = format!("{} / {}", entries.len(), IconName::ALL.len());
     ui!(build {
         <Column
-            key={"win32.icons"}
+            key={"editor.icons"}
             width={viewport.width}
             height={viewport.height - TITLE_BAR_H}
             padding={Insets { top: 18.0, right: CONTENT_INSET, bottom: 0.0, left: CONTENT_INSET }}
@@ -87,7 +87,7 @@ pub fn render_icons_page(
                 <Text value={result_count} font_size={13.0} color={SECONDARY} />
                 { into_view_child::<EditorAction, UiNode>(LayoutContainer::spacer().into())? }
                 <Frame
-                    key={"win32.icons.search"}
+                    key={"editor.icons.search"}
                     width={220.0}
                     height={30.0}
                     padding={Insets { top: 4.0, right: 8.0, bottom: 4.0, left: 8.0 }}
@@ -102,11 +102,11 @@ pub fn render_icons_page(
                     <Text value={query.clone()} font_size={13.0} color={TEXT} />
                 </Frame>
             </Row>
-            <Row key={"win32.icons.categories"} gap={6.0}>
+            <Row key={"editor.icons.categories"} gap={6.0}>
                 { build.fragment(Body::new(categories, Vec::new()), site)? }
             </Row>
             <ScrollView
-                key={"win32.icons.scroll"}
+                key={"editor.icons.scroll"}
                 width={viewport.width - CONTENT_INSET * 2.0}
                 height={viewport.height - TITLE_BAR_H - 112.0}
                 padding={Insets { top: 2.0, right: 2.0, bottom: 18.0, left: 2.0 }}
@@ -126,7 +126,35 @@ fn icon_card(key: String, label: &str, icon: UiNode, hovered: bool) -> UiNode {
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         });
-    LayoutContainer::frame(column)
+    let content_width = CARD_WIDTH - 8.0 * 2.0;
+    let content_height = CARD_HEIGHT - 10.0 - 8.0;
+    let content_surface: UiNode = Primitive::rect()
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(content_width)),
+            height: Some(Size::fixed(content_height)),
+            ..LayoutConcern::default()
+        })
+        .into();
+    let content_overlay: UiNode = LayoutContainer::overlay(
+        column,
+        OverlaySpec {
+            align: StackAlign::Center,
+            ..OverlaySpec::default()
+        },
+    )
+    .into();
+    let centered_content = LayoutContainer::stack([
+        // Stack needs a regular content child to establish its content area. This
+        // geometry-only rect has no visual payload; the real content is the centered overlay.
+        content_surface,
+        content_overlay,
+    ])
+    .layout(LayoutConcern {
+        width: Some(Size::fixed(content_width)),
+        height: Some(Size::fixed(content_height)),
+        ..LayoutConcern::default()
+    });
+    LayoutContainer::frame(centered_content)
         .layout(LayoutConcern {
             width: Some(Size::fixed(CARD_WIDTH)),
             height: Some(Size::fixed(CARD_HEIGHT)),
@@ -189,7 +217,7 @@ fn category_buttons(
     ];
     let mut children = Vec::with_capacity(categories.len());
     for (category, label, suffix) in categories {
-        let key = format!("win32.icons.category.{suffix}");
+        let key = format!("editor.icons.category.{suffix}");
         let hovered = hover_key.map(String::as_str) == Some(key.as_str());
         let button = ui!(build {
             <ActionTarget action={EditorAction::SetIconCategory(category)}>

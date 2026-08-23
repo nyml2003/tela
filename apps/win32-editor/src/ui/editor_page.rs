@@ -30,7 +30,7 @@ impl EditorPage {
         let content_height = self.viewport.height - TITLE_BAR_H - CONTENT_INSET * 2.0;
         ui!(build {
             <ScrollView
-                key={"win32.editor.scroll"}
+                key={"editor.page.scroll"}
                 width={self.viewport.width}
                 height={self.viewport.height - TITLE_BAR_H}
                 padding={Insets { top: CONTENT_INSET, right: CONTENT_INSET, bottom: CONTENT_INSET, left: CONTENT_INSET }}
@@ -38,7 +38,7 @@ impl EditorPage {
                 clip={true}
             >
                 <Frame
-                    key={"win32.editor.field"}
+                    key={"editor.page.field"}
                     width={content_width}
                     height={content_height}
                     input={tela_contract::TextInputSpec::new(tela_contract::TextInputKind::Multiline)}

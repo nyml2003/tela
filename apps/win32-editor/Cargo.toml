@@ -14,12 +14,12 @@ tela-bridge = { path = "../../crates/delivery/bridge", features = ["host"] }
 tela-contract = { path = "../../crates/kernel/contract" }
 tela-core = { path = "../../crates/kernel/core" }
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-target-win32-static = { path = "../../crates/targets/win32-static" }
 tela-ui-dsl = { path = "../../crates/ui/dsl" }
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
 
 [dev-dependencies]
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
-tela-render-raster = { path = "../../crates/presentation/renderers/raster" }
 tela-text-resources = { path = "../../crates/presentation/resources/text" }
 
 [lints.rust]

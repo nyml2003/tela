@@ -25,7 +25,7 @@ impl SettingsPage {
     ) -> ViewResult<ViewOutput<A>> {
         ui!(build {
             <Column
-                key={"win32.settings"}
+                key={"editor.settings"}
                 width={self.viewport.width}
                 height={self.viewport.height - TITLE_BAR_H}
                 padding={Insets { top: 24.0, right: CONTENT_INSET, bottom: 0.0, left: CONTENT_INSET }}
@@ -33,7 +33,7 @@ impl SettingsPage {
             >
                 <Text value={"设置"} font_size={20.0} color={TEXT} />
                 <Text value={"字体大小"} font_size={14.0} color={SECONDARY} />
-                <View key={"win32.divider.font"} width={self.viewport.width - CONTENT_INSET * 2.0}
+                <View key={"editor.divider.font"} width={self.viewport.width - CONTENT_INSET * 2.0}
                       height={1.0} fill={Fill::Solid(BAR_BORDER)} />
                 { build.fragment(children, tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))? }
             </Column>
@@ -49,7 +49,7 @@ pub fn step_item(
     action: EditorAction,
     hover_key: &Option<String>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
-    let key = format!("win32.step.{key_suffix}");
+    let key = format!("editor.step.{key_suffix}");
     let hovered = hover_key.as_deref() == Some(key.as_str());
     ui!(build {
         <ActionTarget action={action}>

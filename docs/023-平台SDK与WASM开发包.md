@@ -50,6 +50,29 @@ Win32 壳加载 C ABI DLL 在生产安装器、插件 ABI 或第三方语言嵌�
 
 `tela-render-wgpu` 仍只消费 `UiFrame`。浏览器、游戏与原生壳不各自复制布局或绘制命令生成逻辑。`web/src/webview-sdk/` 是 Rust crate 的 JavaScript 半边，不是第二个 renderer；它让未来 Android/iOS WebView 能复用通用 DOM 壳，而不提前发明 native bridge。
 
+### 3.1 Win32 静态编辑器链路（无 bundle/WASM）
+
+除 WASM bundle 壳外，Win32 还有一条**静态链接**产品链路（`tela-win32-editor`，无 Wasmtime、无
+`.tela`），其壳协议不面向应用，而由跨应用会话运行时一次性实现：
+
+| crate | 角色 |
+| --- | --- |
+| `tela-target-win32-static` | 壳核心：消息循环/HWND/WGPU（`window.rs`）、跨应用会话运行时（`session.rs`）、两壳共用的 bridge providers（`providers.rs`，动态 host 复用） |
+| `tela-target-win32-static::Application` | 通用会话：帧生命周期、输入派发、文本通道、窗口命令队列；`Win32StaticSession` 由它对任意 `AppController` blanket 实现，产品不再手写适配器 |
+| `tela-win32-editor` | 域控制器（`EditorController`）：信号状态 + `render_root` + 动作处理 + 文本输入通道归属；不感知窗口/消息循环 |
+| `tela-product-win32-editor` | 装配：资源 + 桥 dispatcher + `ApplicationConfig`，然后 `run_static_window` |
+
+约束：
+
+- 应用只实现 `AppController<A>`（render / handle_action / handle_value_change / 文本通道 /
+  窗口命令 / 标题栏拖动高度），全部带默认实现；壳协议细节（u32 动作计数、WM_SETCURSOR 查询等）
+  不进入应用。
+- `Application` 不含任何具体应用常量：初始视口、焦点高亮外观经 `ApplicationConfig` 注入；
+  `session.rs` 不触碰 Windows API，可在 Linux 编译供应用测试，未来多端静态壳可直接平移。
+- 标题栏原生拖动高度由应用经 `title_bar_drag_height()` 声明，壳不再硬编码 40px 魔法常量。
+- providers 以 `tela-target-win32-static::providers` 为单一来源，动态 host（`tela-target-win32`）
+  与静态壳共用，不维护两份拷贝。
+
 ## 4. 开发包与启动协议
 
 `ops build bundle` 与 `ops build bundle mobile` 都将各自 Guest 的 `app-wasm` 编译为 **release WASM**，

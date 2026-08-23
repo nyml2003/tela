@@ -1,5 +1,6 @@
-//! Win32 bridge providers for the static shell: time, viewport, battery, and network
-//! (getCoordinates deferred). Copied from tela-target-win32; converges after the shells merge.
+//! Win32 bridge providers for both shells: time, viewport, battery, and network
+//! (getCoordinates deferred). Single source of truth shared by the dynamic host
+//! (`tela-target-win32`) and the static shell.
 
 #![allow(unsafe_code)]
 

@@ -23,7 +23,7 @@ impl AboutPage {
     ) -> ViewResult<ViewOutput<A>> {
         ui!(build {
             <Column
-                key={"win32.about"}
+                key={"editor.about"}
                 width={self.viewport.width}
                 height={self.viewport.height - TITLE_BAR_H}
                 padding={Insets { top: 24.0, right: CONTENT_INSET, bottom: 0.0, left: CONTENT_INSET }}
@@ -55,7 +55,7 @@ impl AboutRows {
         let mut children = Vec::new();
         for (label, value) in &self.rows {
             let row = ui!(build {
-                <Row key={format!("win32.about.row.{label}")} gap={8.0}>
+                <Row key={format!("editor.about.row.{label}")} gap={8.0}>
                     <Text value={format!("{label}:")} font_size={14.0} color={SECONDARY} />
                     <Text value={value.clone()} font_size={14.0} color={TEXT} />
                 </Row>
@@ -63,7 +63,7 @@ impl AboutRows {
             children.push(tela_ui_dsl::into_view_child(row)?);
         }
         ui!(build {
-            <Column key={"win32.about.rows"} gap={8.0}>
+            <Column key={"editor.about.rows"} gap={8.0}>
                 { build.fragment(Body::new(children, Vec::new()), site)? }
             </Column>
         })
