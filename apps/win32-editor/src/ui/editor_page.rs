@@ -4,7 +4,7 @@ use tela_contract::{Fill, Insets, Viewport};
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{Body, DslComponent, ViewBuild, ViewOutput, ViewResult, ui};
 
-use crate::application::{EDITOR_INPUT_KEY, EditorSettings};
+use crate::application::EditorSettings;
 
 use super::theme::{CONTENT_BACKGROUND, CONTENT_INSET, TEXT, TITLE_BAR_H};
 
@@ -41,10 +41,10 @@ impl EditorPage {
                     key={"editor.page.field"}
                     width={content_width}
                     height={content_height}
-                    input={tela_contract::TextInputSpec::new(tela_contract::TextInputKind::Multiline)}
-                    bind_id={EDITOR_INPUT_KEY}
+                    input={tela_contract::TextInputSpec::new(tela_contract::TextInputKind::Multiline).value(self.document.clone())}
                     fill={Fill::Solid(CONTENT_BACKGROUND)}
                     clickable={true}
+                    focusable={true}
                 >
                     <Text
                         value={self.document.clone()}

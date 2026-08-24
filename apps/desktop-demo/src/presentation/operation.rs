@@ -1,31 +1,32 @@
 //! 文件操作 modal：受控输入、确认与取消。
 
 use tela_contract::{
-    BorderRadius, Color, Fill, InteractConcern, KeymapScopeId, LayoutConcern, OverlaySpec,
-    SemanticKey, ShortcutScopeSpec, Size, StackAlign, UiNode, VisualConcern,
+    Color, Fill, KeymapScopeId, LayoutConcern, Size, StackAlign, UiNode, VisualConcern,
 };
-use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
-use tela_desktop_ui_kit::{DraftInput, DraftInputSnapshot};
+use tela_core::builder::{LayoutContainer, Primitive};
+use tela_ui_dsl::prelude::*;
+use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, into_view_child, ui};
 
 use crate::domain::{FileManagerSession, OperationKind};
 
 use super::shared::{
-    BORDER, BORDER_WIDTH, CONTROL_RADIUS, SECONDARY, SHELL_RADIUS, SURFACE, TEXT, command_button,
-    fixed, text,
+    BORDER, BORDER_WIDTH, SECONDARY, SHELL_RADIUS, SURFACE, TEXT, command_button, text,
 };
 
 pub const OPERATION_MODAL_KEY: &str = "operation-modal";
 
-pub fn operation_modal(
+/// 用声明式组件输入构建最终候选 modal；输入的 owner plans 保持在返回值中。
+pub fn operation_modal_view<A>(
+    build: &mut ViewBuild<A>,
     session: &FileManagerSession,
-    input: Option<DraftInputSnapshot>,
-    input_focused: bool,
+    input: Option<ViewOutput<A>>,
     width: f32,
     height: f32,
-) -> UiNode {
-    let Some(operation) = &session.operation else {
-        return LayoutContainer::row(Vec::<UiNode>::new()).into();
-    };
+) -> ViewResult<ViewOutput<A>> {
+    let operation = session
+        .operation
+        .as_ref()
+        .expect("operation modal view requires an active operation");
     let title = match operation.kind {
         OperationKind::NewFolder => "新建文件夹",
         OperationKind::Rename => "重命名",
@@ -42,22 +43,9 @@ pub fn operation_modal(
         OperationKind::Trash => "将选中项目移至回收站？",
         _ => "确认后才会写入内存工作区。",
     };
-    let mut controls = vec![text(title, 16.0, TEXT), text(message, 13.0, SECONDARY)];
-    if needs_input {
-        controls.push(fixed(
-            DraftInput::new(
-                input.expect("有文本操作时必须同步 DraftInput 快照"),
-                "operation.value",
-            )
-            .placeholder("输入名称")
-            .focused(input_focused)
-            .border_radius(CONTROL_RADIUS)
-            .into_node(),
-            300.0,
-            32.0,
-        ));
-    }
-    controls.push(
+    let title = into_view_child::<A, UiNode>(text(title, 16.0, TEXT))?;
+    let message = into_view_child::<A, UiNode>(text(message, 13.0, SECONDARY))?;
+    let actions = into_view_child::<A, UiNode>(
         LayoutContainer::row([
             LayoutContainer::spacer().into(),
             command_button("取消", 64.0, "operation.cancel", false, false),
@@ -70,72 +58,61 @@ pub fn operation_modal(
             ..LayoutConcern::default()
         })
         .into(),
-    );
-    let controls: UiNode = LogicalContainer::shortcut_scope(ShortcutScopeSpec {
-        id: KeymapScopeId("file-manager.operation".to_owned()),
+    )?;
+    let controls = if let Some(input) = input {
+        ui!(build {
+            <ShortcutScope id={KeymapScopeId("file-manager.operation".to_owned())}>
+                { title }
+                { message }
+                { input }
+                { actions }
+            </ShortcutScope>
+        })?
+    } else {
+        ui!(build {
+            <ShortcutScope id={KeymapScopeId("file-manager.operation".to_owned())}>
+                { title }
+                { message }
+                { actions }
+            </ShortcutScope>
+        })?
+    };
+    let panel = ui!(build {
+        <Column
+            key={OPERATION_MODAL_KEY}
+            width={360.0}
+            height={if needs_input { 220.0 } else { 180.0 }}
+            padding={tela_contract::Insets::all(22.0)}
+            border_width={BORDER_WIDTH}
+            gap={16.0}
+            fill={Fill::Solid(SURFACE)}
+            border_color={BORDER}
+            border_radius={SHELL_RADIUS}
+        >
+            { controls }
+        </Column>
+    })?;
+    let backdrop_surface = into_view_child::<A, UiNode>(
+        LayoutContainer::frame(Primitive::rect())
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(width)),
+                height: Some(Size::fixed(height)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::rgba(0.02, 0.04, 0.08, 0.42))),
+                ..VisualConcern::default()
+            })
+            .into(),
+    )?;
+    ui!(build {
+        <Overlay fill_width={true} fill_height={true} modal={true}>
+            <Stack width={width} height={height}>
+                { backdrop_surface }
+                <Overlay align={StackAlign::Center}>
+                    { panel }
+                </Overlay>
+            </Stack>
+        </Overlay>
     })
-    .children(controls)
-    .into();
-    let mut panel: UiNode = LayoutContainer::column([controls])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(360.0)),
-            height: Some(Size::fixed(if needs_input { 220.0 } else { 180.0 })),
-            padding: tela_contract::Insets::all(22.0),
-            border_width: BORDER_WIDTH,
-            gap: 16.0,
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(SURFACE)),
-            border_color: Some(BORDER),
-            border_radius: BorderRadius::all(SHELL_RADIUS),
-            ..VisualConcern::default()
-        })
-        .into();
-    panel.identity = Some(tela_contract::IdentityConcern {
-        semantic_key: Some(SemanticKey(OPERATION_MODAL_KEY.to_owned())),
-        ..tela_contract::IdentityConcern::default()
-    });
-    let backdrop_surface: UiNode = LayoutContainer::frame(Primitive::rect())
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            height: Some(Size::fixed(height)),
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(Color::rgba(0.02, 0.04, 0.08, 0.42))),
-            ..VisualConcern::default()
-        })
-        .into();
-    let backdrop: UiNode = LayoutContainer::stack([
-        backdrop_surface,
-        LayoutContainer::overlay(
-            panel,
-            OverlaySpec {
-                align: StackAlign::Center,
-                ..OverlaySpec::default()
-            },
-        )
-        .into(),
-    ])
-    .layout(LayoutConcern {
-        width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(height)),
-        ..LayoutConcern::default()
-    })
-    .into();
-    let mut backdrop: UiNode = LayoutContainer::overlay(
-        backdrop,
-        OverlaySpec {
-            fill_width: true,
-            fill_height: true,
-            ..OverlaySpec::default()
-        },
-    )
-    .into();
-    backdrop.interact = Some(InteractConcern {
-        modal: true,
-        ..InteractConcern::default()
-    });
-    backdrop
 }

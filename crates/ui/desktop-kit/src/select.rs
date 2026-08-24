@@ -78,7 +78,7 @@ impl Select {
 
     /// 设置由 Application 路由的稳定动作键前缀。
     ///
-    /// 触发器和每个选项使用独立的语义键，调用方可将它们注册为不同的 headless part。
+    /// 触发器和每个选项使用独立的语义键，Composition 可分别绑定 typed 事件。
     pub fn action_key(mut self, action_key: impl Into<String>) -> Self {
         self.action_key = Some(SemanticKey(action_key.into()));
         self

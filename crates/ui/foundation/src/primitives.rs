@@ -1,6 +1,6 @@
 //! 无状态视觉原语：`Box`、`Text` 与 `Image`。
 //!
-//! 它们只把调用方给出的视觉值投影为 `UiNode`，不保存 Headless 状态、不读业务 Store，
+//! 它们只把调用方给出的视觉值投影为 `UiNode`，不保存组件状态、不读业务 Store，
 //! 也不对 Target 或 Renderer 作任何假设。
 
 use tela_contract::{

@@ -2370,13 +2370,13 @@ dependencies = [
  "serde_json",
  "tela-contract",
  "tela-core",
+ "tela-desktop-ui-dsl",
  "tela-desktop-ui-kit",
  "tela-icon-resources",
  "tela-render-raster",
  "tela-text-resources",
  "tela-ui-dsl",
  "tela-ui-foundation",
- "tela-ui-headless",
 ]
 
 [[package]]
@@ -2408,7 +2408,6 @@ dependencies = [
  "tela-contract",
  "tela-core",
  "tela-ui-foundation",
- "tela-ui-headless",
 ]
 
 [[package]]
@@ -2451,7 +2450,6 @@ dependencies = [
  "tela-text-resources",
  "tela-ui-dsl",
  "tela-ui-foundation",
- "tela-ui-headless",
 ]
 
 [[package]]
@@ -2461,7 +2459,6 @@ dependencies = [
  "tela-contract",
  "tela-core",
  "tela-ui-foundation",
- "tela-ui-headless",
 ]
 
 [[package]]
@@ -2714,14 +2711,6 @@ dependencies = [
 
 [[package]]
 name = "tela-ui-foundation"
-version = "0.1.0"
-dependencies = [
- "tela-contract",
- "tela-core",
-]
-
-[[package]]
-name = "tela-ui-headless"
 version = "0.1.0"
 dependencies = [
  "tela-contract",

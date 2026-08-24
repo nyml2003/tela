@@ -1,17 +1,69 @@
-//! 带本地草稿语义的文本输入分子组件。
+//! 草稿文本输入的视觉投影组件。
 
-use tela_contract::{BindId, UiNode};
+use tela_contract::{SemanticKey, UiNode};
 use tela_ui_foundation::Input;
 
-use crate::local_state::DraftInputSnapshot;
+/// `DraftInput` 向视觉层公开的只读状态。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftInputSnapshot {
+    value: String,
+    dirty: bool,
+    composing: bool,
+    conflicted: bool,
+}
+
+impl DraftInputSnapshot {
+    /// 从 DSL 组件 owner 持有的草稿字段构造快照。
+    pub fn from_parts(
+        value: impl Into<String>,
+        dirty: bool,
+        composing: bool,
+        conflicted: bool,
+    ) -> Self {
+        Self {
+            value: value.into(),
+            dirty,
+            composing,
+            conflicted,
+        }
+    }
+
+    /// 当前要显示的局部草稿。
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// 草稿是否相对当前基准有未确认变更。
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// 当前是否处于 IME 组合输入。
+    pub fn is_composing(&self) -> bool {
+        self.composing
+    }
+
+    /// 外部值是否在本地草稿变脏后发生冲突。
+    pub fn is_conflicted(&self) -> bool {
+        self.conflicted
+    }
+}
+
+/// 草稿在确认边界产生的一次受控字段提交。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftInputCommit {
+    /// 被提交的组件语义身份。
+    pub semantic_key: SemanticKey,
+    /// 已确认的完整文本值。
+    pub value: String,
+}
 
 /// 主题中立的草稿文本输入。
 ///
-/// 草稿状态由 [`crate::LocalStateRuntime`] 持有。这个组件只将运行时快照投影为原子
-/// [`Input`] 节点，因此不会要求页面管理 tela key。
+/// 草稿状态由 DSL 组件 owner 持有；这个组件只将只读快照投影为原子 [`Input`] 节点。
 pub struct DraftInput {
     snapshot: DraftInputSnapshot,
-    bind_id: BindId,
+    semantic_key: String,
     placeholder: String,
     disabled: bool,
     focused: bool,
@@ -19,11 +71,11 @@ pub struct DraftInput {
 }
 
 impl DraftInput {
-    /// 由当前运行时快照创建输入组件。
-    pub fn new(snapshot: DraftInputSnapshot, bind_id: impl Into<String>) -> Self {
+    /// 由当前 DSL owner 快照创建输入组件。
+    pub fn new(snapshot: DraftInputSnapshot, semantic_key: impl Into<String>) -> Self {
         Self {
             snapshot,
-            bind_id: BindId(bind_id.into()),
+            semantic_key: semantic_key.into(),
             placeholder: String::new(),
             disabled: false,
             focused: false,
@@ -63,7 +115,7 @@ impl DraftInput {
     /// 构建本帧节点树。
     pub fn into_node(self) -> UiNode {
         Input::new()
-            .bind_id(self.bind_id.0)
+            .semantic_key(self.semantic_key)
             .value(self.snapshot.value())
             .placeholder(self.placeholder)
             .disabled(self.disabled)

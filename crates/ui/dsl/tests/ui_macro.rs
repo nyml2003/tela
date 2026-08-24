@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 
 use tela_contract::{
-    NodeKind, SemanticKey, TextInputEvent, TextInputKind, TextInputSpec, TextSelection, UiAction,
-    UiBuildError, UiFrame, Viewport,
+    KernelInteraction, NodeKind, SemanticKey, TextInputEvent, TextInputKind, TextInputSpec,
+    TextSelection, UiBuildError, UiFrame, Viewport,
 };
 use tela_core::UiTree;
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{
-    Body, DslComponent, FrameCoordinator, FramePrepareError, FramedUiAction, ItemKey, Signal,
+    Body, DslComponent, FrameCoordinator, FramePrepareError, FramedInteraction, ItemKey, Signal,
     ViewBuild, ViewBuildError, ViewOutput, ViewResult, ui, with_context,
 };
 
@@ -771,9 +771,9 @@ fn action_target_routes_clicks_without_storing_a_callback_in_the_tree() {
         .expect("root id");
 
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             coordinator.active().expect("active frame").token(),
-            UiAction::Click { node_id },
+            KernelInteraction::Activate { node_id },
         )),
         Some(Action::Save)
     );
@@ -809,7 +809,10 @@ fn top_level_watch_and_action_target_anchor_to_the_unchanged_real_root() {
         BTreeSet::from([SemanticKey("/0/".to_owned())])
     );
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(token, UiAction::Click { node_id })),
+        coordinator.dispatch_interaction(&FramedInteraction::new(
+            token,
+            KernelInteraction::Activate { node_id }
+        )),
         Some(Action::Save)
     );
 }
@@ -901,9 +904,9 @@ fn text_action_target_routes_declared_payloads_and_pure_context() {
         .expect("text input root id");
 
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             token,
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Edit {
                     value: "draft".to_owned(),
@@ -918,9 +921,9 @@ fn text_action_target_routes_declared_payloads_and_pure_context() {
         })
     );
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             token,
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Commit {
                     value: "confirmed".to_owned(),
@@ -931,9 +934,9 @@ fn text_action_target_routes_declared_payloads_and_pure_context() {
         Some(Action::Search("confirmed".to_owned()))
     );
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             token,
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Cancel {
                     selection: TextSelection::collapsed(0),
@@ -958,9 +961,9 @@ fn prebuilt_child_view_keeps_its_action_plan_when_inserted_later() {
         .expect("prebuilt target root id");
 
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             coordinator.active().expect("active frame").token(),
-            UiAction::Click { node_id },
+            KernelInteraction::Activate { node_id },
         )),
         Some(Action::Save)
     );
@@ -1177,9 +1180,9 @@ fn for_action_targets_rebind_to_the_same_business_item_after_reorder() {
         .node_id_for_key(&SemanticKey("/@for-0/7".to_owned()))
         .expect("first item root");
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             first_token,
-            UiAction::Click {
+            KernelInteraction::Activate {
                 node_id: first_node
             },
         )),
@@ -1200,9 +1203,9 @@ fn for_action_targets_rebind_to_the_same_business_item_after_reorder() {
         .node_id_for_key(&SemanticKey("/@for-0/7".to_owned()))
         .expect("reordered item root");
     assert_eq!(
-        coordinator.dispatch(&FramedUiAction::new(
+        coordinator.dispatch_interaction(&FramedInteraction::new(
             token,
-            UiAction::Click { node_id: node }
+            KernelInteraction::Activate { node_id: node }
         )),
         Some(Action::Open(7))
     );

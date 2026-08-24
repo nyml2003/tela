@@ -1,7 +1,7 @@
 //! Ant Design 风格的桌面分段选择。
 //!
 //! `Segmented` 只投影受控选中态与每个选项的稳定动作目标。应用负责保存当前值、
-//! 处理 [`tela_contract::UiAction::Click`]，不会把页面状态塞进组件内部。
+//! 处理 [`tela_contract::KernelInteraction::Activate`]，不会把页面状态塞进组件内部。
 
 use tela_contract::{
     BorderRadius, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern,

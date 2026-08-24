@@ -1,7 +1,7 @@
 //! `Input` / `InputNumber` 组件（AntD 简化）：文本/数字输入框，受控值 + 占位符。
 
 use tela_contract::{
-    BindId, Color, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, SemanticKey,
+    Color, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, SemanticKey,
     TextInputKind, TextInputSpec, UiNode, UpdateMode,
 };
 use tela_core::LayoutContainer;
@@ -12,7 +12,8 @@ use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
 pub struct Input {
     value: String,
     placeholder: String,
-    bind_id: Option<BindId>,
+    semantic_key: Option<SemanticKey>,
+    width: f32,
     disabled: bool,
     focused: bool,
     border_radius: f32,
@@ -30,7 +31,8 @@ impl Input {
         Self {
             value: String::new(),
             placeholder: String::new(),
-            bind_id: None,
+            semantic_key: None,
+            width: 180.0,
             disabled: false,
             focused: false,
             border_radius: 4.0,
@@ -49,9 +51,15 @@ impl Input {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置组件实例的跨帧语义身份，不产生旧式业务字段变更。
+    pub fn semantic_key(mut self, key: impl Into<String>) -> Self {
+        self.semantic_key = Some(SemanticKey(key.into()));
+        self
+    }
+
+    /// 设置输入框宽度。
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width.max(1.0);
         self
     }
 
@@ -82,23 +90,23 @@ impl Input {
         };
         let mut node: UiNode = field_box(
             vec![shown],
-            180.0,
+            self.width,
             28.0,
             self.disabled,
             self.focused,
             self.border_radius,
         )
         .layout(LayoutConcern {
-            width: Some(tela_contract::Size::fixed(180.0)),
+            width: Some(tela_contract::Size::fixed(self.width)),
             height: Some(tela_contract::Size::fixed(28.0)),
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
         .into();
-        if let Some(bind_id) = &self.bind_id {
+        if let Some(key) = self.semantic_key.clone() {
             node.identity = Some(IdentityConcern {
                 key_strategy: KeyStrategy::SemanticId,
-                semantic_key: Some(SemanticKey(bind_id.0.clone())),
+                semantic_key: Some(key),
                 update_mode: UpdateMode::Dirty,
                 ..IdentityConcern::default()
             });
@@ -108,8 +116,7 @@ impl Input {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                input: Some(TextInputSpec::new(TextInputKind::Text)),
-                bind_id: self.bind_id,
+                input: Some(TextInputSpec::new(TextInputKind::Text).value(self.value)),
                 ..InteractConcern::default()
             });
         }
@@ -130,7 +137,7 @@ pub struct InputNumber {
     max: f64,
     step: f64,
     disabled: bool,
-    bind_id: Option<BindId>,
+    semantic_key: Option<SemanticKey>,
     border_radius: f32,
 }
 
@@ -149,7 +156,7 @@ impl InputNumber {
             max: f64::INFINITY,
             step: 1.0,
             disabled: false,
-            bind_id: None,
+            semantic_key: None,
             border_radius: 4.0,
         }
     }
@@ -179,9 +186,9 @@ impl InputNumber {
         self
     }
 
-    /// 设置业务数据绑定；它不参与节点 identity。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
+    /// 设置组件实例的跨帧语义身份。
+    pub fn semantic_key(mut self, key: impl Into<String>) -> Self {
+        self.semantic_key = Some(SemanticKey(key.into()));
         self
     }
 
@@ -225,13 +232,20 @@ impl InputNumber {
             ..LayoutConcern::default()
         })
         .into();
+        if let Some(key) = self.semantic_key {
+            node.identity = Some(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(key),
+                update_mode: UpdateMode::Dirty,
+                ..IdentityConcern::default()
+            });
+        }
         if !self.disabled {
             node.interact = Some(InteractConcern {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                input: Some(TextInputSpec::new(TextInputKind::Number)),
-                bind_id: self.bind_id,
+                input: Some(TextInputSpec::new(TextInputKind::Number).value(value_text)),
                 ..InteractConcern::default()
             });
         }
@@ -268,6 +282,13 @@ mod tests {
             shown.content,
             Some(ContentConcern::Text(ref t)) if t.text == "张三"
         ));
+        let input = node
+            .interact
+            .as_ref()
+            .and_then(|interact| interact.input.as_ref())
+            .expect("enabled Input declares its controlled text snapshot");
+        assert_eq!(input.value, "张三");
+        assert_eq!(input.selection.anchor, "张三".len() as u32);
     }
 
     #[test]
@@ -278,6 +299,13 @@ mod tests {
             shown.content,
             Some(ContentConcern::Text(ref t)) if t.text == "42"
         ));
+        assert_eq!(
+            node.interact
+                .as_ref()
+                .and_then(|interact| interact.input.as_ref())
+                .map(|input| input.value.as_str()),
+            Some("42")
+        );
     }
 
     #[test]

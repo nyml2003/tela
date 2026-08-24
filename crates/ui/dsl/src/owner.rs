@@ -11,7 +11,7 @@ use std::{
     rc::Rc,
 };
 
-use tela_contract::{Rect, SemanticKey, UiAction};
+use tela_contract::{KernelInteraction, Rect, SemanticKey};
 
 use crate::{ComponentOutcome, DslComponent, ViewSite};
 
@@ -42,8 +42,6 @@ pub(crate) trait ComponentActionRoute<A> {
         token: OwnerFrameToken,
         input: ComponentInput<'_>,
     ) -> Option<ComponentRouteOutcome<A>>;
-    /// 读取组件拥有的受控文本值；非文本路由返回 None。
-    fn input_value(&self, owners: &ComponentOwnerRuntime) -> Option<String>;
 }
 
 /// 由包装器创建、只能附着到候选视图的静态组件路由。
@@ -54,21 +52,12 @@ pub struct ComponentRoute<A> {
 /// 组件 handler 可接收的规范化宿主输入。
 #[derive(Clone, Copy)]
 pub enum ComponentInput<'a> {
-    /// Kernel UiAction，以及连续指针事件对应的可选命中边界。
+    /// Kernel 交互事实，以及连续指针事件对应的可选命中边界。
     Ui {
         /// 当前动作。
-        action: &'a UiAction,
+        action: &'a KernelInteraction,
         /// 目标命中边界。
         bounds: Option<Rect>,
-    },
-    /// 当前焦点组件收到的原始键盘输入。
-    Keyboard {
-        /// 平台无关物理键码。
-        physical_key: u16,
-        /// 修饰键位图。
-        modifier_bits: u8,
-        /// 是否为重复输入。
-        repeat: bool,
     },
 }
 
@@ -94,7 +83,6 @@ where
     event_context: E,
     event: for<'a> fn(E, ComponentInput<'a>) -> Option<C::Event>,
     output: fn(C::Output) -> Option<A>,
-    input_value: fn(E, &C::State, &C::Props) -> Option<String>,
 }
 
 impl<C, A: 'static, E> ComponentActionRoute<A> for TypedComponentActionRoute<C, A, E>
@@ -122,18 +110,15 @@ where
             .dispatch::<C::State, _>(token, &self.identity, |state| {
                 C::handle(state, &self.props, event)
             })
-            .map(|outcome| match outcome {
-                ComponentOutcome::Consumed => ComponentRouteOutcome::Consumed,
-                ComponentOutcome::Output(output) => (self.output)(output)
-                    .map(ComponentRouteOutcome::Output)
-                    .unwrap_or(ComponentRouteOutcome::Consumed),
+            .and_then(|outcome| match outcome {
+                ComponentOutcome::Ignored => None,
+                ComponentOutcome::Consumed => Some(ComponentRouteOutcome::Consumed),
+                ComponentOutcome::Output(output) => Some(
+                    (self.output)(output)
+                        .map(ComponentRouteOutcome::Output)
+                        .unwrap_or(ComponentRouteOutcome::Consumed),
+                ),
             })
-    }
-
-    fn input_value(&self, owners: &ComponentOwnerRuntime) -> Option<String> {
-        owners.read::<C::State, _>(&self.identity, |state| {
-            (self.input_value)(self.event_context.clone(), state, &self.props)
-        })?
     }
 }
 
@@ -146,7 +131,7 @@ where
     pub identity: ComponentIdentity,
     /// DSL 调用点。
     pub site: ViewSite,
-    /// 事件锚定的语义 key 或 BindId。
+    /// 事件锚定的语义 key。
     pub key: SemanticKey,
     /// 当前 Props 快照。
     pub props: C::Props,
@@ -156,8 +141,6 @@ where
     pub event: for<'a> fn(E, ComponentInput<'a>) -> Option<C::Event>,
     /// 组件 Output 到应用动作的静态映射。
     pub output: fn(C::Output) -> Option<A>,
-    /// 组件受控文本值的静态投影。
-    pub input_value: fn(E, &C::State, &C::Props) -> Option<String>,
 }
 
 /// 创建一个不捕获闭包的类型化组件事件路由。
@@ -177,7 +160,6 @@ where
             event_context: spec.event_context,
             event: spec.event,
             output: spec.output,
-            input_value: spec.input_value,
         }),
     }
 }
@@ -192,6 +174,81 @@ pub struct ComponentIdentity {
     path: String,
     type_name: String,
     key: Option<String>,
+}
+
+/// 组件实例在成功发布帧时发生的生命周期变化。
+///
+/// 这是 Effect bridge 的第一阶段协议：宿主只在收到 `Mounted` 后启动副作用，只要
+/// `generation` 不再是当前 active generation，旧回调就必须丢弃。候选帧失败不会产生
+/// 任何事件。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ComponentLifecycleEvent {
+    /// 实例在本次成功提交后首次出现。
+    Mounted {
+        /// 组件实例身份。
+        identity: ComponentIdentity,
+        /// 该组件 Effect 作用域的代际号。
+        generation: u64,
+    },
+    /// 实例从成功提交的树中移除。
+    Unmounted {
+        /// 组件实例身份。
+        identity: ComponentIdentity,
+        /// 被失效的旧组件 Effect 作用域代际号。
+        generation: u64,
+    },
+}
+
+/// 宿主 Effect 回调使用的组件实例代际作用域。
+///
+/// 该值只能从成功提交产生的 `Mounted` 通知取得；回调执行前必须交给
+/// `FrameCoordinator::accepts_component_effect` 验证，不能仅凭组件路径判断仍然有效。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComponentEffectScope {
+    identity: ComponentIdentity,
+    generation: u64,
+}
+
+impl ComponentEffectScope {
+    /// 作用域对应的组件身份。
+    pub fn identity(&self) -> &ComponentIdentity {
+        &self.identity
+    }
+
+    /// 作用域对应的成功提交代际。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl ComponentLifecycleEvent {
+    /// 返回事件所属组件实例。
+    pub fn identity(&self) -> &ComponentIdentity {
+        match self {
+            Self::Mounted { identity, .. } | Self::Unmounted { identity, .. } => identity,
+        }
+    }
+
+    /// 返回成功提交代际号。
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Mounted { generation, .. } | Self::Unmounted { generation, .. } => *generation,
+        }
+    }
+
+    /// 为挂载实例创建 Effect 作用域；卸载通知不产生新的作用域。
+    pub fn effect_scope(&self) -> Option<ComponentEffectScope> {
+        match self {
+            Self::Mounted {
+                identity,
+                generation,
+            } => Some(ComponentEffectScope {
+                identity: identity.clone(),
+                generation: *generation,
+            }),
+            Self::Unmounted { .. } => None,
+        }
+    }
 }
 
 impl ComponentIdentity {
@@ -365,6 +422,8 @@ pub(crate) struct ComponentOwnerRuntime {
     active: BTreeMap<ComponentIdentity, Rc<dyn StateCell>>,
     pending: RefCell<Option<BTreeMap<ComponentIdentity, Rc<dyn StateCell>>>>,
     active_token: Option<OwnerFrameToken>,
+    next_effect_generation: u64,
+    effect_generations: BTreeMap<ComponentIdentity, u64>,
 }
 
 impl ComponentOwnerRuntime {
@@ -388,15 +447,42 @@ impl ComponentOwnerRuntime {
     }
 
     /// 原子提交候选 owner，并回收本帧未出现的实例。
-    pub fn commit(&mut self, frame: ComponentOwnerFrame, token: OwnerFrameToken) {
+    pub fn commit(
+        &mut self,
+        frame: ComponentOwnerFrame,
+        token: OwnerFrameToken,
+    ) -> Vec<ComponentLifecycleEvent> {
         let ComponentOwnerFrame { states, seen, .. } = frame;
+        let previous = self.active.keys().cloned().collect::<BTreeSet<_>>();
         let active = states
             .into_iter()
             .filter(|(identity, _)| seen.contains(identity))
             .collect();
+        let current = seen;
+        let mut lifecycle = Vec::new();
+        for identity in previous.difference(&current) {
+            let generation = self.effect_generations.remove(identity).unwrap_or(0);
+            lifecycle.push(ComponentLifecycleEvent::Unmounted {
+                identity: identity.clone(),
+                generation,
+            });
+        }
+        for identity in current.difference(&previous) {
+            self.next_effect_generation = self
+                .next_effect_generation
+                .checked_add(1)
+                .expect("component Effect generation exhausted after u64::MAX mounts");
+            self.effect_generations
+                .insert(identity.clone(), self.next_effect_generation);
+            lifecycle.push(ComponentLifecycleEvent::Mounted {
+                identity: identity.clone(),
+                generation: self.next_effect_generation,
+            });
+        }
         self.active = active;
         *self.pending.borrow_mut() = None;
         self.active_token = Some(token);
+        lifecycle
     }
 
     /// 丢弃候选帧。该方法是显式语义入口，实际效果等同于直接 drop。
@@ -413,6 +499,11 @@ impl ComponentOwnerRuntime {
     /// 判断输入是否来自当前 active owner 帧。
     pub fn accepts(&self, token: OwnerFrameToken) -> bool {
         self.active_token == Some(token)
+    }
+
+    pub(crate) fn accepts_effect(&self, scope: &ComponentEffectScope) -> bool {
+        self.active.contains_key(&scope.identity)
+            && self.effect_generations.get(&scope.identity) == Some(&scope.generation)
     }
 
     /// 在当前 active owner 上处理一个局部事件。
@@ -438,19 +529,6 @@ impl ComponentOwnerRuntime {
         let result = event(&mut value.value.borrow_mut());
         states.insert(identity.clone(), value as Rc<dyn StateCell>);
         Some(result)
-    }
-
-    /// 读取 active owner 的类型化状态。
-    pub fn read<T: 'static, R>(
-        &self,
-        identity: &ComponentIdentity,
-        read: impl FnOnce(&T) -> R,
-    ) -> Option<R> {
-        let pending = self.pending.borrow();
-        let states = pending.as_ref().unwrap_or(&self.active);
-        let value = states.get(identity)?;
-        let value = value.as_any().downcast_ref::<TypedStateCell<T>>()?;
-        Some(read(&value.value.borrow()))
     }
 
     /// 当前 active owner 数量。

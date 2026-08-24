@@ -136,11 +136,6 @@ pub enum ViewBuildError {
         /// target 所在位置。
         site: ViewSite,
     },
-    /// 直接 DSL 文本动作和 `BindId` 同时绑定到了一个 input 根。
-    DirectTextActionHasBindId {
-        /// target 所在位置。
-        site: ViewSite,
-    },
     /// 一个最终节点和 trigger 被重复绑定。
     DuplicateActionBinding {
         /// 已经完成身份解析的节点 key。
@@ -229,11 +224,6 @@ impl std::fmt::Display for ViewBuildError {
                 "ActionTarget trigger {trigger:?} does not match its child at {}:{}:{}",
                 site.file, site.line, site.column
             ),
-            Self::DirectTextActionHasBindId { site } => write!(
-                formatter,
-                "direct text action cannot coexist with BindId at {}:{}:{}",
-                site.file, site.line, site.column
-            ),
             Self::DuplicateActionBinding { key, trigger, site } => write!(
                 formatter,
                 "duplicate {trigger:?} action binding for `{}` at {}:{}:{}",
@@ -259,34 +249,54 @@ impl std::error::Error for ViewBuildError {}
 ///
 /// 它不是跨帧身份，也不写入 `UiNode`；`UiTree` 建成后才会解析为最终 `SemanticKey`。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct NodeAnchor(Vec<usize>);
+pub(crate) struct NodeAnchor {
+    path: Vec<usize>,
+    semantic_key: Option<SemanticKey>,
+}
 
 impl NodeAnchor {
     /// 当前子树的真实根。
     pub(crate) const fn root() -> Self {
-        Self(Vec::new())
+        Self {
+            path: Vec::new(),
+            semantic_key: None,
+        }
+    }
+
+    pub(crate) fn semantic_key(key: SemanticKey) -> Self {
+        Self {
+            path: Vec::new(),
+            semantic_key: Some(key),
+        }
     }
 
     /// 返回在当前锚点下的一个真实 child。
     #[cfg(test)]
     pub(crate) fn child(&self, index: usize) -> Self {
-        let mut path = self.0.clone();
+        assert!(
+            self.semantic_key.is_none(),
+            "a semantic-key anchor cannot have children"
+        );
+        let mut path = self.path.clone();
         path.push(index);
-        Self(path)
+        Self {
+            path,
+            semantic_key: None,
+        }
     }
 
     /// 读取实际 child path，仅供 Composition 内部解析本帧计划使用。
     fn child_path(&self) -> &[usize] {
-        &self.0
+        &self.path
     }
 
     pub(crate) fn rebase(&mut self, prefix: &[usize]) {
-        if prefix.is_empty() {
+        if self.semantic_key.is_some() || prefix.is_empty() {
             return;
         }
         let mut path = prefix.to_vec();
-        path.extend_from_slice(&self.0);
-        self.0 = path;
+        path.extend_from_slice(&self.path);
+        self.path = path;
     }
 }
 
@@ -335,6 +345,13 @@ impl<'tree> AnchorResolver<'tree> {
     }
 
     fn resolve(&self, anchor: &NodeAnchor) -> Option<&'tree SemanticKey> {
+        if let Some(key) = &anchor.semantic_key {
+            return self
+                .keys_by_path
+                .values()
+                .find(|candidate| ***candidate == *key)
+                .copied();
+        }
         self.keys_by_path.get(anchor.child_path()).copied()
     }
 }
@@ -850,22 +867,14 @@ impl<A> PlanBundle<A> {
             let trigger = action.trigger();
             let valid = match trigger {
                 DslTrigger::Click => interact.is_some_and(|interact| interact.clickable),
-                DslTrigger::TextEdit | DslTrigger::TextCommit | DslTrigger::TextCancel => interact
-                    .is_some_and(|interact| interact.input.is_some() && interact.bind_id.is_none()),
+                DslTrigger::TextEdit | DslTrigger::TextCommit | DslTrigger::TextCancel => {
+                    interact.is_some_and(|interact| interact.input.is_some())
+                }
             };
             if !valid {
-                return Err(match trigger {
-                    DslTrigger::TextEdit | DslTrigger::TextCommit | DslTrigger::TextCancel
-                        if interact.is_some_and(|interact| interact.bind_id.is_some()) =>
-                    {
-                        ViewBuildError::DirectTextActionHasBindId {
-                            site: action.site(),
-                        }
-                    }
-                    _ => ViewBuildError::ActionTargetCapabilityMismatch {
-                        trigger,
-                        site: action.site(),
-                    },
+                return Err(ViewBuildError::ActionTargetCapabilityMismatch {
+                    trigger,
+                    site: action.site(),
                 });
             }
             if !seen.insert((key.clone(), trigger)) {
@@ -880,7 +889,6 @@ impl<A> PlanBundle<A> {
         for route in &self.component_actions {
             if tree.node_id_for_key(route.key()).is_none()
                 && tree.interact_for_key(route.key()).is_none()
-                && !tree_contains_bind_id(tree.root(), &route.key().0)
             {
                 return Err(ViewBuildError::UnresolvedComponentAction {
                     key: route.key().clone(),
@@ -896,17 +904,6 @@ impl<A> PlanBundle<A> {
         }
         Ok(())
     }
-}
-
-fn tree_contains_bind_id(node: &UiNode, bind_id: &str) -> bool {
-    node.interact
-        .as_ref()
-        .and_then(|interact| interact.bind_id.as_ref())
-        .is_some_and(|candidate| candidate.0 == bind_id)
-        || node
-            .children
-            .iter()
-            .any(|child| tree_contains_bind_id(child, bind_id))
 }
 
 /// 一个可组合的 DSL 子视图结果。
@@ -951,9 +948,80 @@ impl<A> ViewOutput<A> {
         self
     }
 
+    pub(crate) fn with_owner_frame(
+        mut self,
+        owner_frame: Rc<RefCell<ComponentOwnerFrame>>,
+    ) -> Self {
+        self.owner_frame = Some(owner_frame);
+        self
+    }
+
     /// 附加一个由组件私有 State 消费的静态事件路由。
     pub fn attach_component_action(mut self, route: ComponentRoute<A>) -> Self {
         self.plans.component_actions.push(route.inner);
+        self
+    }
+
+    /// 在已经由 kit 生成的 opaque 语义节点上附加 typed click action。
+    ///
+    /// 该入口只在候选帧 resolve 阶段用 `SemanticKey` 验证锚点；输入投递使用 resolve 后的
+    /// `NodeId` action table，不会在运行时扫描字符串或解析业务命令。
+    pub fn attach_action_at(
+        mut self,
+        key: impl Into<SemanticKey>,
+        action: A,
+        site: ViewSite,
+    ) -> Self {
+        self.plans.actions.push(PendingAction::Click {
+            anchor: NodeAnchor::semantic_key(key.into()),
+            action,
+            site,
+        });
+        self
+    }
+
+    /// 在语义节点上附加 typed 文本编辑映射。
+    pub fn attach_input_at(
+        mut self,
+        key: impl Into<SemanticKey>,
+        map: TextActionMap<A>,
+        site: ViewSite,
+    ) -> Self {
+        self.plans.actions.push(PendingAction::Input {
+            anchor: NodeAnchor::semantic_key(key.into()),
+            map,
+            site,
+        });
+        self
+    }
+
+    /// 在语义节点上附加 typed 文本提交映射。
+    pub fn attach_submit_at(
+        mut self,
+        key: impl Into<SemanticKey>,
+        map: TextActionMap<A>,
+        site: ViewSite,
+    ) -> Self {
+        self.plans.actions.push(PendingAction::Submit {
+            anchor: NodeAnchor::semantic_key(key.into()),
+            map,
+            site,
+        });
+        self
+    }
+
+    /// 在语义节点上附加 typed 文本取消映射。
+    pub fn attach_cancel_at(
+        mut self,
+        key: impl Into<SemanticKey>,
+        action: A,
+        site: ViewSite,
+    ) -> Self {
+        self.plans.actions.push(PendingAction::Cancel {
+            anchor: NodeAnchor::semantic_key(key.into()),
+            action,
+            site,
+        });
         self
     }
 
@@ -1291,7 +1359,7 @@ mod tests {
         ActionTarget, AnchorResolver, Body, NodeAnchor, ViewBuild, ViewBuildError, ViewChild,
         ViewSite,
     };
-    use crate::{ComponentRuntime, ProvidedValue, Signal, TextActionMap, ViewResult};
+    use crate::{ComponentRuntime, ProvidedValue, Signal, ViewResult};
 
     fn site() -> ViewSite {
         ViewSite::new("view.rs", 1, 1)
@@ -1300,7 +1368,6 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Action {
         Save,
-        Search(String),
     }
 
     #[test]
@@ -1427,40 +1494,6 @@ mod tests {
         let tree = UiTree::new(node).expect("tree");
         let plans = plans.resolve(&tree).expect("action plan");
         assert_eq!(plans.actions.len(), 1);
-    }
-
-    #[test]
-    fn text_target_rejects_bind_id_before_replacing_plans() {
-        let mut node = UiNode::new(NodeKind::Frame);
-        node.interact = Some(InteractConcern {
-            input: Some(tela_contract::TextInputSpec::new(
-                tela_contract::TextInputKind::Text,
-            )),
-            bind_id: Some(tela_contract::BindId("field".to_owned())),
-            ..InteractConcern::default()
-        });
-        node.children.push(UiNode::new(NodeKind::Rect));
-        let base = ViewBuild::<Action>::new();
-        let target = base
-            .action_target(
-                Body::new(vec![ViewChild::node(node)], Vec::new()),
-                ActionTarget::new().on_input(TextActionMap::unary(Action::Search)),
-                site(),
-            )
-            .expect("target");
-        let mut build = ViewBuild::new();
-        let root = build
-            .finish(
-                Body::new(vec![ViewChild::view_node(target)], Vec::new()),
-                site(),
-            )
-            .expect("root");
-        let (node, plans) = root.into_parts();
-        let tree = UiTree::new(node).expect("tree");
-        assert!(matches!(
-            plans.resolve(&tree),
-            Err(ViewBuildError::DirectTextActionHasBindId { .. })
-        ));
     }
 
     #[test]

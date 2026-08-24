@@ -205,6 +205,10 @@ impl FileManagerModel {
             .find(|entry| entry.id == id && !entry.trashed)
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().filter(|entry| !entry.trashed)
+    }
+
     pub fn entries_in_filtered(
         &self,
         parent: EntryId,

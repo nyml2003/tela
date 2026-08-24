@@ -55,6 +55,8 @@ impl<'a, A> ComponentRenderContext<'a, A> {
 /// handler 阶段的处理结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComponentOutcome<O> {
+    /// 事件与组件匹配，但没有改变私有状态，也没有产生输出。
+    Ignored,
     /// 事件只改变内部状态，不产生应用输出。
     Consumed,
     /// 事件产生一个提交后才会外传的语义结果。
@@ -77,10 +79,19 @@ where
     let state: ComponentState<C::State> = build.local_state_for(identity.clone(), || {
         C::setup(&ComponentSetupContext::new(setup_scope), &props)
     });
-    build.with_component_identity(&identity, |build| {
+    let output = build.with_component_identity(&identity, |build| {
         let mut context = ComponentRenderContext::new(build, site);
         C::render(&mut context, props, &state.get(), children)
-    })
+    })?;
+    // A component may intentionally return an opaque or kit-provided node. The owner frame is
+    // still part of the component's render result; otherwise state materialized by setup/render
+    // is dropped before FrameCoordinator can commit it and later input cannot dispatch.
+    Ok(output.with_owner_frame(
+        build
+            .owner_frame
+            .clone()
+            .expect("component render must retain the candidate owner frame"),
+    ))
 }
 
 /// 渲染组件并附着其静态 `Output -> AppAction` 映射。
@@ -190,12 +201,111 @@ mod tests {
         coordinator.commit(resolved);
     }
 
+    fn publish_plain(coordinator: &mut FrameCoordinator<()>) {
+        let mut build = coordinator.begin_build();
+        let root = build
+            .finish(
+                Body::new(
+                    vec![ViewChild::node(UiNode::new(NodeKind::View))],
+                    Vec::new(),
+                ),
+                ViewSite::new("plain", 1, 1),
+            )
+            .expect("plain view");
+        let resolved = coordinator
+            .prepare(root)
+            .expect("prepared")
+            .resolve(|_| {
+                Ok::<_, ()>(UiFrame {
+                    viewport: Viewport {
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                    commands: Vec::new(),
+                    hit_regions: Vec::new(),
+                    scroll_bounds: Vec::new(),
+                })
+            })
+            .expect("resolved");
+        coordinator.commit(resolved);
+    }
+
+    struct OpaqueStateful;
+
+    impl crate::DslComponent for OpaqueStateful {
+        type Props = ();
+        type State = u8;
+        type Event = ();
+        type Output = ();
+
+        fn setup(_context: &ComponentSetupContext, _props: &Self::Props) -> Self::State {
+            1
+        }
+
+        fn render<'a, A>(
+            _context: &mut ComponentRenderContext<'_, A>,
+            _props: Self::Props,
+            _state: &Self::State,
+            _children: Children<'a, A>,
+        ) -> ViewResult<ViewOutput<A>> {
+            Ok(ViewOutput::opaque(UiNode::new(NodeKind::View)))
+        }
+    }
+
+    #[test]
+    fn opaque_component_output_keeps_owner_state_for_commit() {
+        let mut coordinator = FrameCoordinator::<()>::new();
+        let mut build = coordinator.begin_build();
+        let root = render_component::<OpaqueStateful, _>(
+            &mut build,
+            (),
+            Children::new(|_| Ok(Body::new(Vec::new(), Vec::new()))),
+            ViewSite::new("opaque-stateful", 1, 1),
+        )
+        .expect("opaque component view");
+        let resolved = coordinator
+            .prepare(root)
+            .expect("prepared opaque component")
+            .resolve(|_| {
+                Ok::<_, ()>(UiFrame {
+                    viewport: Viewport {
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                    commands: Vec::new(),
+                    hit_regions: Vec::new(),
+                    scroll_bounds: Vec::new(),
+                })
+            })
+            .expect("resolved opaque component");
+        coordinator.commit(resolved);
+        assert!(matches!(
+            coordinator.take_component_lifecycle_events().as_slice(),
+            [crate::ComponentLifecycleEvent::Mounted { .. }]
+        ));
+    }
+
     #[test]
     fn setup_runs_once_for_a_committed_identity() {
         SETUPS.store(0, Ordering::SeqCst);
         let mut coordinator = FrameCoordinator::new();
         publish(&mut coordinator);
+        let mounted = coordinator.take_component_lifecycle_events();
+        assert!(matches!(
+            mounted.as_slice(),
+            [crate::ComponentLifecycleEvent::Mounted { .. }]
+        ));
+        let scope = mounted[0].effect_scope().expect("mounted Effect scope");
+        assert!(coordinator.accepts_component_effect(&scope));
         publish(&mut coordinator);
+        assert!(coordinator.take_component_lifecycle_events().is_empty());
+        assert!(coordinator.accepts_component_effect(&scope));
+        publish_plain(&mut coordinator);
+        assert!(matches!(
+            coordinator.take_component_lifecycle_events().as_slice(),
+            [crate::ComponentLifecycleEvent::Unmounted { .. }]
+        ));
+        assert!(!coordinator.accepts_component_effect(&scope));
         assert_eq!(SETUPS.load(Ordering::SeqCst), 1);
     }
 

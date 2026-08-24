@@ -8,16 +8,19 @@
 
 use std::collections::BTreeSet;
 
-use tela_contract::{Color, IconProvider, TextInputEvent, UiAction, Value, WindowCommand};
-pub use tela_desktop_ui_kit::VirtualWindow;
+use tela_contract::{
+    Color, IconProvider, KernelInteraction, LayoutConcern, NodeKind, Size, TextInputEvent, UiNode,
+    WindowCommand,
+};
 use tela_desktop_ui_kit::{
-    Cascader as KitCascader, Dialog as KitDialog, DraftInput as KitDraftInput, DraftInputCommit,
-    DraftInputSnapshot, EmptyState as KitEmptyState, Form as KitForm, FormItem as KitFormItem,
+    Cascader as KitCascader, Dialog as KitDialog, DraftInput as KitDraftInput, DraftInputSnapshot,
+    EmptyState as KitEmptyState, Form as KitForm, FormItem as KitFormItem,
     IconButton as KitIconButton, Pagination as KitPagination, Segmented as KitSegmented,
     Select as KitSelect, StatusBadge as KitStatusBadge, Table as KitTable, Td as KitTd,
     Text as KitText, Toolbar as KitToolbar, Tr as KitTr, Transfer as KitTransfer, TransferEvent,
     TransferItem, TransferOutcome, TransferState, WindowsTitleBar as KitWindowsTitleBar,
 };
+pub use tela_desktop_ui_kit::{DraftInputCommit, VirtualWindow};
 use tela_ui_dsl::{
     Body, Children, ComponentActionSpec, ComponentIdentity, ComponentInput, ComponentOutcome,
     ComponentRenderContext, ComponentSetupContext, DslComponent, ProvidedValue, ViewBuild,
@@ -81,7 +84,6 @@ fn bind_transfer_output<A: 'static>(
                 event_context: event,
                 event: click_event,
                 output,
-                input_value: no_transfer_input,
             },
         ));
     }
@@ -98,7 +100,6 @@ fn bind_transfer_output<A: 'static>(
                 event_context: left,
                 event: search_event,
                 output,
-                input_value: transfer_input,
             },
         ));
     }
@@ -106,43 +107,23 @@ fn bind_transfer_output<A: 'static>(
 }
 
 fn click_event(event: TransferEvent, input: ComponentInput<'_>) -> Option<TransferEvent> {
-    let ComponentInput::Ui { action, .. } = input else {
-        return None;
-    };
-    matches!(action, UiAction::Click { .. }).then_some(event)
+    let ComponentInput::Ui { action, .. } = input;
+    matches!(action, KernelInteraction::Activate { .. }).then_some(event)
 }
 
 fn search_event(left: bool, input: ComponentInput<'_>) -> Option<TransferEvent> {
-    let ComponentInput::Ui { action, .. } = input else {
+    let ComponentInput::Ui { action, .. } = input;
+    let KernelInteraction::TextInput { event, .. } = action else {
         return None;
     };
-    let UiAction::ValueChange {
-        value: Value::String(value),
-        ..
-    } = action
-    else {
-        return None;
+    let value = match event {
+        TextInputEvent::Edit { value, .. } | TextInputEvent::Commit { value, .. } => value,
+        TextInputEvent::Cancel { .. } => return None,
     };
     Some(if left {
         TransferEvent::LeftSearch(value.clone())
     } else {
         TransferEvent::RightSearch(value.clone())
-    })
-}
-
-fn no_transfer_input(
-    _event: TransferEvent,
-    _state: &TransferState,
-    _props: &TransferProps,
-) -> Option<String> {
-    None
-}
-
-fn transfer_input(left: bool, state: &TransferState, _props: &TransferProps) -> Option<String> {
-    Some(if left {
-        state.left_search().to_owned()
-    } else {
-        state.right_search().to_owned()
     })
 }
 
@@ -258,7 +239,6 @@ fn bind_window_output<A: 'static>(
                 event_context: command,
                 event: window_event,
                 output,
-                input_value: no_window_input,
             },
         ));
     }
@@ -266,18 +246,8 @@ fn bind_window_output<A: 'static>(
 }
 
 fn window_event(command: WindowCommand, input: ComponentInput<'_>) -> Option<WindowCommand> {
-    let ComponentInput::Ui { action, .. } = input else {
-        return None;
-    };
-    matches!(action, UiAction::Click { .. }).then_some(command)
-}
-
-fn no_window_input(
-    _command: WindowCommand,
-    _state: &(),
-    _props: &WindowsTitleBarProps,
-) -> Option<String> {
-    None
+    let ComponentInput::Ui { action, .. } = input;
+    matches!(action, KernelInteraction::Activate { .. }).then_some(command)
 }
 
 /// 标题栏 DSL Props。
@@ -378,7 +348,6 @@ fn bind_slider_output<A: 'static>(
     let key = props
         .key
         .clone()
-        .or_else(|| props.bind_id.clone())
         .unwrap_or_else(|| "desktop.slider".to_owned());
     let event_config = props.config.clone().unwrap_or_default();
     view.attach_component_action(component_action_route::<SliderView, A, _>(
@@ -390,44 +359,34 @@ fn bind_slider_output<A: 'static>(
             event_context: event_config,
             event: slider_event,
             output,
-            input_value: no_slider_input,
         },
     ))
 }
 
-fn slider_event(config: SliderConfig, input: ComponentInput<'_>) -> Option<SliderEvent> {
+fn slider_event(_config: SliderConfig, input: ComponentInput<'_>) -> Option<SliderEvent> {
     match input {
         ComponentInput::Ui {
-            action: UiAction::Pointer { event, .. },
+            action: KernelInteraction::Pointer { event, .. },
             bounds: Some(bounds),
         } if bounds.w > 0.0 => Some(SliderEvent::Position(
             ((event.position.x - bounds.x) / bounds.w).clamp(0.0, 1.0) as f64,
         )),
-        ComponentInput::Keyboard { physical_key, .. } => match physical_key {
-            0x4f | 0x51 => Some(SliderEvent::Increment),
-            0x50 | 0x52 => Some(SliderEvent::Decrement),
-            0x4a => Some(SliderEvent::Home),
-            0x4d => Some(SliderEvent::End),
+        ComponentInput::Ui {
+            action: KernelInteraction::Keyboard { event, .. },
+            ..
+        } => match event.intent {
+            tela_contract::KeyboardIntent::MoveFocus(
+                tela_contract::FocusDirection::Up | tela_contract::FocusDirection::Right,
+            ) => Some(SliderEvent::Increment),
+            tela_contract::KeyboardIntent::MoveFocus(
+                tela_contract::FocusDirection::Down | tela_contract::FocusDirection::Left,
+            ) => Some(SliderEvent::Decrement),
+            tela_contract::KeyboardIntent::MoveToStart => Some(SliderEvent::Home),
+            tela_contract::KeyboardIntent::MoveToEnd => Some(SliderEvent::End),
             _ => None,
         },
-        ComponentInput::Ui {
-            action:
-                UiAction::ValueChange {
-                    value: Value::Number(value),
-                    ..
-                },
-            ..
-        } => Some(SliderEvent::Position(config.position(*value))),
         _ => None,
     }
-}
-
-fn no_slider_input(
-    _context: SliderConfig,
-    _state: &SliderState,
-    _props: &SliderProps,
-) -> Option<String> {
-    None
 }
 
 /// Slider 的私有受控值同步快照。
@@ -446,8 +405,6 @@ pub struct SliderProps {
     pub width: Option<f32>,
     /// 是否禁用。
     pub disabled: Option<bool>,
-    /// 业务绑定 key。
-    pub bind_id: Option<String>,
     /// 语义 key。
     pub key: Option<String>,
 }
@@ -458,7 +415,6 @@ impl Default for SliderProps {
             config: Some(SliderConfig::default()),
             width: None,
             disabled: None,
-            bind_id: None,
             key: None,
         }
     }
@@ -495,9 +451,6 @@ impl DslComponent for SliderView {
         }
         if let Some(disabled) = props.disabled {
             slider = slider.disabled(disabled);
-        }
-        if let Some(bind_id) = &props.bind_id {
-            slider = slider.bind_id(bind_id.clone());
         }
         if let Some(key) = &props.key {
             slider = slider.key(key.clone());
@@ -557,14 +510,16 @@ pub use tela_ui_foundation::SliderScale;
 pub struct DraftInputProps {
     /// 应用已确认的字段值。
     pub value: Option<String>,
-    /// 业务输入绑定。
-    pub bind_id: Option<String>,
     /// 空值提示。
     pub placeholder: Option<String>,
     /// 是否禁用。
     pub disabled: Option<bool>,
     /// 焦点视觉态。
     pub focused: Option<bool>,
+    /// 输入控件的布局槽宽度。
+    pub width: Option<f32>,
+    /// 输入控件的布局槽高度。
+    pub height: Option<f32>,
     /// 输入框圆角。
     pub border_radius: Option<f32>,
     /// DSL 组件实例 key。
@@ -603,33 +558,11 @@ impl DraftInputView {
 }
 
 fn draft_event(_context: (), input: ComponentInput<'_>) -> Option<TextInputEvent> {
-    let ComponentInput::Ui { action, .. } = input else {
-        return None;
-    };
+    let ComponentInput::Ui { action, .. } = input;
     match action {
-        UiAction::TextInput { event, .. } => Some(event.clone()),
-        UiAction::ValueChange {
-            value: Value::String(value),
-            ..
-        } => Some(TextInputEvent::Edit {
-            value: value.clone(),
-            selection: tela_contract::TextSelection::collapsed(value.len() as u32),
-            composing: false,
-        }),
+        KernelInteraction::TextInput { event, .. } => Some(event.clone()),
         _ => None,
     }
-}
-
-fn draft_input_value(
-    _context: (),
-    state: &DraftInputState,
-    props: &DraftInputProps,
-) -> Option<String> {
-    Some(if state.dirty {
-        state.draft.clone()
-    } else {
-        props.value.clone().unwrap_or_default()
-    })
 }
 
 impl DslComponent for DraftInputView {
@@ -669,18 +602,33 @@ impl DslComponent for DraftInputView {
             state.composing,
             state.conflicted || (state.dirty && state.external != external),
         );
-        let mut input = KitDraftInput::new(snapshot, props.bind_id.unwrap_or_default())
+        let semantic_key = props
+            .key
+            .clone()
+            .unwrap_or_else(|| "desktop.draft-input".to_owned());
+        let mut input = KitDraftInput::new(snapshot, semantic_key)
             .placeholder(props.placeholder.unwrap_or_default())
             .disabled(props.disabled.unwrap_or(false))
             .focused(props.focused.unwrap_or(false));
         if let Some(radius) = props.border_radius {
             input = input.border_radius(radius);
         }
+        let mut node = input.into_node();
+        let width = props.width;
+        let height = props.height;
+        if width.is_some() || height.is_some() {
+            node = UiNode::new(NodeKind::Frame)
+                .with_layout(LayoutConcern {
+                    width: width.map(Size::fixed),
+                    height: height.map(Size::fixed),
+                    ..LayoutConcern::default()
+                })
+                .with_children([node]);
+        }
         let site = context.site();
-        context.build().finish(
-            Body::new(vec![ViewChild::node(input.into_node())], Vec::new()),
-            site,
-        )
+        context
+            .build()
+            .finish(Body::new(vec![ViewChild::node(node)], Vec::new()), site)
     }
 
     fn handle(
@@ -700,25 +648,41 @@ impl DslComponent for DraftInputView {
             TextInputEvent::Edit {
                 value, composing, ..
             } => {
+                let changed = state.draft != value || state.composing != composing;
                 state.draft = value;
                 state.composing = composing;
                 state.dirty = state.draft != external;
                 if !state.dirty {
                     state.conflicted = false;
                 }
-                ComponentOutcome::Consumed
+                if changed {
+                    ComponentOutcome::Consumed
+                } else {
+                    ComponentOutcome::Ignored
+                }
             }
             TextInputEvent::Commit { value, .. } if !state.composing => {
+                if !state.dirty && value == external {
+                    return ComponentOutcome::Ignored;
+                }
                 state.draft = value.clone();
                 state.dirty = false;
                 state.conflicted = false;
                 ComponentOutcome::Output(DraftInputCommit {
-                    bind_id: tela_contract::BindId(props.bind_id.clone().unwrap_or_default()),
+                    semantic_key: tela_contract::SemanticKey(
+                        props
+                            .key
+                            .clone()
+                            .unwrap_or_else(|| "desktop.draft-input".to_owned()),
+                    ),
                     value,
                 })
             }
-            TextInputEvent::Commit { .. } => ComponentOutcome::Consumed,
+            TextInputEvent::Commit { .. } => ComponentOutcome::Ignored,
             TextInputEvent::Cancel { .. } => {
+                if !state.dirty && !state.composing && state.draft == external {
+                    return ComponentOutcome::Ignored;
+                }
                 state.draft = external.clone();
                 state.external = external;
                 state.dirty = false;
@@ -736,18 +700,20 @@ impl DslComponent for DraftInputView {
         output: fn(Self::Output) -> Option<A>,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
-        let bind_id = props.bind_id.clone().unwrap_or_default();
+        let semantic_key = props
+            .key
+            .clone()
+            .unwrap_or_else(|| "desktop.draft-input".to_owned());
         Ok(
             view.attach_component_action(component_action_route::<Self, A, _>(
                 ComponentActionSpec {
                     identity,
                     site,
-                    key: bind_id.into(),
+                    key: semantic_key.into(),
                     props: props.clone(),
                     event_context: (),
                     event: draft_event,
                     output,
-                    input_value: draft_input_value,
                 },
             )),
         )
@@ -995,10 +961,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use tela_contract::{
-        BindId, HitRegion, Point, PointerEvent, Rect, TextInputEvent, TextSelection, UiAction,
-        UiFrame, Value, Viewport, WindowCommand,
+        FocusDirection, HitRegion, KernelInteraction, KeyboardIntent, KeyboardIntentEvent, Point,
+        PointerEvent, Rect, TextInputEvent, TextSelection, UiFrame, Viewport, WindowCommand,
     };
-    use tela_ui_dsl::{ComponentDispatch, FrameCoordinator, FramedUiAction, ViewOutput, ViewSite};
+    use tela_ui_dsl::{
+        ComponentDispatch, FrameCoordinator, FramedInteraction, ViewOutput, ViewSite,
+    };
 
     use super::{
         DraftInputCommit, DraftInputProps, DraftInputView, SliderConfig, SliderProps, SliderScale,
@@ -1105,13 +1073,13 @@ mod tests {
         coordinator.commit(resolved);
     }
 
-    fn click(coordinator: &FrameCoordinator<Action>, key: &str) -> FramedUiAction {
+    fn click(coordinator: &FrameCoordinator<Action>, key: &str) -> FramedInteraction {
         let active = coordinator.active().expect("active frame");
         let node_id = active
             .tree()
             .node_id_for_key(&tela_contract::SemanticKey(key.to_owned()))
             .expect("semantic node");
-        FramedUiAction::new(active.token(), UiAction::Click { node_id })
+        FramedInteraction::new(active.token(), KernelInteraction::Activate { node_id })
     }
 
     #[test]
@@ -1123,32 +1091,49 @@ mod tests {
         let toggle = click(&coordinator, "transfer.item.a");
         let stale = toggle.clone();
         assert!(matches!(
-            coordinator.dispatch_component(&toggle),
+            coordinator.dispatch_component_interaction(&toggle),
             Some(ComponentDispatch::Consumed)
         ));
 
-        let search = FramedUiAction::new(
+        let search = FramedInteraction::new(
             first_token,
-            UiAction::ValueChange {
-                bind_id: BindId("transfer.left-search".to_owned()),
-                value: Value::String("alp".to_owned()),
+            KernelInteraction::TextInput {
+                node_id: coordinator
+                    .active()
+                    .expect("active transfer")
+                    .tree()
+                    .node_id_for_key(&tela_contract::SemanticKey(
+                        "transfer.left-search".to_owned(),
+                    ))
+                    .expect("left search node"),
+                event: TextInputEvent::Edit {
+                    value: "alp".to_owned(),
+                    selection: TextSelection::collapsed(3),
+                    composing: false,
+                },
             },
         );
         assert!(matches!(
-            coordinator.dispatch_component(&search),
+            coordinator.dispatch_component_interaction(&search),
             Some(ComponentDispatch::Consumed)
         ));
         assert_eq!(
-            coordinator.component_input_value(&tela_contract::SemanticKey(
+            coordinator.input_value(&tela_contract::SemanticKey(
+                "transfer.left-search".to_owned()
+            )),
+            Some(String::new())
+        );
+
+        commit(&mut coordinator);
+        assert_eq!(
+            coordinator.input_value(&tela_contract::SemanticKey(
                 "transfer.left-search".to_owned()
             )),
             Some("alp".to_owned())
         );
-
-        commit(&mut coordinator);
         let move_right = click(&coordinator, "transfer.move-right");
         assert!(matches!(
-            coordinator.dispatch_component(&move_right),
+            coordinator.dispatch_component_interaction(&move_right),
             Some(ComponentDispatch::Consumed)
         ));
         assert!(coordinator.take_component_outputs().is_empty());
@@ -1158,7 +1143,7 @@ mod tests {
             vec![Action::Targets(BTreeSet::from(["a".to_owned()]))]
         );
 
-        assert!(coordinator.dispatch_component(&stale).is_none());
+        assert!(coordinator.dispatch_component_interaction(&stale).is_none());
     }
 
     #[test]
@@ -1199,7 +1184,7 @@ mod tests {
 
         let close = click(&coordinator, "window.close");
         assert!(matches!(
-            coordinator.dispatch_component(&close),
+            coordinator.dispatch_component_interaction(&close),
             Some(ComponentDispatch::Consumed)
         ));
         assert!(coordinator.take_component_outputs().is_empty());
@@ -1232,7 +1217,6 @@ mod tests {
         fn props() -> DraftInputProps {
             DraftInputProps {
                 value: Some(String::new()),
-                bind_id: Some("draft".to_owned()),
                 key: Some("draft".to_owned()),
                 ..DraftInputProps::default()
             }
@@ -1277,9 +1261,9 @@ mod tests {
             .node_id_for_key(&tela_contract::SemanticKey("draft".to_owned()))
             .expect("draft node");
         let token = active.token();
-        let edit = FramedUiAction::new(
+        let edit = FramedInteraction::new(
             token,
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Edit {
                     value: "hello".to_owned(),
@@ -1289,16 +1273,16 @@ mod tests {
             },
         );
         assert!(matches!(
-            coordinator.dispatch_component(&edit),
+            coordinator.dispatch_component_interaction(&edit),
             Some(ComponentDispatch::Consumed)
         ));
         assert_eq!(
-            coordinator.component_input_value(&tela_contract::SemanticKey("draft".to_owned())),
-            Some("hello".to_owned())
+            coordinator.input_value(&tela_contract::SemanticKey("draft".to_owned())),
+            Some(String::new())
         );
-        let commit = FramedUiAction::new(
+        let commit = FramedInteraction::new(
             token,
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Commit {
                     value: "hello".to_owned(),
@@ -1307,14 +1291,14 @@ mod tests {
             },
         );
         assert!(matches!(
-            coordinator.dispatch_component(&commit),
+            coordinator.dispatch_component_interaction(&commit),
             Some(ComponentDispatch::Consumed)
         ));
         coordinator.abort_component_transaction();
         publish(&mut coordinator);
         assert!(coordinator.take_component_outputs().is_empty());
         assert_eq!(
-            coordinator.component_input_value(&tela_contract::SemanticKey("draft".to_owned())),
+            coordinator.input_value(&tela_contract::SemanticKey("draft".to_owned())),
             Some(String::new())
         );
     }
@@ -1335,7 +1319,6 @@ mod tests {
                 }),
                 width: Some(200.0),
                 disabled: Some(false),
-                bind_id: Some("rate".to_owned()),
                 key: Some("rate".to_owned()),
             },
             rate_output,
@@ -1372,25 +1355,30 @@ mod tests {
         coordinator.commit(resolved);
         let token = coordinator.active().expect("active slider").token();
 
-        let pointer = FramedUiAction::new(
+        let pointer = FramedInteraction::new(
             token,
-            UiAction::Pointer {
+            KernelInteraction::Pointer {
                 node_id,
                 event: PointerEvent::mouse_down(Point { x: 120.0, y: 15.0 }),
             },
         );
         assert!(matches!(
-            coordinator.dispatch_component(&pointer),
+            coordinator.dispatch_component_interaction(&pointer),
             Some(ComponentDispatch::Consumed)
         ));
 
+        let keyboard = FramedInteraction::new(
+            token,
+            KernelInteraction::Keyboard {
+                node_id,
+                event: KeyboardIntentEvent {
+                    intent: KeyboardIntent::MoveFocus(FocusDirection::Right),
+                    repeat: false,
+                },
+            },
+        );
         assert!(matches!(
-            coordinator.dispatch_component_keyboard(
-                &tela_contract::SemanticKey("rate".to_owned()),
-                0x4f,
-                0,
-                false,
-            ),
+            coordinator.dispatch_component_interaction(&keyboard),
             Some(ComponentDispatch::Consumed)
         ));
 
@@ -1407,7 +1395,6 @@ mod tests {
                 }),
                 width: Some(200.0),
                 disabled: Some(false),
-                bind_id: Some("rate".to_owned()),
                 key: Some("rate".to_owned()),
             },
             rate_output,

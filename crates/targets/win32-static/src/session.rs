@@ -8,13 +8,14 @@
 use std::{collections::BTreeSet, time::Instant};
 
 use tela_contract::{
-    FocusAppearance, FocusDirection, InputEvent, KeyboardIntent, KeyboardIntentEvent, Modifiers,
-    PhysicalKey, Point, PointerEvent, Rect, SemanticKey, TextInputEvent, TextSelection, UiAction,
-    UiFrame, UiLayoutError, UiResources, Value, Viewport, WindowCommand,
+    FocusAppearance, FocusDirection, InputEvent, KernelInteraction, KeyboardIntent,
+    KeyboardIntentEvent, Modifiers, PhysicalKey, Point, PointerEvent, SemanticKey, TextInputEvent,
+    TextInputSpec, TextSelection, UiFrame, UiLayoutError, UiResources, Viewport, WindowCommand,
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
 use tela_ui_dsl::{
-    FrameCoordinator, FrameToken, FramedUiAction, ResolvedFrame, ViewBuild, ViewOutput, ViewResult,
+    FrameCoordinator, FrameToken, FramedInteraction, ResolvedFrame, ViewBuild, ViewOutput,
+    ViewResult,
 };
 
 /// 单帧渲染上下文：壳状态中应用渲染需要的只读投影。
@@ -51,8 +52,8 @@ impl Default for ApplicationConfig {
 
 /// 应用面向壳的窄契约：只提供域渲染、域动作与输入通道归属。
 ///
-/// 除 `render` 与 `handle_action` 外全部有默认实现；不关心文本输入通道或窗口命令的
-/// 应用可以只实现前两个方法。壳协议（viewport/输入/焦点/窗口命令）由 [`Application`]
+/// 除 `render` 与 `handle_action` 外全部有默认实现；不关心窗口命令的应用可以只实现
+/// 前两个方法。壳协议（viewport/输入/焦点/窗口命令）由 [`Application`]
 /// 一次性实现，应用不得感知壳的细节。
 pub trait AppController<A: Clone + 'static> {
     /// 用当前应用状态渲染一帧 DSL 视图。
@@ -61,48 +62,6 @@ pub trait AppController<A: Clone + 'static> {
 
     /// 处理一个 DSL 动作；返回是否引起界面变化（需要重新出帧）。
     fn handle_action(&mut self, action: A) -> bool;
-
-    /// 处理输入绑定值变化（`ValueChange` 动作）。
-    fn handle_value_change(&mut self, bind_id: &str, value: Value) -> bool {
-        let _ = (bind_id, value);
-        false
-    }
-
-    /// 处理当前焦点组件的原始键盘输入；返回 `true` 表示组件消费了该按键。
-    fn handle_keyboard(
-        &mut self,
-        key: &SemanticKey,
-        physical_key: u16,
-        modifier_bits: u8,
-        repeat: bool,
-    ) -> bool {
-        let _ = (key, physical_key, modifier_bits, repeat);
-        false
-    }
-
-    /// 处理没有 `ActionTarget` 的通用可点击组件语义 key。
-    fn handle_semantic_click(&mut self, key: &SemanticKey) -> bool {
-        let _ = key;
-        false
-    }
-
-    /// 处理需要连续坐标的通用指针组件。
-    fn handle_pointer(&mut self, key: &SemanticKey, position: Point, bounds: Rect) -> bool {
-        let _ = (key, position, bounds);
-        false
-    }
-
-    /// 该语义 key 是否属于受控文本输入通道（决定原生文本通道的挂接）。
-    fn is_text_input(&self, key: &SemanticKey) -> bool {
-        let _ = key;
-        false
-    }
-
-    /// 受控文本输入通道的当前值。
-    fn input_value_for(&self, key: &SemanticKey) -> String {
-        let _ = key;
-        String::new()
-    }
 
     /// 自绘标题栏待执行窗口命令（`None` = 无待执行命令）。
     fn take_window_command(&mut self) -> Option<WindowCommand> {
@@ -151,6 +110,7 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     view_state: ViewStateStore,
     frames: FrameCoordinator<A>,
     pending_frame: Option<PendingFrame<A>>,
+    text_input: Option<TextInputChannel>,
     projection_invalidated: bool,
     last_layout_measures: usize,
     last_rebuild_log_at: Instant,
@@ -160,6 +120,13 @@ struct PendingFrame<A> {
     resolved: ResolvedFrame<A>,
     view_state: ViewStateStore,
     dirty: BTreeSet<SemanticKey>,
+}
+
+#[derive(Clone, Debug)]
+struct TextInputChannel {
+    key: SemanticKey,
+    value: String,
+    dirty: bool,
 }
 
 impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
@@ -180,6 +147,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             view_state: ViewStateStore::new(),
             frames: FrameCoordinator::new(),
             pending_frame: None,
+            text_input: None,
             projection_invalidated: true,
             last_layout_measures: 0,
             last_rebuild_log_at: Instant::now(),
@@ -386,7 +354,15 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         self.frames.commit_with(resolved, |_| {
             *active_view_state = view_state;
         });
+        self.reconcile_text_input_channel();
 
+        for lifecycle in self.frames.take_component_lifecycle_events() {
+            session_trace!(
+                "session_component_lifecycle generation={} identity={:?}",
+                lifecycle.generation(),
+                lifecycle.identity()
+            );
+        }
         let mut output_changed = false;
         for action in self.frames.take_component_outputs() {
             output_changed |= self.controller.handle_action(action);
@@ -446,7 +422,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .expect("accepted token requires an active frame");
         let frame = active.frame().clone();
         let tree = active.tree();
-        let actions = self.profile.dispatch_input(
+        let actions = self.profile.dispatch_kernel_input(
             tree,
             &frame,
             &mut self.view_state,
@@ -479,23 +455,6 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     /// 派发一个物理键事件；返回消费的动作数。
     pub fn handle_key(&mut self, physical_key: u16, modifier_bits: u8, repeat: bool) -> u32 {
         self.ensure_frame();
-        if let Some(key) = self.view_state.current_focus_key().cloned() {
-            if self
-                .frames
-                .dispatch_component_keyboard(&key, physical_key, modifier_bits, repeat)
-                .is_some()
-            {
-                self.invalidate_frame();
-                return 1;
-            }
-            if self
-                .controller
-                .handle_keyboard(&key, physical_key, modifier_bits, repeat)
-            {
-                self.invalidate_frame();
-                return 1;
-            }
-        }
         let Some(physical) = PhysicalKey::from_code(physical_key) else {
             return 0;
         };
@@ -517,6 +476,8 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             PhysicalKey::ArrowDown => Some(KeyboardIntent::MoveFocus(FocusDirection::Down)),
             PhysicalKey::ArrowLeft => Some(KeyboardIntent::MoveFocus(FocusDirection::Left)),
             PhysicalKey::ArrowRight => Some(KeyboardIntent::MoveFocus(FocusDirection::Right)),
+            PhysicalKey::Home => Some(KeyboardIntent::MoveToStart),
+            PhysicalKey::End => Some(KeyboardIntent::MoveToEnd),
             _ => None,
         };
         let Some(intent) = intent else {
@@ -531,7 +492,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .expect("accepted token requires an active frame");
         let frame = active.frame().clone();
         let tree = active.tree();
-        let actions = self.profile.dispatch_input(
+        let actions = self.profile.dispatch_kernel_input(
             tree,
             &frame,
             &mut self.view_state,
@@ -546,25 +507,51 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 替换焦点文本输入的值。
     pub fn set_input_value(&mut self, value: String) -> u32 {
-        if !self.input_focused() {
+        let Some((key, _)) = self.focused_input_snapshot() else {
             return 0;
-        }
+        };
+        let key = key.clone();
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        u32::from(self.dispatch_text_input(
+        let changed = self.dispatch_text_input(
             token,
             TextInputEvent::Edit {
                 selection: TextSelection::collapsed(value.len() as u32),
-                value,
+                value: value.clone(),
                 composing: false,
             },
-        ))
+        );
+        if changed {
+            self.text_input = Some(TextInputChannel {
+                key,
+                value,
+                dirty: true,
+            });
+        }
+        u32::from(changed)
     }
 
     /// 原生文本通道获得焦点。
     pub fn input_focus(&mut self) -> u32 {
-        u32::from(self.current_frame_token().is_some())
+        let Some((key, value)) = self
+            .focused_input_snapshot()
+            .map(|(key, input)| (key.clone(), input.value.clone()))
+        else {
+            return 0;
+        };
+        if self
+            .text_input
+            .as_ref()
+            .is_none_or(|channel| channel.key != key)
+        {
+            self.text_input = Some(TextInputChannel {
+                key,
+                value,
+                dirty: false,
+            });
+        }
+        1
     }
 
     /// 原生文本通道失去焦点。
@@ -573,6 +560,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             return 0;
         }
         self.view_state.clear_current_focus();
+        self.text_input = None;
         self.invalidate_frame();
         1
     }
@@ -604,26 +592,70 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 selection: TextSelection::collapsed(value.len() as u32),
             },
         );
+        if canceled {
+            self.text_input = self
+                .focused_input_snapshot()
+                .map(|(key, input)| TextInputChannel {
+                    key: key.clone(),
+                    value: input.value.clone(),
+                    dirty: false,
+                });
+        }
         u32::from(canceled || self.input_blur() > 0)
     }
 
     /// 当前焦点是否挂在受控文本输入通道上。
     pub fn input_focused(&self) -> bool {
-        self.view_state.current_focus_key().is_some_and(|key| {
-            self.frames.has_component_route(key) || self.controller.is_text_input(key)
-        })
+        self.focused_input_snapshot().is_some()
     }
 
     /// 当前受控文本输入通道的值。
     pub fn input_value(&self) -> String {
-        self.view_state
-            .current_focus_key()
-            .map(|key| {
-                self.frames
-                    .component_input_value(key)
-                    .unwrap_or_else(|| self.controller.input_value_for(key))
-            })
-            .unwrap_or_default()
+        let Some((key, input)) = self.focused_input_snapshot() else {
+            return String::new();
+        };
+        self.text_input
+            .as_ref()
+            .filter(|channel| &channel.key == key)
+            .map(|channel| channel.value.clone())
+            .unwrap_or_else(|| input.value.clone())
+    }
+
+    fn focused_input_snapshot(&self) -> Option<(&SemanticKey, &TextInputSpec)> {
+        let key = self.view_state.current_focus_key()?;
+        let input = self
+            .frames
+            .active()?
+            .tree()
+            .interact_for_key(key)?
+            .input
+            .as_ref()?;
+        Some((key, input))
+    }
+
+    fn reconcile_text_input_channel(&mut self) {
+        let focused = self
+            .focused_input_snapshot()
+            .map(|(key, input)| (key.clone(), input.value.clone()));
+        let Some((key, value)) = focused else {
+            self.text_input = None;
+            return;
+        };
+        match self.text_input.as_mut() {
+            Some(channel) if channel.key == key => {
+                if !channel.dirty || channel.value == value {
+                    channel.value = value;
+                    channel.dirty = false;
+                }
+            }
+            _ => {
+                self.text_input = Some(TextInputChannel {
+                    key,
+                    value,
+                    dirty: false,
+                });
+            }
+        }
     }
 
     /// 当前指针是否悬停交互节点（壳在 WM_SETCURSOR 用它切换光标）。
@@ -681,7 +713,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .expect("accepted token requires an active frame");
         let frame = active.frame().clone();
         let tree = active.tree();
-        let actions = self.profile.dispatch_input(
+        let actions = self.profile.dispatch_kernel_input(
             tree,
             &frame,
             &mut self.view_state,
@@ -694,52 +726,30 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         changed
     }
 
-    fn handle_framed_actions(&mut self, token: FrameToken, actions: &[UiAction]) -> bool {
+    fn handle_framed_actions(&mut self, token: FrameToken, actions: &[KernelInteraction]) -> bool {
         let mut changed = false;
         for action in actions.iter().cloned() {
-            let framed = FramedUiAction::new(token, action);
-            if !self.frames.accepts(&framed) {
+            let framed = FramedInteraction::new(token, action);
+            if !self.frames.accepts_interaction(&framed) {
                 continue;
             }
-            if let Some(action) = self.frames.dispatch(&framed) {
+            if let Some(action) = self.frames.dispatch_interaction(&framed) {
                 changed |= self.controller.handle_action(action);
                 continue;
             }
-            if self.frames.dispatch_component(&framed).is_some() {
+            if self
+                .frames
+                .dispatch_component_interaction(&framed)
+                .is_some()
+            {
                 changed = true;
                 continue;
             }
             match framed.into_parts().1 {
-                UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
-                UiAction::Hover { .. } => changed = true,
-                UiAction::ValueChange { bind_id, value } => {
-                    changed |= self.controller.handle_value_change(&bind_id.0, value)
+                KernelInteraction::RequestFocus { .. } | KernelInteraction::FocusChanged { .. } => {
+                    changed = true
                 }
-                UiAction::Click { node_id } => {
-                    if let Some(key) = self
-                        .frames
-                        .active()
-                        .and_then(|active| active.tree().key_for_node_id(node_id))
-                    {
-                        changed |= self.controller.handle_semantic_click(key);
-                    }
-                }
-                UiAction::Pointer { node_id, event } => {
-                    let active = self.frames.active();
-                    if let (Some(active), Some(key)) = (
-                        active,
-                        active.and_then(|frame| frame.tree().key_for_node_id(node_id)),
-                    ) {
-                        let bounds = active
-                            .frame()
-                            .hit_regions
-                            .iter()
-                            .find(|region| region.node_id == node_id)
-                            .map(|region| region.rect)
-                            .unwrap_or_default();
-                        changed |= self.controller.handle_pointer(key, event.position, bounds);
-                    }
-                }
+                KernelInteraction::Hover { .. } => changed = true,
                 _ => {}
             }
         }
@@ -751,22 +761,22 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     }
 }
 
-fn action_kind(action: &UiAction) -> &'static str {
+fn action_kind(action: &KernelInteraction) -> &'static str {
     match action {
-        UiAction::Pointer { .. } => "Pointer",
-        UiAction::Click { .. } => "Click",
-        UiAction::Hover { .. } => "Hover",
-        UiAction::RequestFocus { .. } => "RequestFocus",
-        UiAction::FocusChanged { .. } => "FocusChanged",
-        UiAction::ValueChange { .. } => "ValueChange",
-        UiAction::Scroll { .. } => "Scroll",
-        UiAction::Gesture { .. } => "Gesture",
-        UiAction::TextInput { .. } => "TextInput",
-        UiAction::OpenModal { .. } => "OpenModal",
-        UiAction::CloseModal { .. } => "CloseModal",
-        UiAction::TeleportClickOutside { .. } => "TeleportClickOutside",
-        UiAction::ShortcutActivated { .. } => "ShortcutActivated",
-        UiAction::SaveFocus => "SaveFocus",
-        UiAction::RestoreFocus => "RestoreFocus",
+        KernelInteraction::Pointer { .. } => "Pointer",
+        KernelInteraction::Activate { .. } => "Activate",
+        KernelInteraction::Hover { .. } => "Hover",
+        KernelInteraction::RequestFocus { .. } => "RequestFocus",
+        KernelInteraction::FocusChanged { .. } => "FocusChanged",
+        KernelInteraction::Scroll { .. } => "Scroll",
+        KernelInteraction::Gesture { .. } => "Gesture",
+        KernelInteraction::TextInput { .. } => "TextInput",
+        KernelInteraction::Keyboard { .. } => "Keyboard",
+        KernelInteraction::OpenModal { .. } => "OpenModal",
+        KernelInteraction::CloseModal { .. } => "CloseModal",
+        KernelInteraction::OutsidePress { .. } => "OutsidePress",
+        KernelInteraction::ShortcutActivated { .. } => "ShortcutActivated",
+        KernelInteraction::SaveFocus => "SaveFocus",
+        KernelInteraction::RestoreFocus => "RestoreFocus",
     }
 }

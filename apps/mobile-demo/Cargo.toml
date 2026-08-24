@@ -22,8 +22,6 @@ tela-mobile-ui-kit = { path = "../../crates/ui/mobile-kit" }
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
 tela-render-raster = { path = "../../crates/presentation/renderers/raster" }
 tela-text-resources = { path = "../../crates/presentation/resources/text" }
-# 仅用于 catalog 回归矩阵；Browse 的运行时动作链不依赖 Headless。
-tela-ui-headless = { path = "../../crates/ui/headless" }
 
 [lints.rust]
 unsafe_code = "deny"

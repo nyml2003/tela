@@ -61,7 +61,7 @@ impl RuntimeInner {
 
 /// 单线程 Application 的显式观察运行时。
 ///
-/// 所有订阅使用已经解析的 [`SemanticKey`]。`ComponentPath` 只属于 Headless Root/Part
+/// 所有订阅使用已经解析的 [`SemanticKey`]。组件实例路径只属于 Composition
 /// 语义，不再作为 Signal 观察主键。
 pub struct ComponentRuntime {
     inner: Rc<RuntimeInner>,

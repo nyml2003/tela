@@ -1,7 +1,7 @@
 //! Mobile 搜索、列表、导航与触控操作的无资源组合组件。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy,
+    BorderRadius, Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy,
     LayoutConcern, SemanticKey, Size, TextInputKind, TextInputSpec, UiNode, UpdateMode,
     VisualConcern,
 };
@@ -45,32 +45,12 @@ pub struct MobileSearchField {
     focused: MobileSurfaceStyle,
     is_focused: bool,
     semantic_key: SemanticKey,
-    bind_id: Option<BindId>,
+    value: String,
 }
 
 impl MobileSearchField {
     /// 创建一个带默认 48 点触控高度的搜索字段。
-    pub fn new(content: UiNode, bind_id: impl Into<String>) -> Self {
-        let bind_id = BindId(bind_id.into());
-        Self {
-            content,
-            width: 1.0,
-            height: 52.0,
-            padding: Insets::all(12.0),
-            normal: MobileSurfaceStyle::solid(Color::WHITE),
-            focused: MobileSurfaceStyle::solid(Color::WHITE),
-            is_focused: false,
-            semantic_key: SemanticKey(bind_id.0.clone()),
-            bind_id: Some(bind_id),
-        }
-    }
-
-    /// 创建不声明 `BindId` 的受控搜索字段。
-    ///
-    /// 视觉与 Kernel 文本交互语义保持不变，但值生命周期由外层 Composition DSL 的
-    /// `on_input` / `on_submit` / `on_cancel` ActionTarget 接管。调用方提供的 key 是节点
-    /// 身份，不会成为 Headless `ValueChange` 的 bind id。
-    pub fn unbound(content: UiNode, semantic_key: impl Into<String>) -> Self {
+    pub fn new(content: UiNode, semantic_key: impl Into<String>) -> Self {
         Self {
             content,
             width: 1.0,
@@ -80,8 +60,14 @@ impl MobileSearchField {
             focused: MobileSurfaceStyle::solid(Color::WHITE),
             is_focused: false,
             semantic_key: SemanticKey(semantic_key.into()),
-            bind_id: None,
+            value: String::new(),
         }
+    }
+
+    /// 设置本帧受控文本值。
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = value.into();
+        self
     }
 
     /// 设置字段宽度。
@@ -141,8 +127,7 @@ impl MobileSearchField {
         field.interact = Some(InteractConcern {
             clickable: true,
             focusable: true,
-            input: Some(TextInputSpec::new(TextInputKind::Search)),
-            bind_id: self.bind_id,
+            input: Some(TextInputSpec::new(TextInputKind::Search).value(self.value)),
             ..InteractConcern::default()
         });
         field
@@ -465,7 +450,7 @@ mod tests {
                 .is_some_and(|interact| interact.clickable && interact.focusable)
         );
 
-        let search = MobileSearchField::unbound(content(), "mobile.search").into_node();
+        let search = MobileSearchField::new(content(), "mobile.search").into_node();
         assert_eq!(
             search
                 .identity
@@ -478,7 +463,7 @@ mod tests {
             search
                 .interact
                 .as_ref()
-                .is_some_and(|interact| interact.input.is_some() && interact.bind_id.is_none())
+                .is_some_and(|interact| interact.input.is_some())
         );
     }
 
@@ -491,15 +476,18 @@ mod tests {
             border_radius: tela_contract::BorderRadius::all(8.0),
         };
         let search = MobileSearchField::new(content(), "mobile.search")
+            .value("架构")
             .width(320.0)
             .surfaces(surface, surface)
             .focused(true)
             .into_node();
-        assert!(
+        assert_eq!(
             search
                 .interact
                 .as_ref()
-                .is_some_and(|interact| interact.input.is_some())
+                .and_then(|interact| interact.input.as_ref())
+                .map(|input| input.value.as_str()),
+            Some("架构")
         );
 
         let row = MobileListRow::new(content(), "mobile.entry.1")

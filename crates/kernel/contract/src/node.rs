@@ -218,10 +218,10 @@ pub struct FocusScopeSpec {
     pub focus_graph: FocusGraph,
 }
 
-/// `ShortcutScope` 配置：只声明应用键位表作用域。
+/// `ShortcutScope` 配置：声明应用键位表的逻辑作用域。
 ///
-/// 名称为兼容既有树结构而保留；静态 `KeyCombo -> ShortcutId` 映射已经迁移到应用层
-/// `KeymapSnapshot`，不得再存入 `UiNode`。
+/// 它只标记当前逻辑子树应查询哪个 `KeymapSnapshot` scope；静态
+/// `KeyCombo -> ShortcutId` 映射属于应用层，不存入 `UiNode`。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShortcutScopeSpec {
     /// 稳定的键位表作用域标识。
@@ -529,14 +529,14 @@ pub struct InteractConcern {
     ///
     /// `None` 表示该节点不是文本输入；输入类型不能再退化为一个无法指导 Host 的 bool。
     pub input: Option<crate::TextInputSpec>,
+    /// 节点选择接管的语义键盘意图；其余意图仍执行 Kernel 默认行为。
+    pub keyboard: Option<crate::KeyboardInputSpec>,
     /// 按下后是否请求 Kernel 将该 `PointerId` 捕获到本节点，直到 Up/Cancel/卸载。
     pub pointer_capture: bool,
     /// 节点申请的通用手势能力；默认不参与手势仲裁。
     pub gestures: crate::GestureConfig,
     /// 模态节点：模态栈拦截下层输入。
     pub modal: bool,
-    /// 业务绑定标识：唯一业务变更通道（见 012-业务数据绑定）。
-    pub bind_id: Option<crate::BindId>,
 }
 
 /// `ContentConcern` 槽位：文本/纹理/几何（见 003-1.1、007-1）。

@@ -1,16 +1,15 @@
-//! Kernel `UiAction` 到 Application Action 的帧级映射。
+//! Kernel `KernelInteraction` 到 Application Action 的帧级映射。
 
 use std::collections::BTreeMap;
 
-use tela_contract::{NodeId, SemanticKey, TextInputEvent, UiAction};
+use tela_contract::{KernelInteraction, NodeId, SemanticKey, TextInputEvent};
 use tela_core::UiTree;
 
 use crate::{ViewSite, view::NodeAnchor};
 
 /// DSL 原生动作表识别的稳定触发类别。
 ///
-/// 它故意不复用 Headless 的 `ActionTrigger`：前者只描述 DSL 属性的类型化表面，后者
-/// 描述 Headless Root/Part 契约。
+/// 它只描述 DSL 属性的类型化表面，不承担 Kernel 输入分类或应用业务命令语义。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DslTrigger {
     /// `action={A}` 对应的点击触发。
@@ -189,21 +188,21 @@ impl<A: 'static> ActionFrame<A> {
         self.generation
     }
 
-    fn dispatch(&self, action: &UiAction) -> Option<A>
+    fn dispatch(&self, action: &KernelInteraction) -> Option<A>
     where
         A: Clone,
     {
         let (node_id, trigger, payload) = match action {
-            UiAction::Click { node_id } => (*node_id, DslTrigger::Click, None),
-            UiAction::TextInput {
+            KernelInteraction::Activate { node_id } => (*node_id, DslTrigger::Click, None),
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Edit { value, .. },
             } => (*node_id, DslTrigger::TextEdit, Some(value.clone())),
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Commit { value, .. },
             } => (*node_id, DslTrigger::TextCommit, Some(value.clone())),
-            UiAction::TextInput {
+            KernelInteraction::TextInput {
                 node_id,
                 event: TextInputEvent::Cancel { .. },
             } => (*node_id, DslTrigger::TextCancel, None),
@@ -262,7 +261,7 @@ impl<A: Clone + 'static> ActionRegistry<A> {
     /// 将当前成功帧的 Kernel 动作映射为 Application Action。
     ///
     /// 旧 `ActionFrame` 或与当前 generation 不匹配的帧会被安全丢弃。
-    pub fn dispatch(&self, frame: &ActionFrame<A>, action: &UiAction) -> Option<A> {
+    pub fn dispatch(&self, frame: &ActionFrame<A>, action: &KernelInteraction) -> Option<A> {
         (self.active_generation == Some(frame.generation)).then_some(())?;
         frame.dispatch(action)
     }
@@ -278,7 +277,7 @@ impl<A: Clone + 'static> Default for ActionRegistry<A> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use tela_contract::{NodeId, TextInputEvent, TextSelection, UiAction};
+    use tela_contract::{KernelInteraction, NodeId, TextInputEvent, TextSelection};
 
     use super::{ActionBinding, ActionFrame, DslTrigger, TextActionMap, with_context};
 
@@ -317,7 +316,7 @@ mod tests {
         };
 
         assert_eq!(
-            frame.dispatch(&UiAction::TextInput {
+            frame.dispatch(&KernelInteraction::TextInput {
                 node_id: node,
                 event: TextInputEvent::Edit {
                     value: "a".to_owned(),
@@ -328,7 +327,7 @@ mod tests {
             Some(Action::Search("a".to_owned()))
         );
         assert_eq!(
-            frame.dispatch(&UiAction::TextInput {
+            frame.dispatch(&KernelInteraction::TextInput {
                 node_id: node,
                 event: TextInputEvent::Commit {
                     value: "name".to_owned(),
@@ -341,7 +340,7 @@ mod tests {
             })
         );
         assert_eq!(
-            frame.dispatch(&UiAction::TextInput {
+            frame.dispatch(&KernelInteraction::TextInput {
                 node_id: node,
                 event: TextInputEvent::Cancel {
                     selection: TextSelection::default(),

@@ -1,8 +1,8 @@
 //! 通用数值滑块：受控最终值、范围约束与线性/对数刻度。
 
 use tela_contract::{
-    BindId, Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, PixelOffset,
-    SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
+    Color, Fill, IdentityConcern, InteractConcern, KeyStrategy, KeyboardInputSpec, LayoutConcern,
+    PixelOffset, SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::{LayoutContainer, Primitive};
 
@@ -119,7 +119,6 @@ pub struct Slider {
     config: SliderConfig,
     width: f32,
     disabled: bool,
-    bind_id: Option<BindId>,
     semantic_key: Option<SemanticKey>,
     track: Color,
     active: Color,
@@ -136,7 +135,6 @@ impl Slider {
             },
             width: 240.0,
             disabled: false,
-            bind_id: None,
             semantic_key: None,
             track: Color::rgba(0.84, 0.87, 0.92, 1.0),
             active: Color::rgba(0.10, 0.40, 0.85, 1.0),
@@ -153,12 +151,6 @@ impl Slider {
     /// 设置禁用态。
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    /// 设置业务值绑定；它不参与组件身份。
-    pub fn bind_id(mut self, bind_id: impl Into<String>) -> Self {
-        self.bind_id = Some(BindId(bind_id.into()));
         self
     }
 
@@ -270,7 +262,7 @@ impl Slider {
                 clickable: true,
                 hoverable: true,
                 focusable: true,
-                bind_id: self.bind_id,
+                keyboard: Some(KeyboardInputSpec::directional_value()),
                 ..InteractConcern::default()
             });
         }

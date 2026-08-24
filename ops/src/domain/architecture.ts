@@ -42,16 +42,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'serde_json',
     'tela-contract',
     'tela-core',
+    'tela-desktop-ui-dsl',
     'tela-desktop-ui-kit',
     'tela-ui-dsl',
-    'tela-ui-headless',
     'tela-ui-foundation',
   ],
   'tela-desktop-runtime': ['tela-bridge', 'tela-bundle', 'tela-guest-runtime', 'tela-utils'],
   'tela-desktop-ui-kit': [
     'tela-contract',
     'tela-core',
-    'tela-ui-headless',
     'tela-ui-foundation',
   ],
   'tela-desktop-ui-dsl': [
@@ -79,7 +78,6 @@ const ALLOWED_NORMAL: AllowedDeps = {
   'tela-mobile-ui-kit': [
     'tela-contract',
     'tela-core',
-    'tela-ui-headless',
     'tela-ui-foundation',
   ],
   'tela-product-desktop-guest': [
@@ -222,7 +220,6 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'windows',
   ],
   'tela-text-resources': ['ab_glyph', 'tela-contract', 'tela-font-resources'],
-  'tela-ui-headless': ['tela-contract', 'tela-core'],
   'tela-ui-dsl': ['tela-contract', 'tela-core', 'tela-ui-dsl-macros'],
   'tela-ui-dsl-macros': ['proc-macro-crate', 'proc-macro2', 'quote', 'syn'],
   'tela-ui-foundation': ['tela-contract', 'tela-core'],
@@ -239,7 +236,6 @@ const ALLOWED_DEV: AllowedDeps = {
     'tela-icon-resources',
     'tela-render-raster',
     'tela-text-resources',
-    'tela-ui-headless',
   ],
   'tela-render-raster': ['tela-core'],
   'tela-render-wgpu': ['naga', 'pollster'],
@@ -285,7 +281,6 @@ const PRESENTATION_CRATES = new Set([
   ...RENDERER_CRATES,
 ]);
 const UI_CRATES = new Set([
-  'tela-ui-headless',
   'tela-ui-foundation',
   'tela-desktop-ui-kit',
   'tela-mobile-ui-kit',

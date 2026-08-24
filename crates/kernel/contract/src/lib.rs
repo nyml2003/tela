@@ -18,7 +18,7 @@ mod geometry;
 mod icon;
 /// 身份维度：`SemanticKey`/`KeyStrategy`/`UpdateMode`/`IdentityConcern`。
 mod identity;
-/// 交互维度：`UiAction`/`BindId`/键盘与快捷键类型/`HostPorts`。
+/// 交互维度：Kernel 交互事实、键盘与快捷键类型、`HostPorts`。
 mod interaction;
 /// 布局维度：尺寸模型/约束/`LayoutBox`/视口/滚动状态。
 mod layout;
@@ -44,11 +44,11 @@ pub use icon::{
 };
 pub use identity::{IdentityConcern, KeySegment, KeyStrategy, SemanticKey, UpdateMode};
 pub use interaction::{
-    BindId, ClipboardOp, FocusAppearance, FocusDirection, GestureAxis, GestureConfig, GestureEvent,
-    GestureKind, GesturePhase, HostPorts, ImeUpdate, InputEvent, KeyCombo, KeyState,
-    KeyboardIntent, KeyboardIntentEvent, KeymapScopeId, Modifiers, PhysicalKey, PointerButtons,
-    PointerEvent, PointerId, PointerKind, PointerPhase, RawKeyboardEvent, ShortcutId,
-    TextInputEvent, TextInputKind, TextInputSpec, TextSelection, UiAction, Value,
+    ClipboardOp, FocusAppearance, FocusDirection, GestureAxis, GestureConfig, GestureEvent,
+    GestureKind, GesturePhase, HostPorts, ImeUpdate, InputEvent, KernelInteraction, KeyCombo,
+    KeyState, KeyboardInputSpec, KeyboardIntent, KeyboardIntentEvent, KeymapScopeId, Modifiers,
+    PhysicalKey, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase,
+    RawKeyboardEvent, ShortcutId, TextInputEvent, TextInputKind, TextInputSpec, TextSelection,
 };
 pub use layout::{
     BaseSize, Constraints, CrossAlign, GridAlign, GridItemPlacement, GridSpec, GridTrack,

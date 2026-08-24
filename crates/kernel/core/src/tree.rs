@@ -1,6 +1,6 @@
 //! `UiTree`：值语义树的构建入口（构建期校验 + 身份分配）与 `resolve` 纯操作（见 003-场景树与节点模型）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tela_contract::{
     FocusAppearance, InteractConcern, NodeId, ScrollState, SemanticKey, TextMeasurer, UiBuildError,
     UiFrame, UiLayoutError, UiNode, Viewport,
@@ -18,6 +18,21 @@ fn collect_nodes<'a>(node: &'a UiNode, out: &mut Vec<&'a UiNode>) {
     }
 }
 
+fn collect_parent_ids(
+    node: &UiNode,
+    node_ids: &[NodeId],
+    cursor: &mut usize,
+    parents: &mut Vec<Option<NodeId>>,
+    parent: Option<NodeId>,
+) {
+    let node_id = node_ids[*cursor];
+    *cursor += 1;
+    parents.push(parent);
+    for child in &node.children {
+        collect_parent_ids(child, node_ids, cursor, parents, Some(node_id));
+    }
+}
+
 /// 校验并构建后的 UI 树，值语义（见 003-场景树与节点模型 1）。
 ///
 /// `UiTree::new` 在布局前完成构建期校验，失败返回结构化错误，不 panic。
@@ -27,6 +42,9 @@ pub struct UiTree {
     pub(crate) keys: Vec<SemanticKey>,
     /// 按深度优先前序遍历序的结构 id（本帧内有效，构建期分配）。
     pub(crate) node_ids: Vec<NodeId>,
+    /// 按深度优先前序遍历序保存的逻辑父级；当前值语义树中 Teleport 的逻辑父级仍是
+    /// 声明位置，视觉提升由 resolve 层单独处理。
+    pub(crate) parent_ids: Vec<Option<NodeId>>,
 }
 
 impl UiTree {
@@ -52,10 +70,14 @@ impl UiTree {
         let result = validate::validate(&root, &mut candidate_allocator)?;
         validate::validate_teleport_references(&root, &result.keys)?;
         *allocator = candidate_allocator;
+        let mut parent_ids = Vec::with_capacity(result.ids.len());
+        let mut cursor = 0;
+        collect_parent_ids(&root, &result.ids, &mut cursor, &mut parent_ids, None);
         Ok(Self {
             root,
             keys: result.keys,
             node_ids: result.ids,
+            parent_ids,
         })
     }
 
@@ -72,6 +94,29 @@ impl UiTree {
     /// 按深度优先前序遍历序的结构 id（本帧有效，见 003-4）。
     pub fn node_ids(&self) -> &[NodeId] {
         &self.node_ids
+    }
+
+    /// 查询当前节点在逻辑树中的直接父级。
+    pub fn logical_parent_node_id(&self, node_id: NodeId) -> Option<NodeId> {
+        self.node_ids
+            .iter()
+            .position(|candidate| *candidate == node_id)
+            .and_then(|index| self.parent_ids.get(index).copied().flatten())
+    }
+
+    /// 返回从根到目标节点的逻辑父链（包含目标节点）。
+    pub fn logical_path(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
+        let mut path = Vec::new();
+        let mut current = Some(node_id);
+        while let Some(id) = current {
+            if !self.node_ids.contains(&id) {
+                return None;
+            }
+            path.push(id);
+            current = self.logical_parent_node_id(id);
+        }
+        path.reverse();
+        Some(path)
     }
 
     /// 按本帧结构 id 查询对应的跨帧稳定语义 key。
@@ -98,6 +143,15 @@ impl UiTree {
         let mut nodes = Vec::with_capacity(self.node_ids.len());
         collect_nodes(&self.root, &mut nodes);
         (nodes, self.node_ids.clone(), self.keys.clone())
+    }
+
+    /// 返回当前帧的逻辑父级索引，供 Composition 预计算事件传播路径。
+    pub fn logical_parent_index(&self) -> BTreeMap<NodeId, Option<NodeId>> {
+        self.node_ids
+            .iter()
+            .copied()
+            .zip(self.parent_ids.iter().copied())
+            .collect()
     }
 
     /// 纯操作：同树同 viewport 必同帧，输出 `UiFrame`（命令 + 命中区域）。

@@ -143,7 +143,6 @@ pub fn render_root(
                         config={speed_slider_config}
                         width={(viewport.width - 72.0).max(280.0)}
                         disabled={!connected}
-                        bind_id={"speed-gear.rate"}
                         key={"speed-gear.rate"}
                         output={slider_outcome}
                     />

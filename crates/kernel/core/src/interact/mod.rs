@@ -1,4 +1,4 @@
-//! 交互系统：输入事件 → 命中测试（含模态拦截）→ 焦点转移 → `UiAction` 出站（见 008-1）。
+//! 交互系统：输入事件 → 命中测试（含模态拦截）→ 焦点转移 → `KernelInteraction` 出站（见 008-1）。
 //!
 //! - 交互层只消费 `interact` 维度；
 //! - 焦点转移为规约式纯函数（见 focus.rs），焦点状态存视图状态仓库（跨帧经 key）；
@@ -9,8 +9,8 @@ pub(crate) mod focus;
 
 use tela_contract::{
     FocusDirection, GestureAxis, GestureEvent, GestureKind, GesturePhase, InputEvent,
-    KeyboardIntent, KeyboardIntentEvent, NodeId, NodeKind, Point, PointerEvent, PointerId,
-    PointerKind, PointerPhase, SemanticKey, TextInputEvent, UiAction, UiFrame, UiNode, Value,
+    KernelInteraction, KeyboardIntent, KeyboardIntentEvent, NodeId, NodeKind, Point, PointerEvent,
+    PointerId, PointerKind, PointerPhase, SemanticKey, TextInputEvent, UiFrame, UiNode,
 };
 
 use crate::state::{ActiveGesture, FocusSlot, GestureCandidate, PointerSession, ViewStateStore};
@@ -23,12 +23,12 @@ use focus::{
 /// 交互会话：处理一个输入事件，产出类型化动作（见 008-4）。
 ///
 /// `frame` 为本帧 `resolve` 输出（命中区域）；`state` 为跨帧视图状态仓库。
-pub fn handle_input(
+pub fn handle_kernel_input(
     tree: &UiTree,
     frame: &UiFrame,
     state: &mut ViewStateStore,
     event: &InputEvent,
-) -> Vec<UiAction> {
+) -> Vec<KernelInteraction> {
     let mut session = Session::new(tree, frame, state);
     let actions = match event {
         InputEvent::Pointer(pointer) => session.handle_pointer(*pointer),
@@ -64,7 +64,7 @@ pub fn save_focus(state: &mut ViewStateStore) {
 }
 
 /// 显式恢复上次保存的焦点（无自动隐式恢复；返回恢复动作）。
-pub fn restore_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction> {
+pub fn restore_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<KernelInteraction> {
     let Some(saved) = state.saved_focus().cloned() else {
         return Vec::new();
     };
@@ -83,7 +83,7 @@ pub fn restore_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction>
             node_id: Some(node_id),
             key: Some(saved),
         });
-        return vec![UiAction::FocusChanged {
+        return vec![KernelInteraction::FocusChanged {
             from: None,
             to: Some(node_id),
         }];
@@ -97,7 +97,7 @@ pub fn restore_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction>
 /// 模态打开后，常规页面不需要为首个控件手写焦点 key。若当前焦点不在栈顶模态内，
 /// core 按既有焦点树序选择模态子树中的首个可聚焦节点；没有可聚焦节点时保持原状。
 /// 这只改变 `ViewStateStore`，由下一次 resolve 投影可见焦点环。
-pub fn ensure_modal_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAction> {
+pub fn ensure_modal_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<KernelInteraction> {
     let Some(modal_key) = state.modal_stack().last().cloned() else {
         return Vec::new();
     };
@@ -135,7 +135,7 @@ pub fn ensure_modal_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAc
     };
     state.set_current_focus(slot.clone());
     state.set_focus(key, slot);
-    vec![UiAction::FocusChanged {
+    vec![KernelInteraction::FocusChanged {
         from,
         to: Some(target),
     }]
@@ -145,7 +145,7 @@ pub fn ensure_modal_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<UiAc
 struct Session<'a> {
     frame: &'a UiFrame,
     state: &'a mut ViewStateStore,
-    actions: Vec<UiAction>,
+    actions: Vec<KernelInteraction>,
     nodes: Vec<&'a UiNode>,
     ids: Vec<NodeId>,
     keys: Vec<SemanticKey>,
@@ -181,7 +181,7 @@ impl<'a> Session<'a> {
 
     // ---------- 文本输入 ----------
 
-    fn handle_text_input(&mut self, event: &TextInputEvent) -> Vec<UiAction> {
+    fn handle_text_input(&mut self, event: &TextInputEvent) -> Vec<KernelInteraction> {
         let Some(node_id) = self.current_focus_id() else {
             return Vec::new();
         };
@@ -196,22 +196,16 @@ impl<'a> Session<'a> {
             return Vec::new();
         }
 
-        self.actions.push(UiAction::TextInput {
+        self.actions.push(KernelInteraction::TextInput {
             node_id,
             event: event.clone(),
         });
-        if let (Some(bind_id), Some(value)) = (interact.bind_id.as_ref(), event.value()) {
-            self.actions.push(UiAction::ValueChange {
-                bind_id: bind_id.clone(),
-                value: Value::String(value.to_owned()),
-            });
-        }
         std::mem::take(&mut self.actions)
     }
 
     // ---------- 指针 ----------
 
-    fn handle_pointer(&mut self, event: PointerEvent) -> Vec<UiAction> {
+    fn handle_pointer(&mut self, event: PointerEvent) -> Vec<KernelInteraction> {
         match event.phase {
             PointerPhase::Down => self.handle_pointer_down(event),
             PointerPhase::Move => self.handle_pointer_move(event),
@@ -257,15 +251,16 @@ impl<'a> Session<'a> {
             },
         );
         if let Some(node_id) = target_id {
-            self.actions.push(UiAction::Pointer { node_id, event });
+            self.actions
+                .push(KernelInteraction::Pointer { node_id, event });
             if focusable {
                 self.request_focus(node_id);
             }
         }
         self.try_begin_pinch(event.pointer_id, event.position);
-        // 命中 portal 外部区域 → 抛 TeleportClickOutside（关闭逻辑由 Headless/Application 决定）。
+        // 命中 portal 外部区域，关闭逻辑由 Composition/Application 决定。
         if let Some(teleport_id) = self.teleport_hit_outside(&hit) {
-            self.actions.push(UiAction::TeleportClickOutside {
+            self.actions.push(KernelInteraction::OutsidePress {
                 teleport_node_id: teleport_id,
             });
         }
@@ -274,7 +269,8 @@ impl<'a> Session<'a> {
     fn handle_pointer_move(&mut self, event: PointerEvent) {
         let session = self.state.pointer(event.pointer_id).cloned();
         if let Some(node_id) = self.pointer_recipient(event.pointer_id, event.position) {
-            self.actions.push(UiAction::Pointer { node_id, event });
+            self.actions
+                .push(KernelInteraction::Pointer { node_id, event });
         }
 
         let captured = self.state.captured_pointer_key(event.pointer_id).is_some();
@@ -322,7 +318,8 @@ impl<'a> Session<'a> {
     fn handle_pointer_end(&mut self, event: PointerEvent, phase: GesturePhase) {
         let session = self.state.pointer(event.pointer_id).cloned();
         if let Some(node_id) = self.pointer_recipient(event.pointer_id, event.position) {
-            self.actions.push(UiAction::Pointer { node_id, event });
+            self.actions
+                .push(KernelInteraction::Pointer { node_id, event });
         }
         let Some(session) = session else {
             return;
@@ -376,7 +373,8 @@ impl<'a> Session<'a> {
                     .and_then(|node| node.interact.as_ref())
                     .is_some_and(|interact| interact.clickable)
             {
-                self.actions.push(UiAction::Click { node_id: hit_id });
+                self.actions
+                    .push(KernelInteraction::Activate { node_id: hit_id });
             }
         }
         self.state.end_pointer(event.pointer_id);
@@ -386,7 +384,7 @@ impl<'a> Session<'a> {
         if let Some((node_id, _node)) = self.hit_test(event.position)
             && let Some(scroll_id) = self.nearest_scroll_target(node_id)
         {
-            self.actions.push(UiAction::Scroll {
+            self.actions.push(KernelInteraction::Scroll {
                 node_id: scroll_id,
                 delta: event.delta,
             });
@@ -740,13 +738,14 @@ impl<'a> Session<'a> {
 
     fn emit_gesture(&mut self, key: &SemanticKey, event: GestureEvent) {
         if let Some(node_id) = self.node_id_for_key(key) {
-            self.actions.push(UiAction::Gesture { node_id, event });
+            self.actions
+                .push(KernelInteraction::Gesture { node_id, event });
         }
     }
 
     fn emit_scroll_from_pan(&mut self, key: &SemanticKey, delta: Point) {
         if let Some(node_id) = self.node_id_for_key(key) {
-            self.actions.push(UiAction::Scroll {
+            self.actions.push(KernelInteraction::Scroll {
                 node_id,
                 delta: Point {
                     x: -delta.x,
@@ -770,13 +769,13 @@ impl<'a> Session<'a> {
             if let Some(old_key) = old_key
                 && let Some(idx) = self.keys.iter().position(|key| *key == old_key)
             {
-                self.actions.push(UiAction::Hover {
+                self.actions.push(KernelInteraction::Hover {
                     node_id: self.ids[idx],
                     entered: false,
                 });
             }
             if let Some(node_id) = new_hover {
-                self.actions.push(UiAction::Hover {
+                self.actions.push(KernelInteraction::Hover {
                     node_id,
                     entered: true,
                 });
@@ -870,7 +869,7 @@ impl<'a> Session<'a> {
 
     // ---------- 键盘 ----------
 
-    fn handle_keyboard_intent(&mut self, event: &KeyboardIntentEvent) -> Vec<UiAction> {
+    fn handle_keyboard_intent(&mut self, event: &KeyboardIntentEvent) -> Vec<KernelInteraction> {
         // 自动重复只允许纯焦点移动。业务激活、取消和 Invoke 必须显式定义连续意图，
         // 不能因键盘长按重复提交或重复关闭。
         if event.repeat
@@ -881,17 +880,34 @@ impl<'a> Session<'a> {
         {
             return std::mem::take(&mut self.actions);
         }
+        if let Some(node_id) = self.current_focus_id()
+            && self
+                .nodes
+                .get(node_id.0 as usize)
+                .and_then(|node| node.interact.as_ref())
+                .and_then(|interact| interact.keyboard)
+                .is_some_and(|spec| spec.accepts(&event.intent))
+        {
+            self.actions.push(KernelInteraction::Keyboard {
+                node_id,
+                event: event.clone(),
+            });
+            return std::mem::take(&mut self.actions);
+        }
         match &event.intent {
             KeyboardIntent::FocusNext => self.handle_nav(NavInput::Tab { reverse: false }),
             KeyboardIntent::FocusPrevious => self.handle_nav(NavInput::Tab { reverse: true }),
             KeyboardIntent::MoveFocus(direction) => {
                 self.handle_nav(NavInput::Direction(direction_from_contract(*direction)));
             }
+            KeyboardIntent::MoveToStart | KeyboardIntent::MoveToEnd => {}
             KeyboardIntent::Activate => self.handle_nav(NavInput::Confirm),
             KeyboardIntent::Cancel => self.handle_nav(NavInput::Cancel),
-            KeyboardIntent::Invoke(shortcut_id) => self.actions.push(UiAction::ShortcutActivated {
-                shortcut_id: shortcut_id.clone(),
-            }),
+            KeyboardIntent::Invoke(shortcut_id) => {
+                self.actions.push(KernelInteraction::ShortcutActivated {
+                    shortcut_id: shortcut_id.clone(),
+                })
+            }
         }
         std::mem::take(&mut self.actions)
     }
@@ -907,7 +923,8 @@ impl<'a> Session<'a> {
             // 取消键属于活动模态域，而不是当前背景焦点。这样打开模态后的第一下 Escape
             // 不会依赖宿主是否已经完成首个焦点投射。
             self.state.pop_modal();
-            self.actions.push(UiAction::CloseModal { node_id: modal });
+            self.actions
+                .push(KernelInteraction::CloseModal { node_id: modal });
             return;
         }
         if let Some(modal) = active_modal
@@ -944,7 +961,8 @@ impl<'a> Session<'a> {
             NavInput::Direction(dir) => self.nav_direction(current, current_scope, dir),
             NavInput::Confirm => {
                 // 确认：触发当前焦点节点的主动作（点击）。
-                self.actions.push(UiAction::Click { node_id: current });
+                self.actions
+                    .push(KernelInteraction::Activate { node_id: current });
                 None
             }
             NavInput::Cancel => {
@@ -1065,7 +1083,8 @@ impl<'a> Session<'a> {
             if inside {
                 // 焦点在模态内：先关模态（回到打开时保存的焦点位置由宿主处理）。
                 self.state.pop_modal();
-                self.actions.push(UiAction::CloseModal { node_id: modal });
+                self.actions
+                    .push(KernelInteraction::CloseModal { node_id: modal });
             }
         }
         // 模态外：回退到最近焦点组出口（简化：焦点不变，宿主可处理）。
@@ -1084,7 +1103,7 @@ impl<'a> Session<'a> {
             self.state.set_current_focus(slot.clone());
             self.state.set_focus(key, slot);
         }
-        self.actions.push(UiAction::FocusChanged {
+        self.actions.push(KernelInteraction::FocusChanged {
             from,
             to: Some(node_id),
         });

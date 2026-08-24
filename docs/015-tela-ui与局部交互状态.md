@@ -1,5 +1,9 @@
 # 015-tela-ui 与局部交互状态
 
+> 历史设计记录：本文描述的 `LocalStateRuntime`、`InstancePath`、`UiIntent` 和 `BindId`
+> 路径已经删除，不得用于新开发。当前组件私有状态、事件和帧事务的唯一开发基准见
+> [036-事件系统与组件生命周期机制](036-事件系统与组件生命周期机制梳理.md)。
+
 > **状态：🔧 前两阶段已实现。** `tela-ui` crate、`Form`/`Table`/`Select`/`Cascader` 迁移、
 > `UiIntent`、`Toolbar`、`LocalStateRuntime` 与 `DraftInput` 已落地；Signal 自动追踪和
 > Scheduler 仍未实现。本文定义这些后续能力的边界。

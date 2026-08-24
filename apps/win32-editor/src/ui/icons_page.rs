@@ -9,7 +9,7 @@ use tela_core::{LayoutContainer, Primitive};
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{Body, ViewBuild, ViewOutput, ViewResult, ViewSite, into_view_child, ui};
 
-use crate::application::{EditorAction, ICON_SEARCH_INPUT_KEY, IconCategory};
+use crate::application::{EditorAction, IconCategory};
 
 use super::nav_button::NavButton;
 use super::theme::{
@@ -95,9 +95,9 @@ pub fn render_icons_page(
                     border_width={1.0}
                     border_color={BAR_BORDER}
                     border_radius={4.0}
-                    input={TextInputSpec::new(TextInputKind::Text)}
-                    bind_id={ICON_SEARCH_INPUT_KEY}
+                    input={TextInputSpec::new(TextInputKind::Text).value(query.clone())}
                     clickable={true}
+                    focusable={true}
                 >
                     <Text value={query.clone()} font_size={13.0} color={TEXT} />
                 </Frame>

@@ -75,29 +75,6 @@ test('UI Capability 不可直接认识具体资源或 renderer', () => {
   assert.ok(violations.some((violation) => /tela-icon-resources/.test(violation.message)));
 });
 
-test('Headless 是 UI Capability 的独立语义层，不能越过 Kernel 认识视觉实现', () => {
-  const allowed = checkArchitecture([
-    ...zeroDependencies(),
-    crate('tela-ui-headless', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-    ]),
-  ]);
-  assert.deepEqual(allowed, []);
-
-  const violations = checkArchitecture([
-    ...zeroDependencies(),
-    crate('tela-ui-headless', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
-      ['tela-render-raster', 'normal'],
-      ['tela-ui-foundation', 'normal'],
-    ]),
-  ]);
-  assert.ok(violations.some((violation) => /tela-render-raster/.test(violation.message)));
-  assert.ok(violations.some((violation) => /tela-ui-foundation/.test(violation.message)));
-});
-
 test('Composition runtime 只依赖 Kernel 与自己的 macro helper', () => {
   const allowed = checkArchitecture([
     ...zeroDependencies(),
@@ -121,7 +98,6 @@ test('Composition runtime 只依赖 Kernel 与自己的 macro helper', () => {
     crate('tela-ui-dsl', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
-      ['tela-ui-headless', 'normal'],
       ['tela-target-ios', 'normal'],
     ]),
   ]);
@@ -274,9 +250,9 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['serde_json', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
+      ['tela-desktop-ui-dsl', 'normal'],
       ['tela-desktop-ui-kit', 'normal'],
       ['tela-ui-dsl', 'normal'],
-      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
       ['tela-icon-resources', 'dev'],
       ['tela-render-raster', 'dev'],
@@ -291,7 +267,6 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
     crate('tela-desktop-ui-kit', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
-      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
     ]),
     crate('tela-guest-runtime', [
@@ -314,12 +289,10 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['tela-icon-resources', 'dev'],
       ['tela-render-raster', 'dev'],
       ['tela-text-resources', 'dev'],
-      ['tela-ui-headless', 'dev'],
     ]),
     crate('tela-mobile-ui-kit', [
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
-      ['tela-ui-headless', 'normal'],
       ['tela-ui-foundation', 'normal'],
     ]),
     crate('tela-product-desktop-guest', [
@@ -420,10 +393,6 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['ab_glyph', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-font-resources', 'normal'],
-    ]),
-    crate('tela-ui-headless', [
-      ['tela-contract', 'normal'],
-      ['tela-core', 'normal'],
     ]),
     crate('tela-ui-foundation', [
       ['tela-contract', 'normal'],

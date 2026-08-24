@@ -4,9 +4,10 @@
 //! [`DslComponent`]，标签可见性由 Rust `use` 决定，宏只做属性搬运工。
 
 use tela_contract::{
-    BindId, BorderRadius, Color, ContentConcern, CrossAlign, Fill, Insets, InteractConcern,
-    LayoutConcern, NodeKind, Overflow, Size, TextContent, TextInputSpec, TextStyleRef, UiNode,
-    VisualConcern,
+    BorderRadius, Color, ContentConcern, CrossAlign, Fill, Insets, InteractConcern,
+    KeyboardInputSpec, KeymapScopeId, LayoutConcern, NodeKind, Overflow, OverlaySpec, PixelOffset,
+    ShortcutScopeSpec, Size, StackAlign, TextContent, TextInputSpec, TextStyleRef, UiNode,
+    UpdateMode, VisualConcern,
 };
 
 use crate::{
@@ -123,6 +124,9 @@ macro_rules! apply_primitive_fields {
         if let Some(value) = $props.border_radius {
             __visual.border_radius = BorderRadius::all(value);
         }
+        if let Some(value) = $props.border_radii {
+            __visual.border_radius = value;
+        }
         if __visual != VisualConcern::default() {
             $node.visual = Some(__visual);
         }
@@ -139,11 +143,17 @@ macro_rules! apply_primitive_fields {
         if let Some(value) = $props.input {
             __interact.input = Some(value);
         }
-        if let Some(value) = $props.bind_id {
-            __interact.bind_id = Some(BindId(value));
+        if let Some(value) = $props.keyboard {
+            __interact.keyboard = Some(value);
         }
         if __interact != InteractConcern::default() {
             $node.interact = Some(__interact);
+        }
+        if let Some(value) = $props.update_mode {
+            $node
+                .identity
+                .get_or_insert_with(Default::default)
+                .update_mode = value;
         }
     }};
 }
@@ -188,11 +198,13 @@ macro_rules! primitive_component {
             pub fill: Option<Fill>,
             pub border_color: Option<Color>,
             pub border_radius: Option<f32>,
+            pub border_radii: Option<BorderRadius>,
+            pub update_mode: Option<UpdateMode>,
             pub clickable: Option<bool>,
             pub hoverable: Option<bool>,
             pub focusable: Option<bool>,
             pub input: Option<TextInputSpec>,
-            pub bind_id: Option<String>,
+            pub keyboard: Option<KeyboardInputSpec>,
         }
 
         impl DslComponent for $name {
@@ -237,6 +249,86 @@ primitive_component!(View, NodeKind::View, false);
 primitive_component!(Stack, NodeKind::Stack, false);
 primitive_component!(ScrollView, NodeKind::ScrollView, false);
 
+/// `<Overlay>` 的 Stack 锚定参数。
+#[derive(Clone, Debug, Default, PartialEq)]
+#[allow(missing_docs)]
+pub struct Overlay {
+    pub align: Option<StackAlign>,
+    pub offset: Option<PixelOffset>,
+    pub fill_width: Option<bool>,
+    pub fill_height: Option<bool>,
+    pub modal: Option<bool>,
+}
+
+impl DslComponent for Overlay {
+    type Props = Overlay;
+    type State = ();
+    type Event = ();
+    type Output = ();
+
+    fn render<'a, A>(
+        context: &mut ComponentRenderContext<'_, A>,
+        props: Self::Props,
+        _state: &Self::State,
+        children: Children<'a, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let site = context.site();
+        let build = context.build();
+        let children = children.build(build)?;
+        if children.child_count() != 1 {
+            return Err(ViewBuildError::ExpectedSingleRoot {
+                actual: children.child_count(),
+                site,
+            });
+        }
+        let mut node = UiNode::new(NodeKind::Overlay(OverlaySpec {
+            align: props.align.unwrap_or_default(),
+            offset: props.offset.unwrap_or_default(),
+            fill_width: props.fill_width.unwrap_or(false),
+            fill_height: props.fill_height.unwrap_or(false),
+        }));
+        if props.modal.unwrap_or(false) {
+            node.interact = Some(InteractConcern {
+                modal: true,
+                ..InteractConcern::default()
+            });
+        }
+        let node = build.container(node, children)?;
+        finish_node(build, node, site)
+    }
+}
+
+/// `<ShortcutScope>` 的局部键位表作用域参数。
+#[derive(Clone, Debug, Default, PartialEq)]
+#[allow(missing_docs)]
+pub struct ShortcutScope {
+    pub id: Option<KeymapScopeId>,
+}
+
+impl DslComponent for ShortcutScope {
+    type Props = ShortcutScope;
+    type State = ();
+    type Event = ();
+    type Output = ();
+
+    fn render<'a, A>(
+        context: &mut ComponentRenderContext<'_, A>,
+        props: Self::Props,
+        _state: &Self::State,
+        children: Children<'a, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let site = context.site();
+        let build = context.build();
+        let children = children.build(build)?;
+        let id = props
+            .id
+            .ok_or(ViewBuildError::MissingRequiredProp { name: "id", site })?;
+        let node = UiNode::new(NodeKind::ShortcutScope(ShortcutScopeSpec { id }));
+        let node = build.container(node, children)?;
+        finish_node(build, node, site)
+    }
+}
+
 macro_rules! text_component {
     ($name:ident, $icon:expr) => {
         /// 文本原语组件（见 033）。
@@ -257,11 +349,13 @@ macro_rules! text_component {
             pub fill: Option<Fill>,
             pub border_color: Option<Color>,
             pub border_radius: Option<f32>,
+            pub border_radii: Option<BorderRadius>,
+            pub update_mode: Option<UpdateMode>,
             pub clickable: Option<bool>,
             pub hoverable: Option<bool>,
             pub focusable: Option<bool>,
             pub input: Option<TextInputSpec>,
-            pub bind_id: Option<String>,
+            pub keyboard: Option<KeyboardInputSpec>,
             pub value: Option<String>,
             pub font: Option<TextStyleRef>,
             pub font_size: Option<f32>,
@@ -331,11 +425,13 @@ pub struct Image {
     pub fill: Option<Fill>,
     pub border_color: Option<Color>,
     pub border_radius: Option<f32>,
+    pub border_radii: Option<BorderRadius>,
+    pub update_mode: Option<UpdateMode>,
     pub clickable: Option<bool>,
     pub hoverable: Option<bool>,
     pub focusable: Option<bool>,
     pub input: Option<TextInputSpec>,
-    pub bind_id: Option<String>,
+    pub keyboard: Option<KeyboardInputSpec>,
     pub texture: Option<String>,
 }
 
@@ -372,5 +468,8 @@ impl DslComponent for Image {
 
 /// DSL 组件 prelude：一次性引入全部内建原语组件与契约。
 pub mod prelude {
-    pub use super::{Column, DslComponent, Frame, Icon, Image, Row, ScrollView, Stack, Text, View};
+    pub use super::{
+        Column, DslComponent, Frame, Icon, Image, Overlay, Row, ScrollView, ShortcutScope, Stack,
+        Text, View,
+    };
 }

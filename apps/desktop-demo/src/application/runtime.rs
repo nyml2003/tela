@@ -4,28 +4,18 @@ mod input;
 
 use std::collections::{BTreeSet, HashMap};
 
-use tela_contract::{
-    BindId, Color, FocusAppearance, InputEvent, NodeId, NodeKind, PointerEvent, RawKeyboardEvent,
-    ScrollState, SemanticKey, ShortcutId, UiAction, UiFrame, UiNode, UiResources, Value, Viewport,
-};
-use tela_core::{
-    DefaultApplicationProfile, IdentityAllocator, UiTree, ViewStateStore, restore_focus, save_focus,
-};
-use tela_desktop_ui_kit::LocalStateRuntime;
-use tela_ui_dsl::{ComponentRuntime, Signal};
-use tela_ui_headless::{
-    ActionTrigger, ComponentPartPath, ComponentPartRole, EventFrame, EventRegistry, HeadlessEvent,
-    RoutedEvent, components,
-};
-
 use super::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
-use super::{Intent, apply_intent, intent_from_component_part};
+use super::{Intent, apply_intent};
 use crate::domain::{FileManagerModel, FileManagerSession};
 use crate::presentation::operation::OPERATION_MODAL_KEY;
-use crate::presentation::{
-    component::Component,
-    shell::{AppShell, AppShellProps},
+use crate::presentation::shell::{AppShell, AppShellProps};
+use tela_contract::{
+    Color, FocusAppearance, InputEvent, KernelInteraction, NodeId, NodeKind, PointerEvent,
+    RawKeyboardEvent, ScrollState, SemanticKey, ShortcutId, UiFrame, UiNode, UiResources, Viewport,
 };
+use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore, restore_focus, save_focus};
+use tela_desktop_ui_dsl::{DraftInputCommit, DraftInputProps, DraftInputView};
+use tela_ui_dsl::{FrameCoordinator, PreparedFrame, ViewSite};
 
 /// 初次加载默认逻辑尺寸；浏览器启动后由宿主覆盖为实际 CSS 视口。
 pub const DEFAULT_VIEWPORT: Viewport = Viewport {
@@ -39,16 +29,132 @@ const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
     inset: 2.0,
 };
 
+fn commit_search(commit: DraftInputCommit) -> Option<Intent> {
+    Some(Intent::SetQuery(commit.value))
+}
+
+fn commit_operation(commit: DraftInputCommit) -> Option<Intent> {
+    Some(Intent::SetOperationValue(commit.value))
+}
+
+fn desktop_action_bindings(
+    model: &FileManagerModel,
+    session: &FileManagerSession,
+) -> Vec<(SemanticKey, Intent)> {
+    let mut bindings = vec![
+        (
+            SemanticKey("navigation.toggle".to_owned()),
+            Intent::ToggleNavigation,
+        ),
+        (
+            SemanticKey("command.new-folder".to_owned()),
+            Intent::BeginOperation(crate::domain::OperationKind::NewFolder),
+        ),
+        (
+            SemanticKey("command.rename".to_owned()),
+            Intent::BeginOperation(crate::domain::OperationKind::Rename),
+        ),
+        (
+            SemanticKey("command.copy".to_owned()),
+            Intent::Command(crate::domain::FileCommand::CopySelected),
+        ),
+        (
+            SemanticKey("command.move-design".to_owned()),
+            Intent::BeginOperation(crate::domain::OperationKind::MoveToDesign),
+        ),
+        (
+            SemanticKey("command.trash".to_owned()),
+            Intent::BeginOperation(crate::domain::OperationKind::Trash),
+        ),
+        (
+            SemanticKey("command.restore".to_owned()),
+            Intent::Command(crate::domain::FileCommand::RestoreSelected),
+        ),
+        (
+            SemanticKey("command.favorite".to_owned()),
+            Intent::Command(crate::domain::FileCommand::ToggleFavorite),
+        ),
+        (
+            SemanticKey("command.toggle-view".to_owned()),
+            Intent::Command(crate::domain::FileCommand::ToggleView),
+        ),
+        (
+            SemanticKey("command.toggle-sort".to_owned()),
+            Intent::Command(crate::domain::FileCommand::ToggleSort),
+        ),
+        (
+            SemanticKey("command.toggle-filter".to_owned()),
+            Intent::Command(crate::domain::FileCommand::ToggleFilter),
+        ),
+        (
+            SemanticKey("command.add-tag".to_owned()),
+            Intent::BeginOperation(crate::domain::OperationKind::AddTag),
+        ),
+        (
+            SemanticKey("command.undo".to_owned()),
+            Intent::Command(crate::domain::FileCommand::Undo),
+        ),
+        (
+            SemanticKey("filter.all".to_owned()),
+            Intent::SetFilter(crate::domain::EntryFilter::All),
+        ),
+        (
+            SemanticKey("filter.favorites".to_owned()),
+            Intent::SetFilter(crate::domain::EntryFilter::Favorites),
+        ),
+        (
+            SemanticKey("filter.tagged".to_owned()),
+            Intent::SetFilter(crate::domain::EntryFilter::Tagged),
+        ),
+        (
+            SemanticKey("filter.trash".to_owned()),
+            Intent::SetFilter(crate::domain::EntryFilter::Trash),
+        ),
+        (
+            SemanticKey("operation.confirm".to_owned()),
+            Intent::ConfirmOperation,
+        ),
+        (
+            SemanticKey("operation.cancel".to_owned()),
+            Intent::CancelOperation,
+        ),
+    ];
+    bindings.extend(model.folders().into_iter().map(|entry| {
+        (
+            SemanticKey(format!("folder.open.{}", entry.id)),
+            Intent::OpenFolder(entry.id),
+        )
+    }));
+    bindings.extend(model.entries().map(|entry| {
+        (
+            SemanticKey(format!("entry-{}", entry.id)),
+            Intent::Select(entry.id),
+        )
+    }));
+    if session.selected.is_empty() {
+        bindings.retain(|(key, _)| {
+            !matches!(
+                key.0.as_str(),
+                "command.rename"
+                    | "command.copy"
+                    | "command.move-design"
+                    | "command.favorite"
+                    | "command.add-tag"
+                    | "command.trash"
+                    | "command.restore"
+            )
+        });
+    }
+    bindings
+}
+
 /// 跨帧会话。业务数据、临时 view state 与 renderer 缓存各自隔离。
 pub struct App {
     resources: &'static dyn UiResources,
     pub(crate) model: FileManagerModel,
     pub(crate) session: FileManagerSession,
     viewport: Viewport,
-    frame: Option<UiFrame>,
-    tree: Option<UiTree>,
     profile: DefaultApplicationProfile,
-    identity_allocator: IdentityAllocator,
     view_state: ViewStateStore,
     nav_scroll_key: Option<SemanticKey>,
     detail_scroll_key: Option<SemanticKey>,
@@ -58,14 +164,13 @@ pub struct App {
     #[cfg(test)]
     frame_trace: Vec<u8>,
     /// 由 `runtime::input` 管理的隐藏 DOM 编辑器字段，不是 tela key 或业务状态。
-    dom_input_target: Option<BindId>,
+    dom_input_target: Option<SemanticKey>,
+    dom_input_value: String,
+    dom_input_composing: bool,
     /// 弹窗关闭后的显式焦点恢复延迟到新树建好后执行，避免把旧帧 node id 带回页面。
     restore_focus_pending: bool,
-    revision: Signal<u64>,
-    component_runtime: ComponentRuntime,
-    local_state: LocalStateRuntime,
-    event_registry: EventRegistry,
-    event_frame: Option<EventFrame>,
+    frames: FrameCoordinator<Intent>,
+    projection_invalidated: bool,
 }
 
 impl App {
@@ -73,18 +178,12 @@ impl App {
     ///
     /// Application 只请求文本度量和语义图标，不链接字体、Material glyph 或 renderer。
     pub fn new(resources: &'static dyn UiResources) -> Self {
-        let revision = Signal::new(0);
-        let mut component_runtime = ComponentRuntime::new();
-        component_runtime.watch(SemanticKey("app.shell".to_owned()), &revision);
         Self {
             resources,
             model: FileManagerModel::sample(),
             session: FileManagerSession::default(),
             viewport: DEFAULT_VIEWPORT,
-            frame: None,
-            tree: None,
             profile: DefaultApplicationProfile::new(),
-            identity_allocator: IdentityAllocator::new(),
             view_state: ViewStateStore::new(),
             nav_scroll_key: None,
             detail_scroll_key: None,
@@ -94,12 +193,11 @@ impl App {
             #[cfg(test)]
             frame_trace: Vec::new(),
             dom_input_target: None,
+            dom_input_value: String::new(),
+            dom_input_composing: false,
             restore_focus_pending: false,
-            revision,
-            component_runtime,
-            local_state: LocalStateRuntime::new(),
-            event_registry: EventRegistry::new(),
-            event_frame: None,
+            frames: FrameCoordinator::new(),
+            projection_invalidated: true,
         }
     }
 
@@ -116,116 +214,216 @@ impl App {
         true
     }
 
-    pub fn ensure_frame(&mut self) -> bool {
-        // Host 开始消费这次逻辑帧，允许接下来的 Signal 写入重新请求一次唤醒。
-        // 当前 desktop guest 采用轮询，但必须遵守同一协议，避免未来安装
-        // FrameInvalidator 后把第二次变更永久折叠在已确认的旧请求里。
-        self.component_runtime.begin_frame();
-        if !self.component_runtime.take_dirty().is_empty() {
-            self.invalidate_frame();
+    fn prepare_composition_frame(
+        &self,
+        props: &AppShellProps<'_>,
+        present_keys: Option<&BTreeSet<SemanticKey>>,
+    ) -> Result<PreparedFrame<Intent>, String> {
+        let site = ViewSite::new(file!(), line!(), column!());
+        let mut build = self.frames.begin_build();
+        let horizontal_inset =
+            crate::presentation::shared::APP_INSET.min((props.viewport.width - 1.0).max(0.0) * 0.5);
+        let shell_width = (props.viewport.width - horizontal_inset * 2.0).max(1.0);
+        let search_input = DraftInputView::render_for(
+            &mut build,
+            DraftInputProps {
+                value: Some(self.session.query.clone()),
+                placeholder: Some("搜索文件和目录".to_owned()),
+                focused: Some(props.search_focused),
+                width: Some((shell_width * 0.32).clamp(180.0, 420.0)),
+                height: Some(28.0),
+                border_radius: Some(crate::presentation::shared::CONTROL_RADIUS),
+                key: Some("file.search".to_owned()),
+                ..DraftInputProps::default()
+            },
+            commit_search,
+            site,
+        )
+        .map_err(|error| error.to_string())?;
+        let operation_input = self
+            .session
+            .operation
+            .as_ref()
+            .and_then(|operation| {
+                self.operation_accepts_input().then(|| {
+                    DraftInputView::render_for(
+                        &mut build,
+                        DraftInputProps {
+                            value: Some(operation.value.clone()),
+                            placeholder: Some("输入名称".to_owned()),
+                            focused: Some(props.operation_focused),
+                            width: Some(300.0),
+                            height: Some(32.0),
+                            border_radius: Some(crate::presentation::shared::CONTROL_RADIUS),
+                            key: Some("operation.value".to_owned()),
+                            ..DraftInputProps::default()
+                        },
+                        commit_operation,
+                        site,
+                    )
+                    .map_err(|error| error.to_string())
+                })
+            })
+            .transpose()?;
+        let mut output = AppShell::render_view(&mut build, props, search_input, operation_input)
+            .map_err(|error| error.to_string())?;
+        if let Some(present_keys) = present_keys {
+            for (key, intent) in desktop_action_bindings(&self.model, &self.session) {
+                if present_keys.contains(&key) {
+                    output = output.attach_action_at(key, intent, site);
+                }
+            }
         }
-        if self.frame.is_some() {
+        self.frames
+            .prepare(output)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn ensure_frame(&mut self) -> bool {
+        if self.frames.active().is_some() && !self.projection_invalidated {
             return false;
         }
+        let mut candidate_state = self.view_state.clone();
+        let mut candidate_restore_focus_pending = self.restore_focus_pending;
+        let mut candidate_hovered_action_key = self.hovered_toolbar_action_key.clone();
         let modal_key = SemanticKey(OPERATION_MODAL_KEY.to_owned());
-        if self.session.operation.is_some() && !self.view_state.modal_stack().contains(&modal_key) {
-            save_focus(&mut self.view_state);
-            self.view_state.push_modal(modal_key.clone());
+        if self.session.operation.is_some() && !candidate_state.modal_stack().contains(&modal_key) {
+            save_focus(&mut candidate_state);
+            candidate_state.push_modal(modal_key.clone());
         }
         if self.session.operation.is_none()
-            && self.view_state.modal_stack().last() == Some(&modal_key)
+            && candidate_state.modal_stack().last() == Some(&modal_key)
         {
-            self.view_state.pop_modal();
-            self.restore_focus_pending = true;
+            candidate_state.pop_modal();
+            candidate_restore_focus_pending = true;
         }
-        let (search_input, operation_input) = self.begin_input_render();
-        let mut props = AppShellProps {
-            model: &self.model,
-            session: &self.session,
-            viewport: self.viewport,
-            search_focused: false,
-            operation_focused: false,
-            hovered_action_key: self.hovered_toolbar_action_key.clone(),
-            search_input,
-            operation_input,
-            detail_scroll_y: self.detail_scroll_y(),
-            icons: self.resources.icon_provider(),
-        };
-        let mut tree =
-            UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
-                .expect("文件管理器场景必须合法");
-        let scroll_inputs = self.active_scroll_inputs();
-        self.profile.reconcile_tree(&tree, &mut self.view_state);
-        if self.restore_focus_pending {
-            restore_focus(&tree, &mut self.view_state);
-            self.restore_focus_pending = false;
-        }
-        self.profile.ensure_modal_focus(&tree, &mut self.view_state);
-        let mut controls = discover_controls(&tree);
-        let hovered_action_key = self.toolbar_action_key_for_hover_key(&tree);
-        if self.hovered_toolbar_action_key != hovered_action_key {
-            self.hovered_toolbar_action_key = hovered_action_key;
-            props.hovered_action_key = self.hovered_toolbar_action_key.clone();
-            tree =
-                UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
-                    .expect("文件管理器场景必须合法");
-            controls = discover_controls(&tree);
-        }
-        if self.restore_focus_pending {
-            restore_focus(&tree, &mut self.view_state);
-            self.restore_focus_pending = false;
-        }
-        self.profile.reconcile_tree(&tree, &mut self.view_state);
-        let modal_focus_changed = !self
-            .profile
-            .ensure_modal_focus(&tree, &mut self.view_state)
-            .is_empty();
-        let (search_focused, operation_focused) = self.input_focus_projection(&tree);
-        let focus_projection_changed =
-            props.search_focused != search_focused || props.operation_focused != operation_focused;
-        if modal_focus_changed || focus_projection_changed {
+        let mut candidate_search_focused = false;
+        let mut candidate_operation_focused = false;
+        let (resolved, controls) = loop {
+            let mut props = AppShellProps {
+                model: &self.model,
+                session: &self.session,
+                viewport: self.viewport,
+                search_focused: candidate_search_focused,
+                operation_focused: candidate_operation_focused,
+                hovered_action_key: candidate_hovered_action_key.clone(),
+                detail_scroll_y: self.detail_scroll_y_for(&candidate_state),
+                icons: self.resources.icon_provider(),
+            };
+            let provisional = self
+                .prepare_composition_frame(&props, None)
+                .expect("desktop provisional composition must satisfy the view tree");
+            self.profile
+                .reconcile_tree(provisional.tree(), &mut candidate_state);
+            if candidate_restore_focus_pending {
+                restore_focus(provisional.tree(), &mut candidate_state);
+                candidate_restore_focus_pending = false;
+            }
+            let modal_focus_changed = !self
+                .profile
+                .ensure_modal_focus(provisional.tree(), &mut candidate_state)
+                .is_empty();
+            let hovered_action_key =
+                Self::toolbar_action_key_for_hover_key(provisional.tree(), &candidate_state);
+            let (search_focused, operation_focused) =
+                self.input_focus_projection(provisional.tree(), &candidate_state);
+            let focus_projection_changed = props.search_focused != search_focused
+                || props.operation_focused != operation_focused;
+            let hover_projection_changed = candidate_hovered_action_key != hovered_action_key;
+            if modal_focus_changed || focus_projection_changed || hover_projection_changed {
+                candidate_hovered_action_key = hovered_action_key;
+                candidate_search_focused = search_focused;
+                candidate_operation_focused = operation_focused;
+                continue;
+            }
             props.search_focused = search_focused;
             props.operation_focused = operation_focused;
-            tree =
-                UiTree::new_with_allocator(AppShell.render(&props), &mut self.identity_allocator)
-                    .expect("文件管理器场景必须合法");
-            controls = discover_controls(&tree);
+            props.hovered_action_key = hovered_action_key;
+            let present_keys = provisional
+                .tree()
+                .keys()
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let prepared = self
+                .prepare_composition_frame(&props, Some(&present_keys))
+                .expect("desktop composition frame must satisfy the view tree");
+            self.profile
+                .reconcile_tree(prepared.tree(), &mut candidate_state);
+            self.profile
+                .ensure_modal_focus(prepared.tree(), &mut candidate_state);
+            let controls = discover_controls(prepared.tree());
+            let scroll_inputs = scroll_inputs_for(&candidate_state, &controls.scrolls);
+            let frame = self
+                .profile
+                .resolve_candidate(
+                    prepared.tree(),
+                    self.viewport,
+                    self.resources.text_measurer(),
+                    &scroll_inputs,
+                    &candidate_state,
+                    Some(FOCUS_APPEARANCE),
+                )
+                .expect("文件管理器场景必须可布局");
+            if clamp_scroll_states(&mut candidate_state, &frame) {
+                // 窗口化详情树依据 offset 构建子项；边界改变后用钳制值重建 candidate，
+                // active state 和 active frame 在成功提交前都保持不变。
+                continue;
+            }
+            let resolved = prepared
+                .resolve(|_| Ok::<_, ()>(frame))
+                .expect("desktop composition frame resolve cannot fail after layout");
+            break (resolved, controls);
+        };
+
+        #[cfg(test)]
+        let candidate_frame_trace = crate::frame_trace::to_json(resolved.frame()).into_bytes();
+        let candidate_nav_scroll_key = controls.scrolls.first().cloned();
+        let candidate_detail_scroll_key = controls.scrolls.get(1).cloned();
+        let candidate_clickable_keys = controls.clickable;
+        let view_state = &mut self.view_state;
+        let restore_focus_pending = &mut self.restore_focus_pending;
+        let hovered_toolbar_action_key = &mut self.hovered_toolbar_action_key;
+        let nav_scroll_key = &mut self.nav_scroll_key;
+        let detail_scroll_key = &mut self.detail_scroll_key;
+        let clickable_keys = &mut self.clickable_keys;
+        let projection_invalidated = &mut self.projection_invalidated;
+        #[cfg(test)]
+        let frame_trace = &mut self.frame_trace;
+        self.frames.commit_with(resolved, |_| {
+            *view_state = candidate_state;
+            *restore_focus_pending = candidate_restore_focus_pending;
+            *hovered_toolbar_action_key = candidate_hovered_action_key;
+            *nav_scroll_key = candidate_nav_scroll_key;
+            *detail_scroll_key = candidate_detail_scroll_key;
+            *clickable_keys = candidate_clickable_keys;
+            *projection_invalidated = false;
+            #[cfg(test)]
+            {
+                *frame_trace = candidate_frame_trace;
+            }
+        });
+        let _ = self.frames.take_component_lifecycle_events();
+        let mut output_changed = false;
+        for intent in self.frames.take_component_outputs() {
+            if self.session.operation.is_none() || intent_allowed_during_operation(&intent) {
+                self.dispatch_controller_intent(intent);
+                output_changed = true;
+            }
         }
-        self.finish_input_render();
-        let frame = self
-            .profile
-            .resolve(
-                &tree,
-                self.viewport,
-                self.resources.text_measurer(),
-                &scroll_inputs,
-                &self.view_state,
-                Some(FOCUS_APPEARANCE),
-            )
-            .expect("文件管理器场景必须可布局");
-        if self.clamp_scroll_states(&frame) {
-            // 窗口化详情树依据 offset 构建子项；边界改变后需用钳制值重建一次，而不能让
-            // 本帧继续携带已越界窗口。
+        if output_changed {
             self.invalidate_frame();
             return self.ensure_frame();
         }
-        #[cfg(test)]
-        {
-            self.frame_trace = crate::frame_trace::to_json(&frame).into_bytes();
-        }
-        self.nav_scroll_key = controls.scrolls.first().cloned();
-        self.detail_scroll_key = controls.scrolls.get(1).cloned();
-        self.clickable_keys = controls.clickable;
-        self.event_registry = EventRegistry::new();
-        register_tree_event_routes(&mut self.event_registry, &tree);
-        self.event_frame = Some(self.event_registry.begin_frame(&tree));
-        self.tree = Some(tree);
-        self.frame = Some(frame);
         true
     }
 
     pub fn frame(&self) -> &UiFrame {
-        self.frame.as_ref().expect("共享逻辑帧必须已构建")
+        self.frames.active().expect("共享逻辑帧必须已构建").frame()
+    }
+
+    fn active_tree(&self) -> &UiTree {
+        self.frames.active().expect("共享逻辑树必须已构建").tree()
     }
     #[cfg(test)]
     pub fn frame_trace(&self) -> &[u8] {
@@ -249,14 +447,14 @@ impl App {
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
         self.ensure_frame();
         let frame = self.frame().clone();
-        let tree = self.tree.as_ref().expect("tree");
-        let actions = self.profile.dispatch_input(
+        let tree = self.frames.active().expect("共享逻辑树必须已构建").tree();
+        let actions = self.profile.dispatch_kernel_input(
             tree,
             &frame,
             &mut self.view_state,
             &InputEvent::Pointer(event),
         );
-        let changed = self.handle_ui_actions(&actions);
+        let changed = self.handle_kernel_interactions(&actions);
         if changed {
             self.mark_view_dirty();
         }
@@ -273,21 +471,20 @@ impl App {
             return 0;
         }
         let scopes = self
-            .tree
-            .as_ref()
-            .expect("tree")
+            .active_tree()
             .keymap_scopes_for_focus(self.view_state.current_focus_key());
         let Some(intent) = self.keymap.resolve(raw, &scopes) else {
             return 0;
         };
         let frame = self.frame().clone();
-        let actions = self.profile.dispatch_input(
-            self.tree.as_ref().expect("tree"),
+        let tree = self.frames.active().expect("共享逻辑树必须已构建").tree();
+        let actions = self.profile.dispatch_kernel_input(
+            tree,
             &frame,
             &mut self.view_state,
             &InputEvent::Keyboard(intent),
         );
-        if self.handle_ui_actions(&actions) {
+        if self.handle_kernel_interactions(&actions) {
             self.mark_view_dirty();
         }
         1
@@ -313,11 +510,12 @@ impl App {
     }
 
     #[cfg(test)]
-    fn dispatch_component_part(&mut self, part: &str) -> bool {
-        let changed = self.handle_routed_event(RoutedEvent {
-            part: Some(ComponentPartPath::new(part)),
-            event: HeadlessEvent::Activate,
-        });
+    fn dispatch_intent(&mut self, intent: Intent) -> bool {
+        if self.session.operation.is_some() && !intent_allowed_during_operation(&intent) {
+            return false;
+        }
+        self.dispatch_controller_intent(intent);
+        let changed = true;
         if changed {
             self.mark_view_dirty();
         }
@@ -325,107 +523,75 @@ impl App {
     }
 
     fn invalidate_frame(&mut self) {
-        self.frame = None;
-        self.tree = None;
-        self.event_frame = None;
-        #[cfg(test)]
-        self.frame_trace.clear();
+        self.projection_invalidated = true;
     }
     fn mark_view_dirty(&mut self) {
-        self.revision.update(|value| *value = value.wrapping_add(1));
+        self.invalidate_frame();
     }
     fn apply_controller_intent(&mut self, intent: Intent) {
         if intent_replaces_detail_content(&intent) {
             self.reset_detail_scroll();
         }
         apply_intent(&mut self.model, &mut self.session, intent);
-        if self.session.operation.is_none() {
-            self.local_state
-                .release_binding(&BindId("operation.value".to_owned()));
-        }
     }
     fn dispatch_controller_intent(&mut self, intent: Intent) {
-        if matches!(intent, Intent::ConfirmOperation) {
-            self.commit_operation_input_before_confirm();
-        }
         self.apply_controller_intent(intent);
     }
 
     /// 统一消费 core 产生的 UI 生命周期动作。业务 mutation 只经应用意图写入。
-    fn handle_ui_actions(&mut self, actions: &[UiAction]) -> bool {
+    fn handle_kernel_interactions(&mut self, actions: &[KernelInteraction]) -> bool {
+        let Some(token) = self.frames.active().map(|active| active.token()) else {
+            return false;
+        };
         let mut changed = false;
         for action in actions {
-            let routed = self
-                .event_frame
-                .as_ref()
-                .and_then(|frame| self.event_registry.dispatch(frame, action));
-            if let Some(routed) = routed {
-                changed |= self.handle_routed_event(routed);
+            let framed = tela_ui_dsl::FramedInteraction::new(token, action.clone());
+            if !self.frames.accepts_interaction(&framed) {
+                continue;
+            }
+            if let Some(intent) = self.frames.dispatch_interaction(&framed) {
+                if self.session.operation.is_none() || intent_allowed_during_operation(&intent) {
+                    self.dispatch_controller_intent(intent);
+                    changed = true;
+                }
+                continue;
+            }
+            if self
+                .frames
+                .dispatch_component_interaction(&framed)
+                .is_some()
+            {
+                changed = true;
                 continue;
             }
             match action {
-                UiAction::Scroll { node_id, delta } => {
+                KernelInteraction::Scroll { node_id, delta } => {
                     changed |= self.handle_scroll(*node_id, delta.y)
                 }
-                UiAction::CloseModal { .. } if self.session.operation.is_some() => {
+                KernelInteraction::CloseModal { .. } if self.session.operation.is_some() => {
                     self.dispatch_controller_intent(Intent::CancelOperation);
                     self.restore_focus_pending = true;
                     changed = true;
                 }
-                UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
+                KernelInteraction::RequestFocus { .. } | KernelInteraction::FocusChanged { .. } => {
+                    changed = true
+                }
+                KernelInteraction::Hover { .. } => changed = true,
+                KernelInteraction::ShortcutActivated { shortcut_id } => {
+                    changed |= self.handle_shortcut(shortcut_id)
+                }
                 _ => {}
             }
         }
-        changed
-    }
-
-    fn handle_routed_event(&mut self, routed: RoutedEvent) -> bool {
-        match (routed.part.as_ref(), routed.event) {
-            (Some(part), HeadlessEvent::Activate | HeadlessEvent::Select { .. }) => {
-                let Some(intent) = intent_from_component_part(part) else {
-                    return false;
-                };
-                if self.session.operation.is_some() && !is_operation_part(part) {
-                    return false;
-                }
-                self.dispatch_controller_intent(intent);
-                true
-            }
-            (Some(part), HeadlessEvent::HoverChange { entered })
-                if is_toolbar_action_part(part) =>
-            {
-                let action_key =
-                    SemanticKey(part.item_key().unwrap_or_else(|| part.as_str()).to_owned());
-                if entered {
-                    if self.hovered_toolbar_action_key != Some(action_key.clone()) {
-                        self.hovered_toolbar_action_key = Some(action_key);
-                        return true;
-                    }
-                } else if self.hovered_toolbar_action_key.as_ref() == Some(&action_key) {
-                    self.hovered_toolbar_action_key = None;
-                    return true;
-                }
-                false
-            }
-            (None, HeadlessEvent::ShortcutActivated { id }) => self.handle_shortcut(&id),
-            (None, HeadlessEvent::ValueChange { bind_id, value }) => {
-                self.handle_field_value_change(bind_id, value)
-            }
-            _ => false,
+        if actions
+            .iter()
+            .any(|action| matches!(action, KernelInteraction::Hover { .. }))
+        {
+            self.hovered_toolbar_action_key = self.frames.active().and_then(|active| {
+                Self::toolbar_action_key_for_hover_key(active.tree(), &self.view_state)
+            });
         }
-    }
-
-    fn handle_field_value_change(&mut self, bind_id: BindId, value: Value) -> bool {
-        let Value::String(value) = value else {
-            return false;
-        };
-        let intent = match bind_id.0.as_str() {
-            "operation.value" => Intent::SetOperationValue(value),
-            "file.search" => Intent::SetQuery(value),
-            _ => return false,
-        };
-        self.apply_controller_intent(intent);
-        true
+        changed
     }
 
     fn handle_shortcut(&mut self, shortcut: &ShortcutId) -> bool {
@@ -447,8 +613,11 @@ impl App {
     }
 
     /// 状态栏只从当前帧实际悬停的语义键恢复工具栏状态，条件卸载后不会猜测旧节点。
-    fn toolbar_action_key_for_hover_key(&self, tree: &UiTree) -> Option<SemanticKey> {
-        let key = self.view_state.hover_key()?.clone();
+    fn toolbar_action_key_for_hover_key(
+        tree: &UiTree,
+        view_state: &ViewStateStore,
+    ) -> Option<SemanticKey> {
+        let key = view_state.hover_key()?.clone();
         tree.interact_for_key(&key)
             .filter(|interact| interact.clickable)
             .filter(|_| key.0.starts_with("command."))
@@ -456,7 +625,8 @@ impl App {
     }
 
     fn handle_scroll(&mut self, node_id: NodeId, delta_y: f32) -> bool {
-        let Some(bounds) = self.frame.as_ref().and_then(|frame| {
+        let Some(bounds) = self.frames.active().and_then(|active| {
+            let frame = active.frame();
             frame
                 .scroll_bounds
                 .iter()
@@ -474,21 +644,10 @@ impl App {
         true
     }
 
-    fn active_scroll_inputs(&self) -> HashMap<SemanticKey, ScrollState> {
-        [
-            self.nav_scroll_key.as_ref(),
-            self.detail_scroll_key.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|key| (key.clone(), self.view_state.scroll(key)))
-        .collect()
-    }
-
-    fn detail_scroll_y(&self) -> f32 {
+    fn detail_scroll_y_for(&self, view_state: &ViewStateStore) -> f32 {
         self.detail_scroll_key
             .as_ref()
-            .map(|key| self.view_state.scroll(key).offset_y)
+            .map(|key| view_state.scroll(key).offset_y)
             .unwrap_or_default()
     }
 
@@ -497,98 +656,38 @@ impl App {
             self.view_state.set_scroll(key, ScrollState::default());
         }
     }
-
-    fn clamp_scroll_states(&mut self, frame: &UiFrame) -> bool {
-        let mut changed = false;
-        for bounds in &frame.scroll_bounds {
-            let state = self.view_state.scroll(&bounds.key);
-            let clamped = ScrollState {
-                offset_x: state.offset_x.clamp(0.0, bounds.max_offset_x),
-                offset_y: state.offset_y.clamp(0.0, bounds.max_offset_y),
-            };
-            if clamped != state {
-                self.view_state.set_scroll(bounds.key.clone(), clamped);
-                changed = true;
-            }
-        }
-        changed
-    }
 }
 
-/// 将本帧可激活的语义节点显式映射为 Headless 部件事件。
-///
-/// `NodeId` 只在 `EventFrame` 内存活；下一轮树投影会重建 registry 与映射，避免条件卸载
-/// 或重排后继续解释旧节点。文本字段被排除在外，值只沿 `BindId` 的 `ValueChange` 通道流动。
-fn register_tree_event_routes(registry: &mut EventRegistry, tree: &UiTree) {
-    for key in tree.keys() {
-        let Some(interact) = tree.interact_for_key(key) else {
-            continue;
+fn scroll_inputs_for(
+    view_state: &ViewStateStore,
+    scroll_keys: &[SemanticKey],
+) -> HashMap<SemanticKey, ScrollState> {
+    scroll_keys
+        .iter()
+        .map(|key| (key.clone(), view_state.scroll(key)))
+        .collect()
+}
+
+fn clamp_scroll_states(view_state: &mut ViewStateStore, frame: &UiFrame) -> bool {
+    let mut changed = false;
+    for bounds in &frame.scroll_bounds {
+        let state = view_state.scroll(&bounds.key);
+        let clamped = ScrollState {
+            offset_x: state.offset_x.clamp(0.0, bounds.max_offset_x),
+            offset_y: state.offset_y.clamp(0.0, bounds.max_offset_y),
         };
-        if !interact.clickable || interact.input.is_some() {
-            continue;
-        }
-        if key.0.starts_with("entry-") {
-            let root = components::List::compose("desktop.entries")
-                .part(ComponentPartRole::Item, key.clone());
-            let part = root.parts().last().expect("entry item part");
-            registry
-                .register_part(
-                    &root,
-                    part,
-                    ActionTrigger::Click,
-                    HeadlessEvent::Select {
-                        value: key.0.clone(),
-                    },
-                )
-                .expect("entry route must satisfy the List contract");
-            continue;
-        }
-
-        let root = components::Button::compose("desktop.action")
-            .part(ComponentPartRole::Trigger, key.clone());
-        let part = root.parts().last().expect("action trigger part");
-        registry
-            .register_part(&root, part, ActionTrigger::Click, HeadlessEvent::Activate)
-            .expect("action route must satisfy the Button contract");
-        if key.0.starts_with("command.") {
-            registry
-                .register_part(
-                    &root,
-                    part,
-                    ActionTrigger::HoverEnter,
-                    HeadlessEvent::HoverChange { entered: true },
-                )
-                .expect("toolbar hover must satisfy the Button contract");
-            registry
-                .register_part(
-                    &root,
-                    part,
-                    ActionTrigger::HoverLeave,
-                    HeadlessEvent::HoverChange { entered: false },
-                )
-                .expect("toolbar hover must satisfy the Button contract");
+        if clamped != state {
+            view_state.set_scroll(bounds.key.clone(), clamped);
+            changed = true;
         }
     }
+    changed
 }
 
-fn is_toolbar_action_part(part: &ComponentPartPath) -> bool {
-    part.item_key()
-        .unwrap_or_else(|| part.as_str())
-        .starts_with("command.")
-}
-
-#[cfg(test)]
-fn node_key_for_component_part(part: &str) -> SemanticKey {
-    if let Some(entry_id) = part.strip_prefix("entry.select.") {
-        return SemanticKey(format!("entry-{entry_id}"));
-    }
-    SemanticKey(part.to_owned())
-}
-
-fn is_operation_part(part: &ComponentPartPath) -> bool {
+fn intent_allowed_during_operation(intent: &Intent) -> bool {
     matches!(
-        part.item_key().unwrap_or_else(|| part.as_str()),
-        "operation.confirm" | "operation.cancel"
+        intent,
+        Intent::SetOperationValue(_) | Intent::ConfirmOperation | Intent::CancelOperation
     )
 }
 
@@ -639,8 +738,6 @@ fn discover_controls(tree: &UiTree) -> Controls {
 }
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::domain::FileCommand;
     use crate::presentation::shared::{
@@ -648,15 +745,11 @@ mod tests {
         SURFACE, TOP_BAR_H,
     };
     use tela_contract::{Color, IconName, UiResources};
-    use tela_core::{FocusSlot, UiTree};
-    use tela_desktop_ui_kit::DesktopRecipe;
+    use tela_core::FocusSlot;
     use tela_icon_resources::MaterialIconFontProvider;
     use tela_render_raster::{RasterConfig, render_frame};
     use tela_text_resources::ControlledTextMeasurer;
     use tela_ui_foundation::Icon;
-    use tela_ui_headless::{
-        COMPONENT_CATALOG, ComponentArchetype, ComponentRoot, ComponentState, ControlledValue,
-    };
 
     static TEST_TEXT_MEASURER: ControlledTextMeasurer = ControlledTextMeasurer;
     static TEST_ICON_PROVIDER: MaterialIconFontProvider = MaterialIconFontProvider;
@@ -680,57 +773,11 @@ mod tests {
         })
     }
 
-    fn catalog_matrix_value(root: &ComponentRoot, state: ComponentState) -> ControlledValue {
-        match state {
-            ComponentState::Content => ControlledValue::Text("matrix content".to_owned()),
-            ComponentState::Value => match root.spec().archetype() {
-                ComponentArchetype::Range => ControlledValue::Number(24.0),
-                _ => ControlledValue::Text("matrix value".to_owned()),
-            },
-            ComponentState::Selection | ComponentState::Expanded => ControlledValue::Keys(vec![
-                root.parts()
-                    .iter()
-                    .find(|part| part.role() == tela_ui_headless::ComponentPartRole::Item)
-                    .expect("stateful collection must expose an item")
-                    .key()
-                    .0
-                    .clone(),
-            ]),
-            ComponentState::Open | ComponentState::Disabled | ComponentState::Loading => {
-                ControlledValue::Bool(true)
-            }
-            ComponentState::Items => {
-                ControlledValue::Keys(vec!["matrix alpha".to_owned(), "matrix beta".to_owned()])
-            }
-            ComponentState::Query => ControlledValue::Text("matrix query".to_owned()),
-            ComponentState::Range => ControlledValue::Number(42.0),
-            ComponentState::CurrentPage => ControlledValue::Number(2.0),
-            ComponentState::Progress => ControlledValue::Number(48.0),
-            ComponentState::Error => ControlledValue::Text("matrix error".to_owned()),
-        }
-    }
-
-    fn catalog_state_context(root: ComponentRoot, state: ComponentState) -> ComponentRoot {
-        if root.spec().archetype() == ComponentArchetype::Layer && state != ComponentState::Open {
-            root.state(ComponentState::Open, ControlledValue::Bool(true))
-        } else {
-            root
-        }
-    }
-
-    fn catalog_fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(1_099_511_628_211);
-        }
-        hash
-    }
-
-    fn click_action(app: &mut App, action_key: &str) {
+    fn click_semantic_key(app: &mut App, key: &str) {
         app.ensure_frame();
-        let tree = app.tree.as_ref().expect("tree");
+        let tree = app.active_tree();
         let node_id = tree
-            .node_id_for_key(&node_key_for_component_part(action_key))
+            .node_id_for_key(&SemanticKey(key.to_owned()))
             .expect("交互动作键应存在");
         let hit = app
             .frame()
@@ -793,68 +840,6 @@ mod tests {
 
         // FNV-1a 指纹是完整 RGBA 缓冲的紧凑 golden reference；视觉改动必须显式更新它。
         assert_eq!(raster_fingerprint(&bitmap.pixels), 964_169_848_808_499_583);
-    }
-
-    #[test]
-    fn desktop_catalog_raster_reference_is_stable_at_the_application_boundary() {
-        let viewport = Viewport {
-            width: 360.0,
-            height: 240.0,
-        };
-        let background = Color::rgba(1.0, 1.0, 1.0, 1.0);
-        let mut hash = 14_695_981_039_346_656_037_u64;
-        for spec in COMPONENT_CATALOG {
-            if !spec.contract().recipes.desktop {
-                continue;
-            }
-            for state in
-                std::iter::once(None).chain(spec.contract().states.iter().copied().map(Some))
-            {
-                let root = match state {
-                    None => spec.root(format!("reference.raster.desktop.{}", spec.name)),
-                    Some(state) => {
-                        let baseline = catalog_state_context(
-                            spec.root(format!("reference.raster.desktop.{}.{state:?}", spec.name)),
-                            state,
-                        );
-                        baseline
-                            .clone()
-                            .state(state, catalog_matrix_value(&baseline, state))
-                    }
-                };
-                let tree = UiTree::new(DesktopRecipe::new(&root).into_node().unwrap_or_else(
-                    |error| panic!("{} {state:?} raster recipe: {error:?}", spec.name),
-                ))
-                .unwrap_or_else(|error| panic!("{} {state:?} raster tree: {error:?}", spec.name));
-                let frame = tree
-                    .resolve(viewport, &TEST_TEXT_MEASURER, &HashMap::new())
-                    .unwrap_or_else(|error| {
-                        panic!("{} {state:?} raster frame: {error:?}", spec.name)
-                    });
-                let bitmap = render_frame(&frame, &RasterConfig::default_with(background));
-                assert_eq!(
-                    (bitmap.width, bitmap.height),
-                    (viewport.width as u32, viewport.height as u32),
-                    "{} {state:?} raster dimensions",
-                    spec.name
-                );
-                assert!(
-                    bitmap
-                        .pixels
-                        .chunks_exact(4)
-                        .any(|pixel| pixel != [255, 255, 255, 255]),
-                    "{} {state:?} must not produce a blank raster",
-                    spec.name
-                );
-                hash = catalog_fnv1a(hash, spec.name.as_bytes());
-                hash = catalog_fnv1a(hash, format!("{state:?}").as_bytes());
-                hash = catalog_fnv1a(hash, &bitmap.pixels);
-            }
-        }
-        assert_eq!(
-            hash, 5_309_942_653_942_596_073,
-            "update the raster reference intentionally after visual review"
-        );
     }
 
     #[test]
@@ -947,7 +932,7 @@ mod tests {
         app.mark_view_dirty();
         assert!(app.ensure_frame());
 
-        assert!(app.dispatch_component_part("folder.open.2"));
+        assert!(app.dispatch_intent(Intent::OpenFolder(2)));
         assert_eq!(app.session.current_dir, 2);
         assert_eq!(app.view_state.scroll(&detail_key), ScrollState::default());
         assert!(app.ensure_frame());
@@ -1161,9 +1146,7 @@ mod tests {
         let mut app = App::new(&TEST_RESOURCES);
         app.ensure_frame();
         let (key, node_id) = app
-            .tree
-            .as_ref()
-            .expect("tree")
+            .active_tree()
             .focusable_nodes()
             .into_iter()
             .find(|(key, _)| key == &SemanticKey("entry-3".to_owned()))
@@ -1339,19 +1322,21 @@ mod tests {
     }
 
     #[test]
-    fn component_parts_route_selection_directory_navigation_and_commands() {
+    fn typed_intents_update_selection_navigation_and_commands() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.dispatch_component_part("entry.select.5"));
+        assert!(app.dispatch_intent(Intent::Select(5)));
         assert_eq!(app.session.selected, BTreeSet::from([5]));
-        assert!(app.dispatch_component_part("command.toggle-view"));
+        assert!(app.dispatch_intent(Intent::Command(FileCommand::ToggleView)));
         assert_eq!(app.session.view, crate::domain::DirectoryView::Grid);
-        assert!(app.dispatch_component_part("filter.favorites"));
+        assert!(app.dispatch_intent(Intent::SetFilter(crate::domain::EntryFilter::Favorites)));
         assert_eq!(app.session.filter, crate::domain::EntryFilter::Favorites);
-        assert!(app.dispatch_component_part("folder.open.2"));
+        assert!(app.dispatch_intent(Intent::OpenFolder(2)));
         assert_eq!(app.session.current_dir, 2);
         assert_eq!(app.session.filter, crate::domain::EntryFilter::All);
-        assert!(app.dispatch_component_part("command.new-folder"));
-        assert!(app.dispatch_component_part("operation.confirm"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(
+            crate::domain::OperationKind::NewFolder,
+        )));
+        assert!(app.dispatch_intent(Intent::ConfirmOperation));
         assert!(
             app.model
                 .entries_in_filtered(2, "", app.session.filter, app.session.sort)
@@ -1381,7 +1366,9 @@ mod tests {
     #[test]
     fn operation_modal_requires_confirm_and_writes_its_controlled_draft() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.dispatch_component_part("command.new-folder"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(
+            crate::domain::OperationKind::NewFolder,
+        )));
         assert_eq!(
             app.session.operation.as_ref().map(|draft| &draft.value),
             Some(&"新建文件夹".to_owned())
@@ -1394,7 +1381,7 @@ mod tests {
                 .iter()
                 .all(|entry| entry.name != "验收目录")
         );
-        assert!(app.dispatch_component_part("operation.confirm"));
+        assert!(app.dispatch_intent(Intent::ConfirmOperation));
         assert!(app.session.operation.is_none());
         assert!(
             app.model
@@ -1402,8 +1389,8 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name == "验收目录")
         );
-        assert!(app.dispatch_component_part("command.rename"));
-        assert!(app.dispatch_component_part("operation.cancel"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(crate::domain::OperationKind::Rename,)));
+        assert!(app.dispatch_intent(Intent::CancelOperation));
         assert!(app.session.operation.is_none());
         assert_eq!(app.session.notice, "已取消操作");
     }
@@ -1411,7 +1398,9 @@ mod tests {
     #[test]
     fn operation_draft_commits_at_boundaries_and_does_not_survive_a_reopen() {
         let mut app = App::new(&TEST_RESOURCES);
-        assert!(app.dispatch_component_part("command.new-folder"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(
+            crate::domain::OperationKind::NewFolder,
+        )));
         assert_eq!(app.set_input_value("仅本地草稿".to_owned()), 1);
         assert_eq!(
             app.session
@@ -1431,23 +1420,24 @@ mod tests {
                 .map(|draft| draft.value.as_str()),
             Some("仅本地草稿")
         );
-        assert!(app.dispatch_component_part("operation.cancel"));
-        assert!(app.dispatch_component_part("command.add-tag"));
+        assert!(app.dispatch_intent(Intent::CancelOperation));
+        assert!(app.dispatch_intent(Intent::BeginOperation(crate::domain::OperationKind::AddTag,)));
         app.ensure_frame();
         assert_eq!(app.input_value(), "重点");
         assert_eq!(app.set_input_value("临时标签".to_owned()), 1);
         assert_eq!(app.input_cancel(), 1);
         assert_eq!(app.input_value(), "重点");
-        assert!(app.dispatch_component_part("operation.cancel"));
-        assert!(app.dispatch_component_part("command.add-tag"));
+        assert!(app.dispatch_intent(Intent::CancelOperation));
+        assert!(app.dispatch_intent(Intent::BeginOperation(crate::domain::OperationKind::AddTag,)));
         app.ensure_frame();
         assert_eq!(app.input_value(), "重点");
 
-        assert!(app.dispatch_component_part("operation.cancel"));
+        assert!(app.dispatch_intent(Intent::CancelOperation));
         app.session.select(5);
-        assert!(app.dispatch_component_part("command.rename"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(crate::domain::OperationKind::Rename,)));
         assert_eq!(app.set_input_value("README-已重命名.md".to_owned()), 1);
-        assert!(app.dispatch_component_part("operation.confirm"));
+        assert_eq!(app.input_enter(), 1);
+        assert!(app.dispatch_intent(Intent::ConfirmOperation));
         assert_eq!(
             app.model.entry(5).map(|entry| entry.name.as_str()),
             Some("README-已重命名.md")
@@ -1472,7 +1462,7 @@ mod tests {
         app.set_viewport(1199.0, 800.0);
         app.ensure_frame();
         let before = readme_x(&app);
-        assert!(app.dispatch_component_part("navigation.toggle"));
+        assert!(app.dispatch_intent(Intent::ToggleNavigation));
         app.ensure_frame();
         assert_eq!(readme_x(&app), before);
         let trace = std::str::from_utf8(app.frame_trace()).unwrap();
@@ -1489,16 +1479,16 @@ mod tests {
                 && region.rect.w.is_finite()
                 && region.rect.h.is_finite()
         }));
-        click_action(&mut app, "entry.select.5");
+        click_semantic_key(&mut app, "entry-5");
         assert_eq!(app.session.selected, BTreeSet::from([5]));
-        click_action(&mut app, "folder.open.1");
+        click_semantic_key(&mut app, "folder.open.1");
         assert_eq!(app.session.current_dir, 1);
-        click_action(&mut app, "folder.open.2");
+        click_semantic_key(&mut app, "folder.open.2");
         assert_eq!(app.session.current_dir, 2);
-        click_action(&mut app, "entry.select.8");
-        click_action(&mut app, "command.rename");
+        click_semantic_key(&mut app, "entry-8");
+        click_semantic_key(&mut app, "command.rename");
         assert!(app.session.operation.is_some());
-        click_action(&mut app, "operation.confirm");
+        click_semantic_key(&mut app, "operation.confirm");
         assert!(app.session.operation.is_none());
         assert_eq!(app.model.entry(5).expect("README 存在").name, "README.md");
     }
@@ -1507,7 +1497,7 @@ mod tests {
     fn toolbar_hover_is_projected_from_core_view_state_by_semantic_action_key() {
         let mut app = App::new(&TEST_RESOURCES);
         app.ensure_frame();
-        let tree = app.tree.as_ref().expect("tree");
+        let tree = app.active_tree();
         let node_id = tree
             .node_id_for_key(&SemanticKey("command.new-folder".to_owned()))
             .expect("Toolbar 新建项应存在");
@@ -1545,7 +1535,7 @@ mod tests {
         app.session.select(5);
         app.invalidate_frame();
         app.ensure_frame();
-        let tree = app.tree.as_ref().expect("tree");
+        let tree = app.active_tree();
         let node_id = tree
             .node_id_for_key(&SemanticKey("command.rename".to_owned()))
             .expect("选中项目后 Toolbar 重命名项应存在");
@@ -1663,7 +1653,9 @@ mod tests {
         app.ensure_frame();
         assert_eq!(app.handle_raw_key_codes(0x2b, 0, false), 1);
         let background_focus = app.view_state.current_focus_key().cloned();
-        assert!(app.dispatch_component_part("command.new-folder"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(
+            crate::domain::OperationKind::NewFolder,
+        )));
         assert!(app.ensure_frame());
         assert!(app.session.operation.is_some());
         let modal_focus = app.view_state.current_focus_key().cloned();
@@ -1731,7 +1723,9 @@ mod tests {
     fn modal_keymap_scope_overrides_the_default_snapshot_layer() {
         let mut app = App::new(&TEST_RESOURCES);
         app.ensure_frame();
-        assert!(app.dispatch_component_part("command.new-folder"));
+        assert!(app.dispatch_intent(Intent::BeginOperation(
+            crate::domain::OperationKind::NewFolder,
+        )));
         assert!(app.ensure_frame());
         assert!(
             app.operation_input_focused(),

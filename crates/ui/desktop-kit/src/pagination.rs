@@ -249,12 +249,11 @@ mod tests {
             labels,
             ["上一页", "1", "…", "7", "8", "9", "…", "20", "下一页"]
         );
-        assert_eq!(
-            node.children[4]
+        assert!(
+            !node.children[4]
                 .interact
                 .as_ref()
-                .and_then(|interact| interact.bind_id.as_ref()),
-            None,
+                .is_some_and(|interact| interact.clickable),
             "当前页不能重复触发加载"
         );
         assert_eq!(

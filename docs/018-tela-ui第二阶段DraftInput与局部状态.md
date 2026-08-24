@@ -1,5 +1,10 @@
 # 018-tela-ui 第二阶段：DraftInput 与局部状态闭环
 
+> 历史实施记录：本文的独立 `LocalStateRuntime`、`InstancePath` 和 `UiIntent::Commit` 已被
+> `tela-ui-dsl` 的组件 owner、`ComponentIdentity`、typed Output 与 `FrameCoordinator`
+> 事务替代。新开发必须遵守
+> [036-事件系统与组件生命周期机制](036-事件系统与组件生命周期机制梳理.md)，不得复刻本文运行时。
+
 > **状态：✅ 已完成。**  
 > **前置：** [017-tela-ui第一阶段实施目标.md](017-tela-ui第一阶段实施目标.md) 已完成；[015-tela-ui与局部交互状态.md](015-tela-ui与局部交互状态.md) 是本阶段的架构边界。
 

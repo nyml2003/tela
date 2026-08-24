@@ -12,9 +12,7 @@ mod draft_input;
 mod feedback;
 mod form;
 mod icon_button;
-mod local_state;
 mod pagination;
-mod recipe;
 mod segmented;
 mod select;
 mod shared;
@@ -27,16 +25,11 @@ mod virtual_window;
 mod windows_title_bar;
 
 pub use dialog::{Dialog, DialogAction, DialogActionKind, DialogStyle};
-pub use draft_input::DraftInput;
+pub use draft_input::{DraftInput, DraftInputCommit, DraftInputSnapshot};
 pub use feedback::{EmptyAction, EmptyState, StatusBadge, StatusTone};
 pub use form::{Form, FormItem};
 pub use icon_button::IconButton;
-pub use local_state::{
-    DraftInputCommit, DraftInputEvent, DraftInputOutcome, DraftInputSnapshot, InstancePath,
-    LocalStateRuntime,
-};
 pub use pagination::Pagination;
-pub use recipe::{DesktopRecipe, DesktopRecipeError};
 pub use segmented::{Segmented, SegmentedItem, SegmentedSize, SegmentedStyle};
 pub use select::{CascadeOption, Cascader, OptionItem, Select};
 pub use table::{CellAlign, Table, TableStyle, Td, Tr};

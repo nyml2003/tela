@@ -2,7 +2,7 @@
 //!
 //! This crate owns application-facing frame plans: explicit capability scopes, Signal watches,
 //! typed action routing, and the `ui!` macro re-export. It deliberately depends only on Kernel
-//! contract/core crates and never on Headless or a visual kit.
+//! contract/core crates and never on a visual kit.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -15,6 +15,7 @@ mod action;
 mod component;
 mod context;
 mod frame;
+mod interaction;
 mod lifecycle;
 mod owner;
 mod runtime;
@@ -26,16 +27,16 @@ pub use component::DslComponent;
 pub use component::prelude;
 pub use context::{ProvidedValue, ViewContext};
 pub use frame::{
-    ActiveFrame, FrameCoordinator, FramePrepareError, FrameToken, FramedUiAction, PreparedFrame,
-    ResolvedFrame,
+    ActiveFrame, FrameCoordinator, FramePrepareError, FrameToken, PreparedFrame, ResolvedFrame,
 };
+pub use interaction::{FramedInteraction, InteractionIndex, LogicalPathIndex};
 pub use lifecycle::{
     ComponentOutcome, ComponentRenderContext, ComponentSetupContext, render_component,
     render_component_with_output,
 };
 pub use owner::{
-    ComponentActionSpec, ComponentDispatch, ComponentIdentity, ComponentInput, ComponentRoute,
-    component_action_route,
+    ComponentActionSpec, ComponentDispatch, ComponentEffectScope, ComponentIdentity,
+    ComponentInput, ComponentLifecycleEvent, ComponentRoute, component_action_route,
 };
 pub use runtime::{ComponentRuntime, FrameInvalidator};
 pub use signal::{Signal, SignalId, SignalSubscription};

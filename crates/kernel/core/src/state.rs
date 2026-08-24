@@ -58,7 +58,7 @@ pub(crate) struct GestureCandidate {
     pub priority: i16,
     /// 命中路径中离叶子越近，数值越大。
     pub depth: usize,
-    /// 赢家是滚动容器时，Pan 更新还会投影为 `UiAction::Scroll`。
+    /// 赢家是滚动容器时，Pan 更新还会投影为 `KernelInteraction::Scroll`。
     pub scroll_target: bool,
 }
 

@@ -3,7 +3,6 @@
 use crate::domain::{
     EntryFilter, EntryId, FileCommand, FileManagerModel, FileManagerSession, OperationKind,
 };
-use tela_ui_headless::ComponentPartPath;
 
 pub mod keymap;
 pub mod runtime;
@@ -21,59 +20,6 @@ pub enum Intent {
     SetQuery(String),
     ConfirmOperation,
     CancelOperation,
-}
-
-/// 将一个显式组件分部路径翻译为业务意图。
-///
-/// 路径不是字段绑定，也不是临时 `NodeId`。Application 在接到 headless `Activate` 后才调用
-/// 本函数，因此不会回退为不透明的字符串命令编解码。
-pub fn intent_from_component_part(part: &ComponentPartPath) -> Option<Intent> {
-    let path = part.item_key().unwrap_or_else(|| part.as_str());
-    let command = match path {
-        "command.new-folder" => return Some(Intent::BeginOperation(OperationKind::NewFolder)),
-        "command.rename" => return Some(Intent::BeginOperation(OperationKind::Rename)),
-        "command.copy" => Some(FileCommand::CopySelected),
-        "command.move-design" => return Some(Intent::BeginOperation(OperationKind::MoveToDesign)),
-        "command.trash" => return Some(Intent::BeginOperation(OperationKind::Trash)),
-        "command.restore" => Some(FileCommand::RestoreSelected),
-        "command.favorite" => Some(FileCommand::ToggleFavorite),
-        "command.toggle-view" => Some(FileCommand::ToggleView),
-        "command.toggle-sort" => Some(FileCommand::ToggleSort),
-        "command.toggle-filter" => Some(FileCommand::ToggleFilter),
-        "command.add-tag" => return Some(Intent::BeginOperation(OperationKind::AddTag)),
-        "command.undo" => Some(FileCommand::Undo),
-        _ => None,
-    };
-    if let Some(command) = command {
-        return Some(Intent::Command(command));
-    }
-    if path == "navigation.toggle" {
-        return Some(Intent::ToggleNavigation);
-    }
-    let filter = match path {
-        "filter.all" => Some(EntryFilter::All),
-        "filter.favorites" => Some(EntryFilter::Favorites),
-        "filter.tagged" => Some(EntryFilter::Tagged),
-        "filter.trash" => Some(EntryFilter::Trash),
-        _ => None,
-    };
-    if let Some(filter) = filter {
-        return Some(Intent::SetFilter(filter));
-    }
-    if path == "operation.confirm" {
-        return Some(Intent::ConfirmOperation);
-    }
-    if path == "operation.cancel" {
-        return Some(Intent::CancelOperation);
-    }
-    if let Some(id) = path.strip_prefix("folder.open.") {
-        return id.parse().ok().map(Intent::OpenFolder);
-    }
-    path.strip_prefix("entry.select.")
-        .or_else(|| path.strip_prefix("entry-"))?
-        .parse()
-        .ok()
-        .map(Intent::Select)
 }
 
 /// 唯一业务写入口。

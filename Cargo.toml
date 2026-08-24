@@ -6,7 +6,6 @@ members = [
     "crates/ui/foundation",
     "crates/ui/dsl",
     "crates/ui/dsl-macros",
-    "crates/ui/headless",
     "crates/ui/mobile-kit",
     "crates/ui/desktop-kit",
     "crates/ui/desktop-ui-dsl",

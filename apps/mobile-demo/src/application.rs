@@ -3,16 +3,16 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    FocusAppearance, InputEvent, Insets, NodeId, NodeKind, PhysicalKey, PointerEvent, ScrollState,
-    SemanticKey, TextInputEvent, TextSelection, UiAction, UiFrame, UiLayoutError, UiNode,
-    UiResources, Value, Viewport,
+    FocusAppearance, InputEvent, Insets, KernelInteraction, NodeId, NodeKind, PhysicalKey,
+    PointerEvent, ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame, UiLayoutError,
+    UiNode, UiResources, Viewport,
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
-use tela_ui_dsl::{FrameCoordinator, FrameToken, FramedUiAction, Signal, ViewOutput};
+use tela_ui_dsl::{FrameCoordinator, FrameToken, FramedInteraction, Signal};
 
 use crate::{
     domain::{Entry, EntryKind, MobileWorkspace},
-    presentation::{MobileViewProps, render, render_browse_dsl},
+    presentation::{MobileViewProps, render_browse_dsl, render_preview_dsl},
 };
 
 /// Initial mobile logical size before a target host reports its real content area.
@@ -37,7 +37,7 @@ pub(crate) enum Route {
 
 /// Mobile browse 的纯数据 Application action。
 ///
-/// 这个枚举由 DSL `ActionTarget` 产生；它不进入 Kernel tree，也不依赖 Headless 组件事件。
+/// 这个枚举由 DSL `ActionTarget` 产生；它不进入 Kernel tree。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MobileAction {
     /// 返回上一层或清除当前搜索。
@@ -218,6 +218,9 @@ impl App {
             *active_scroll_key = scroll_key;
             *projection_invalidated = false;
         });
+        // Effect bridge 尚未接入移动宿主；先消费已提交的生命周期通知，避免把旧代际
+        // 留在 coordinator 中，未来宿主可在这里启动/失效真实 Effect。
+        let _ = self.frames.take_component_lifecycle_events();
         true
     }
 
@@ -236,8 +239,8 @@ impl App {
 
     /// Delivers a normalized pointer event for the currently active frame.
     ///
-    /// This direct convenience method exists for synchronous in-process tests and legacy guest
-    /// calls. Target adapters must instead call [`Self::handle_pointer_for_frame`] with the token
+    /// This direct convenience method exists for synchronous in-process tests. Target adapters
+    /// must instead call [`Self::handle_pointer_for_frame`] with the token
     /// saved alongside the frame they actually presented.
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
         let Some(token) = self.current_frame_token() else {
@@ -257,13 +260,13 @@ impl App {
             .active()
             .expect("accepted token requires an active frame")
             .tree();
-        let actions = self.profile.dispatch_input(
+        let actions = self.profile.dispatch_kernel_input(
             tree,
             &frame,
             &mut self.view_state,
             &InputEvent::Pointer(event),
         );
-        let changed = self.handle_framed_actions(token, &actions);
+        let changed = self.handle_framed_interactions(token, &actions);
         if changed {
             self.invalidate_frame();
         }
@@ -304,8 +307,7 @@ impl App {
     /// Replaces the controlled query value with the token of the focused native text channel.
     ///
     /// A native editor that does not correspond to the current focused DSL input is rejected. This
-    /// keeps every accepted edit on the `TextInput -> ActionFrame -> MobileAction` route instead of
-    /// retaining a legacy direct state-write bypass.
+    /// keeps every accepted edit on the `TextInput -> ActionFrame -> MobileAction` route.
     pub fn set_input_value_for_frame(&mut self, frame_token: u64, value: String) -> u32 {
         let Some(token) = self.accept_frame_token(frame_token) else {
             return 0;
@@ -451,7 +453,7 @@ impl App {
             render_browse_dsl(&mut build, props, &self.route, &self.query)
                 .map_err(|error| error.to_string())?
         } else {
-            ViewOutput::opaque(render(props))
+            render_preview_dsl(&mut build, props).map_err(|error| error.to_string())?
         };
         self.frames.prepare(root).map_err(|error| error.to_string())
     }
@@ -503,28 +505,35 @@ impl App {
         !self.query.get().is_empty() || !self.history.is_empty()
     }
 
-    fn handle_framed_actions(&mut self, token: FrameToken, actions: &[UiAction]) -> bool {
+    fn handle_framed_interactions(
+        &mut self,
+        token: FrameToken,
+        actions: &[KernelInteraction],
+    ) -> bool {
         let mut changed = false;
         for action in actions.iter().cloned() {
-            let framed = FramedUiAction::new(token, action);
-            if !self.frames.accepts(&framed) {
+            let framed = FramedInteraction::new(token, action);
+            if !self.frames.accepts_interaction(&framed) {
                 continue;
             }
-            if let Some(action) = self.frames.dispatch(&framed) {
+            if let Some(action) = self.frames.dispatch_interaction(&framed) {
                 changed |= self.handle_application_action(action);
                 continue;
             }
+            if self
+                .frames
+                .dispatch_component_interaction(&framed)
+                .is_some()
+            {
+                changed = true;
+                continue;
+            }
             match framed.into_parts().1 {
-                UiAction::Scroll { node_id, delta } => {
+                KernelInteraction::Scroll { node_id, delta } => {
                     changed |= self.handle_scroll(node_id, delta.y)
                 }
-                UiAction::RequestFocus { .. } | UiAction::FocusChanged { .. } => changed = true,
-                // Preview is intentionally still a direct-Rust island in this vertical slice.
-                // Its legacy controls keep their existing Kernel contract without reintroducing a
-                // Headless event registry into the mobile application.
-                UiAction::Click { node_id } => changed |= self.handle_legacy_preview_click(node_id),
-                UiAction::ValueChange { bind_id, value } => {
-                    changed |= self.handle_legacy_field_value_change(bind_id.0, value)
+                KernelInteraction::RequestFocus { .. } | KernelInteraction::FocusChanged { .. } => {
+                    changed = true
                 }
                 _ => {}
             }
@@ -541,28 +550,6 @@ impl App {
         }
     }
 
-    fn handle_legacy_preview_click(&mut self, node_id: NodeId) -> bool {
-        if !matches!(self.route.get(), Route::Preview(_)) {
-            return false;
-        }
-        let is_back = self
-            .frames
-            .active()
-            .and_then(|frame| frame.tree().key_for_node_id(node_id))
-            .is_some_and(|key| key.0 == "mobile.back");
-        is_back && self.go_back()
-    }
-
-    fn handle_legacy_field_value_change(&mut self, bind_id: String, value: Value) -> bool {
-        if bind_id != SEARCH_KEY {
-            return false;
-        }
-        let Value::String(value) = value else {
-            return false;
-        };
-        self.set_query(value)
-    }
-
     fn dispatch_text_input(&mut self, token: FrameToken, event: TextInputEvent) -> bool {
         let frame = self.frame().clone();
         let tree = self
@@ -570,13 +557,13 @@ impl App {
             .active()
             .expect("accepted token requires an active frame")
             .tree();
-        let actions = self.profile.dispatch_input(
+        let actions = self.profile.dispatch_kernel_input(
             tree,
             &frame,
             &mut self.view_state,
             &InputEvent::Text(event),
         );
-        let changed = self.handle_framed_actions(token, &actions);
+        let changed = self.handle_framed_interactions(token, &actions);
         if changed {
             self.invalidate_frame();
         }
@@ -728,20 +715,14 @@ fn clamp_scroll_states(view_state: &mut ViewStateStore, frame: &UiFrame) -> bool
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use tela_contract::{
-        Color, IconProvider, Insets, PhysicalKey, SemanticKey, UiAction, UiResources, Viewport,
+        Color, IconProvider, Insets, KernelInteraction, PhysicalKey, PointerEvent, SemanticKey,
+        UiResources,
     };
-    use tela_core::{FocusSlot, UiTree};
+    use tela_core::FocusSlot;
     use tela_icon_resources::MaterialIconFontProvider;
-    use tela_mobile_ui_kit::MobileRecipe;
     use tela_render_raster::{RasterConfig, render_frame};
     use tela_text_resources::ControlledTextMeasurer;
-    use tela_ui_headless::{
-        COMPONENT_CATALOG, ComponentArchetype, ComponentPartRole, ComponentRoot, ComponentState,
-        ControlledValue,
-    };
 
     use super::{App, Route};
 
@@ -767,44 +748,6 @@ mod tests {
         })
     }
 
-    fn catalog_matrix_value(root: &ComponentRoot, state: ComponentState) -> ControlledValue {
-        match state {
-            ComponentState::Content => ControlledValue::Text("matrix content".to_owned()),
-            ComponentState::Value => match root.spec().archetype() {
-                ComponentArchetype::Range => ControlledValue::Number(24.0),
-                _ => ControlledValue::Text("matrix value".to_owned()),
-            },
-            ComponentState::Selection | ComponentState::Expanded => ControlledValue::Keys(vec![
-                root.parts()
-                    .iter()
-                    .find(|part| part.role() == ComponentPartRole::Item)
-                    .expect("stateful collection must expose an item")
-                    .key()
-                    .0
-                    .clone(),
-            ]),
-            ComponentState::Open | ComponentState::Disabled | ComponentState::Loading => {
-                ControlledValue::Bool(true)
-            }
-            ComponentState::Items => {
-                ControlledValue::Keys(vec!["matrix alpha".to_owned(), "matrix beta".to_owned()])
-            }
-            ComponentState::Query => ControlledValue::Text("matrix query".to_owned()),
-            ComponentState::Range => ControlledValue::Number(42.0),
-            ComponentState::CurrentPage => ControlledValue::Number(2.0),
-            ComponentState::Progress => ControlledValue::Number(48.0),
-            ComponentState::Error => ControlledValue::Text("matrix error".to_owned()),
-        }
-    }
-
-    fn catalog_state_context(root: ComponentRoot, state: ComponentState) -> ComponentRoot {
-        if root.spec().archetype() == ComponentArchetype::Layer && state != ComponentState::Open {
-            root.state(ComponentState::Open, ControlledValue::Bool(true))
-        } else {
-            root
-        }
-    }
-
     fn focus_search(app: &mut App) {
         assert!(app.ensure_frame());
         let key = SemanticKey(super::SEARCH_KEY.to_owned());
@@ -819,14 +762,6 @@ mod tests {
             key: Some(key),
             node_id: Some(node_id),
         });
-    }
-
-    fn catalog_fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(1_099_511_628_211);
-        }
-        hash
     }
 
     #[test]
@@ -849,6 +784,36 @@ mod tests {
         assert_eq!(app.input_value(), "架构");
         assert_eq!(app.input_cancel(), 1);
         assert_eq!(app.input_value(), "");
+    }
+
+    #[test]
+    fn preview_route_uses_typed_dsl_back_and_search_actions() {
+        let mut app = App::new(&TEST_RESOURCES);
+        assert!(app.open_entry("readme"));
+        assert!(matches!(app.route.get(), Route::Preview(id) if id == "readme"));
+
+        focus_search(&mut app);
+        assert_eq!(app.set_input_value("Tela".to_owned()), 1);
+        assert_eq!(app.input_value(), "Tela");
+
+        app.blur_input();
+        app.query.set(String::new());
+        app.invalidate_frame();
+        assert!(app.ensure_frame());
+        let hit = app
+            .frame()
+            .hit_regions
+            .iter()
+            .rev()
+            .find(|region| region.rect.x < 80.0 && region.rect.y < 64.0)
+            .expect("preview back control must expose a hit region");
+        let point = tela_contract::Point {
+            x: hit.rect.x + hit.rect.w * 0.5,
+            y: hit.rect.y + hit.rect.h * 0.5,
+        };
+        app.handle_pointer(PointerEvent::mouse_down(point));
+        app.handle_pointer(PointerEvent::mouse_up(point));
+        assert_eq!(app.route.get(), Route::Browse(None));
     }
 
     #[test]
@@ -923,68 +888,6 @@ mod tests {
     }
 
     #[test]
-    fn mobile_catalog_raster_reference_is_stable_at_the_application_boundary() {
-        let viewport = Viewport {
-            width: 240.0,
-            height: 360.0,
-        };
-        let background = Color::rgba(1.0, 1.0, 1.0, 1.0);
-        let mut hash = 14_695_981_039_346_656_037_u64;
-        for spec in COMPONENT_CATALOG {
-            if !spec.contract().recipes.mobile {
-                continue;
-            }
-            for state in
-                std::iter::once(None).chain(spec.contract().states.iter().copied().map(Some))
-            {
-                let root = match state {
-                    None => spec.root(format!("reference.raster.mobile.{}", spec.name)),
-                    Some(state) => {
-                        let baseline = catalog_state_context(
-                            spec.root(format!("reference.raster.mobile.{}.{state:?}", spec.name)),
-                            state,
-                        );
-                        baseline
-                            .clone()
-                            .state(state, catalog_matrix_value(&baseline, state))
-                    }
-                };
-                let tree = UiTree::new(MobileRecipe::new(&root).into_node().unwrap_or_else(
-                    |error| panic!("{} {state:?} raster recipe: {error:?}", spec.name),
-                ))
-                .unwrap_or_else(|error| panic!("{} {state:?} raster tree: {error:?}", spec.name));
-                let frame = tree
-                    .resolve(viewport, &TEST_TEXT_MEASURER, &HashMap::new())
-                    .unwrap_or_else(|error| {
-                        panic!("{} {state:?} raster frame: {error:?}", spec.name)
-                    });
-                let bitmap = render_frame(&frame, &RasterConfig::default_with(background));
-                assert_eq!(
-                    (bitmap.width, bitmap.height),
-                    (viewport.width as u32, viewport.height as u32),
-                    "{} {state:?} raster dimensions",
-                    spec.name
-                );
-                assert!(
-                    bitmap
-                        .pixels
-                        .chunks_exact(4)
-                        .any(|pixel| pixel != [255, 255, 255, 255]),
-                    "{} {state:?} must not produce a blank raster",
-                    spec.name
-                );
-                hash = catalog_fnv1a(hash, spec.name.as_bytes());
-                hash = catalog_fnv1a(hash, format!("{state:?}").as_bytes());
-                hash = catalog_fnv1a(hash, &bitmap.pixels);
-            }
-        }
-        assert_eq!(
-            hash, 17_379_567_066_821_406_475,
-            "update the raster reference intentionally after visual review"
-        );
-    }
-
-    #[test]
     fn mobile_cell_routes_its_semantic_action_through_the_dsl_action_frame() {
         let mut app = App::new(&TEST_RESOURCES);
         assert!(app.ensure_frame());
@@ -1005,7 +908,7 @@ mod tests {
             .expect("the item ActionTarget root must resolve to a node");
         let token = active.token();
 
-        assert!(app.handle_framed_actions(token, &[UiAction::Click { node_id }]));
+        assert!(app.handle_framed_interactions(token, &[KernelInteraction::Activate { node_id }]));
         assert_eq!(app.route.get(), Route::Browse(Some("design".to_owned())));
     }
 
@@ -1034,7 +937,12 @@ mod tests {
             stale_token
         );
 
-        assert!(!app.handle_framed_actions(stale_token, &[UiAction::Click { node_id }]));
+        assert!(
+            !app.handle_framed_interactions(
+                stale_token,
+                &[KernelInteraction::Activate { node_id }]
+            )
+        );
         assert_eq!(app.route.get(), Route::Browse(None));
     }
 

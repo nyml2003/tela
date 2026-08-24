@@ -12,7 +12,6 @@ mod controls;
 mod feedback;
 mod layout;
 mod nav_bar;
-mod recipe;
 mod scaffold;
 mod shared;
 mod tabs;
@@ -27,7 +26,6 @@ pub use controls::{
 pub use feedback::{MobileEmptyAction, MobileEmptyState, MobileEmptyStateStyle};
 pub use layout::MobileLayout;
 pub use nav_bar::{MobileNavBar, MobileNavBarStyle};
-pub use recipe::{MobileRecipe, MobileRecipeError};
 pub use scaffold::{MobileScaffold, MobileScaffoldStyle};
 pub use tabs::{MobileTab, MobileTabStyle, MobileTabs};
 pub use theme::MobileTheme;

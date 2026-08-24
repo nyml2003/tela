@@ -150,7 +150,6 @@ pub trait SpeedBackend {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessCatalog {
     items: Vec<ProcessInfo>,
-    query: String,
     selected: Option<ProcessIdentity>,
 }
 
@@ -175,16 +174,6 @@ impl ProcessCatalog {
     /// 当前全部快照。
     pub fn items(&self) -> &[ProcessInfo] {
         &self.items
-    }
-
-    /// 当前搜索词。
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
-    /// 设置搜索词。
-    pub fn set_query(&mut self, query: impl Into<String>) {
-        self.query = query.into();
     }
 
     /// 当前选择。
@@ -217,22 +206,6 @@ impl ProcessCatalog {
     /// 清空选择。
     pub fn clear_selection(&mut self) {
         self.selected = None;
-    }
-
-    /// 返回经过搜索的可见列表。
-    pub fn filtered(&self) -> impl Iterator<Item = &ProcessInfo> {
-        let query = self.query.trim().to_lowercase();
-        self.items.iter().filter(move |item| {
-            query.is_empty()
-                || item.name.to_lowercase().contains(&query)
-                || item.identity.pid.to_string().contains(&query)
-                || item
-                    .path
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .contains(&query)
-        })
     }
 }
 
@@ -546,13 +519,11 @@ mod tests {
     }
 
     #[test]
-    fn refresh_preserves_query_and_live_selection_but_not_reused_pid() {
+    fn refresh_preserves_live_selection_but_not_reused_pid() {
         let mut catalog = ProcessCatalog::default();
         catalog.replace(vec![process(7, true), process(8, false)]);
-        catalog.set_query("app");
         catalog.select(process(7, true).identity).unwrap();
         catalog.replace(vec![process(8, false), process(7, true)]);
-        assert_eq!(catalog.query(), "app");
         assert_eq!(catalog.selected().unwrap().pid, 7);
         let mut reused = process(7, false);
         reused.identity.creation_time = 71;

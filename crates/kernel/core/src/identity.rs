@@ -199,7 +199,7 @@ impl StableTable {
 /// 内容指纹：类型 + 内容关键属性（类型变化 → 新身份，见 005-2.2）。
 ///
 /// 尺寸、视觉和瞬时交互状态不改变身份。需要稳定路由的组件应显式声明 `SemanticKey`；
-/// `BindId` 只表示受控字段，不能再被拿来区分动态命令集合。
+/// 受控字段也必须使用结构位置或显式语义 key，不能拿业务动作字符串区分动态命令集合。
 /// 采用确定性 FNV-1a（`DefaultHasher` 随机种子会导致跨帧指纹不稳定，破坏身份匹配）。
 fn fingerprint(node: &UiNode) -> u64 {
     let mut h = FnvHasher::new();

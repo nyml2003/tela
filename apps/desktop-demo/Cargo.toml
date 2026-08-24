@@ -17,8 +17,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
 tela-ui-dsl = { path = "../../crates/ui/dsl" }
-tela-ui-headless = { path = "../../crates/ui/headless" }
 tela-desktop-ui-kit = { path = "../../crates/ui/desktop-kit" }
+tela-desktop-ui-dsl = { path = "../../crates/ui/desktop-ui-dsl" }
 
 [dev-dependencies]
 # 回归测试使用真实的受控资源核对 frame；运行时依赖仍由产品根注入。

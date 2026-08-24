@@ -1,22 +1,21 @@
 //! 客户端固定框架：顶栏、工具栏、路径栏和状态栏。
 
 use tela_contract::{
-    Fill, IconName, IconProvider, IdentityConcern, Insets, KeymapScopeId, LayoutConcern,
-    SemanticKey, ShortcutScopeSpec, Size, UiNode, UpdateMode, Viewport, VisualConcern,
+    Fill, IconName, IconProvider, Insets, KeymapScopeId, LayoutConcern, SemanticKey, Size, UiNode,
+    UpdateMode, Viewport, VisualConcern,
 };
-use tela_core::builder::{LayoutContainer, LogicalContainer};
-use tela_desktop_ui_kit::{
-    DraftInput, DraftInputSnapshot, Text, Toolbar, ToolbarItem, ToolbarStyle,
-};
+use tela_core::builder::LayoutContainer;
+use tela_desktop_ui_kit::{Text, Toolbar, ToolbarItem, ToolbarStyle};
+use tela_ui_dsl::prelude::*;
+use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, into_view_child, ui};
 use tela_ui_foundation::Icon;
 
 use crate::domain::{FileManagerModel, FileManagerSession};
 
 use super::{
-    component::Component,
     detail::detail_pane,
     navigation::{directory_tree, navigation_overlay},
-    operation::operation_modal,
+    operation::operation_modal_view,
     shared::*,
 };
 
@@ -29,26 +28,33 @@ pub struct AppShellProps<'a> {
     pub viewport: Viewport,
     pub search_focused: bool,
     pub operation_focused: bool,
-    pub search_input: DraftInputSnapshot,
     pub hovered_action_key: Option<SemanticKey>,
-    pub operation_input: Option<DraftInputSnapshot>,
     pub detail_scroll_y: f32,
     /// 图标由产品装配注入；业务 View 不选择具体资源实现。
     pub icons: &'a dyn IconProvider,
 }
 
-impl<'a> Component<AppShellProps<'a>> for AppShell {
-    fn render(&self, props: &AppShellProps<'a>) -> UiNode {
-        build_app_shell(props)
+impl AppShell {
+    /// 构建最终声明式候选树，保留输入组件携带的 owner/action plans。
+    pub fn render_view<A>(
+        build: &mut ViewBuild<A>,
+        props: &AppShellProps<'_>,
+        search_input: ViewOutput<A>,
+        operation_input: Option<ViewOutput<A>>,
+    ) -> ViewResult<ViewOutput<A>> {
+        build_app_shell_view(build, props, search_input, operation_input)
     }
 }
 
-fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
+fn build_app_shell_view<A>(
+    build: &mut ViewBuild<A>,
+    props: &AppShellProps<'_>,
+    search_input: ViewOutput<A>,
+    operation_input: Option<ViewOutput<A>>,
+) -> ViewResult<ViewOutput<A>> {
     let model = props.model;
     let session = props.session;
     let viewport = props.viewport;
-    let search_focused = props.search_focused;
-    let operation_focused = props.operation_focused;
     let narrow = viewport.width < 1200.0;
     let compact = viewport.width < 900.0;
     let horizontal_inset = APP_INSET.min((viewport.width - 1.0).max(0.0) * 0.5);
@@ -77,88 +83,143 @@ fn build_app_shell(props: &AppShellProps<'_>) -> UiNode {
         props.icons,
     ));
 
-    let workspace_shell: UiNode = LayoutContainer::column([
-        top_bar(
-            props.search_input.clone(),
-            search_focused,
-            shell_width,
-            props.icons,
-        ),
-        command_toolbar(
-            model,
-            session,
-            shell_width,
-            props.hovered_action_key.as_ref(),
-            props.icons,
-        ),
-        workspace_stack(
-            workspace,
-            model,
-            session,
-            shell_width,
-            content_h,
-            narrow,
-            props.icons,
-        ),
-        status_bar(
-            model,
-            session,
-            shell_width,
-            props.hovered_action_key.clone(),
-        ),
-    ])
-    .layout(LayoutConcern {
-        width: Some(Size::fixed(shell_width)),
-        height: Some(Size::fixed(shell_height)),
-        margin: Insets {
-            top: vertical_inset,
-            right: horizontal_inset,
-            bottom: vertical_inset,
-            left: horizontal_inset,
-        },
-        ..LayoutConcern::default()
-    })
-    .into();
-    let shell: UiNode = LayoutContainer::stack([workspace_shell])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(viewport.width)),
-            height: Some(Size::fixed(viewport.height)),
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(BG)),
-            ..VisualConcern::default()
-        })
-        .identity(IdentityConcern {
-            update_mode: UpdateMode::Dirty,
-            ..IdentityConcern::default()
-        })
-        .into();
+    let top_bar = top_bar_view(build, search_input, shell_width, props.icons)?;
+    let toolbar = into_view_child::<A, UiNode>(command_toolbar(
+        model,
+        session,
+        shell_width,
+        props.hovered_action_key.as_ref(),
+        props.icons,
+    ))?;
+    let workspace = into_view_child::<A, UiNode>(workspace_stack(
+        workspace,
+        model,
+        session,
+        shell_width,
+        content_h,
+        narrow,
+        props.icons,
+    ))?;
+    let status = into_view_child::<A, UiNode>(status_bar(
+        model,
+        session,
+        shell_width,
+        props.hovered_action_key.clone(),
+    ))?;
+    let workspace_shell = ui!(build {
+        <Column
+            width={shell_width}
+            height={shell_height}
+            margin={Insets { top: vertical_inset, right: horizontal_inset, bottom: vertical_inset, left: horizontal_inset }}
+        >
+            { top_bar }
+            { toolbar }
+            { workspace }
+            { status }
+        </Column>
+    })?;
+    let shell = ui!(build {
+        <Stack
+            width={viewport.width}
+            height={viewport.height}
+            fill={Fill::Solid(BG)}
+            update_mode={UpdateMode::Dirty}
+        >
+            { workspace_shell }
+        </Stack>
+    })?;
     let root = if session.operation.is_some() {
-        LayoutContainer::stack([
-            shell,
-            operation_modal(
-                session,
-                props.operation_input.clone(),
-                operation_focused,
-                viewport.width,
-                viewport.height,
-            ),
-        ])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(viewport.width)),
-            height: Some(Size::fixed(viewport.height)),
-            ..LayoutConcern::default()
-        })
-        .into()
+        let modal = operation_modal_view(
+            build,
+            session,
+            operation_input,
+            viewport.width,
+            viewport.height,
+        )?;
+        ui!(build {
+            <Stack width={viewport.width} height={viewport.height}>
+                { shell }
+                { modal }
+            </Stack>
+        })?
     } else {
         shell
     };
-    LogicalContainer::shortcut_scope(ShortcutScopeSpec {
-        id: KeymapScopeId("file-manager".to_owned()),
+    ui!(build {
+        <ShortcutScope id={KeymapScopeId("file-manager".to_owned())}>
+            { root }
+        </ShortcutScope>
     })
-    .children([root])
-    .into()
+}
+
+fn top_bar_view<A>(
+    build: &mut ViewBuild<A>,
+    search: ViewOutput<A>,
+    width: f32,
+    icons: &dyn IconProvider,
+) -> ViewResult<ViewOutput<A>> {
+    let brand = into_view_child::<A, UiNode>(
+        Text::new("TELA 文件")
+            .text_metrics(16.0, 16.0 * 1.35)
+            .color(TEXT)
+            .prefix(
+                Icon::new(IconName::FolderOpen)
+                    .size(20.0)
+                    .color(PRIMARY)
+                    .resolve_with(icons)
+                    .unwrap_or_else(|error| {
+                        panic!("desktop product must resolve brand icon: {error}")
+                    }),
+            )
+            .gap(6.0)
+            .into_node(),
+    )?;
+    let first_spacer = into_view_child::<A, UiNode>(spacer())?;
+    if width < 1200.0 {
+        let second_spacer = into_view_child::<A, UiNode>(spacer())?;
+        let navigation = into_view_child::<A, UiNode>(command_button(
+            "目录",
+            64.0,
+            "navigation.toggle",
+            false,
+            false,
+        ))?;
+        ui!(build {
+            <Row
+                width={width}
+                height={TOP_BAR_H}
+                padding={Insets { top: 0.0, right: 12.0, bottom: 0.0, left: 16.0 }}
+                border_width={BORDER_WIDTH}
+                cross_align={tela_contract::CrossAlign::Center}
+                fill={Fill::Solid(SURFACE)}
+                border_color={BORDER}
+                border_radii={SHELL_TOP_RADIUS}
+            >
+                { brand }
+                { first_spacer }
+                { search }
+                { second_spacer }
+                { navigation }
+            </Row>
+        })
+    } else {
+        ui!(build {
+            <Row
+                width={width}
+                height={TOP_BAR_H}
+                padding={Insets { top: 0.0, right: 12.0, bottom: 0.0, left: 16.0 }}
+                border_width={BORDER_WIDTH}
+                cross_align={tela_contract::CrossAlign::Center}
+                fill={Fill::Solid(SURFACE)}
+                border_color={BORDER}
+                border_radii={SHELL_TOP_RADIUS}
+            >
+                { brand }
+                { first_spacer }
+                { search }
+            </Row>
+        })
+    }
 }
 
 fn workspace_stack(
@@ -186,64 +247,6 @@ fn workspace_stack(
             width: Some(Size::fixed(width)),
             height: Some(Size::fixed(height)),
             ..LayoutConcern::default()
-        })
-        .into()
-}
-
-fn top_bar(
-    search_input: DraftInputSnapshot,
-    focused: bool,
-    width: f32,
-    icons: &dyn IconProvider,
-) -> UiNode {
-    let search_w = (width * 0.32).clamp(180.0, 420.0);
-    let search = fixed(
-        DraftInput::new(search_input, "file.search")
-            .placeholder("搜索文件和目录")
-            .focused(focused)
-            .border_radius(CONTROL_RADIUS)
-            .into_node(),
-        search_w,
-        28.0,
-    );
-    let brand: UiNode = Text::new("TELA 文件")
-        .text_metrics(16.0, 16.0 * 1.35)
-        .color(TEXT)
-        .prefix(
-            Icon::new(IconName::FolderOpen)
-                .size(20.0)
-                .color(PRIMARY)
-                .resolve_with(icons)
-                .unwrap_or_else(|error| panic!("desktop product must resolve brand icon: {error}")),
-        )
-        .gap(6.0)
-        .into_node();
-    let mut children = vec![brand, spacer(), search];
-    if width < 1200.0 {
-        children.extend([
-            spacer(),
-            command_button("目录", 64.0, "navigation.toggle", false, false),
-        ]);
-    }
-    LayoutContainer::row(children)
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            height: Some(Size::fixed(TOP_BAR_H)),
-            padding: tela_contract::Insets {
-                top: 0.0,
-                right: 12.0,
-                bottom: 0.0,
-                left: 16.0,
-            },
-            border_width: BORDER_WIDTH,
-            cross_align: tela_contract::CrossAlign::Center,
-            ..LayoutConcern::default()
-        })
-        .visual(VisualConcern {
-            fill: Some(Fill::Solid(SURFACE)),
-            border_color: Some(BORDER),
-            border_radius: SHELL_TOP_RADIUS,
-            ..VisualConcern::default()
         })
         .into()
 }

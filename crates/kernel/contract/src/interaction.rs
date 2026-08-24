@@ -1,4 +1,4 @@
-//! 交互维度：`UiAction` 出站动作、`BindId` 业务绑定、键盘事件与快捷键类型、宿主端口
+//! 交互维度：Kernel 出站事实、键盘事件与快捷键类型、宿主端口
 //! （见 008-交互焦点与宿主接口、012-业务数据绑定）。
 
 use crate::{NodeId, Point, TextMeasurer, TextureId, TextureRef, Viewport};
@@ -61,7 +61,7 @@ impl PointerButtons {
 /// Target 规范化后交给 Kernel 的原始指针帧。
 ///
 /// 它不携带 click、scroll 手势或应用组件含义。多个 `PointerId` 可交错出现；
-/// 捕获和手势仲裁由 `tela-core` 保持跨帧状态并给出通用 `UiAction`。
+/// 捕获和手势仲裁由 `tela-core` 保持跨帧状态并给出通用 `KernelInteraction`。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointerEvent {
     /// 指针 id；鼠标通常固定为零，触摸和笔必须保留宿主原始 id。
@@ -251,13 +251,13 @@ pub enum InputEvent {
     /// 当前焦点文本输入节点的 IME / 受控编辑事件。
     ///
     /// Target 只负责把平台文本服务规范化为此值；Kernel 依据本帧焦点确认它确实落在
-    /// 声明 `TextInputSpec` 的节点上，再分别产出字段 `ValueChange` 和组件文本事件。
+    /// 声明 `TextInputSpec` 的节点上，再产出保留完整编辑生命周期的组件文本事件。
     Text(TextInputEvent),
 }
 
 /// 文本输入的语义类型。
 ///
-/// 它是 Host 选择软键盘/编辑行为的提示，也是 Headless/Input recipe 的稳定能力声明；
+/// 它是 Host 选择软键盘/编辑行为的稳定能力声明；
 /// 不是 HTML input type 或 UIKit/Android 的具体枚举。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TextInputKind {
@@ -307,11 +307,13 @@ impl TextSelection {
     }
 }
 
-/// 节点声明给 Kernel、Headless 与 Target 的文本输入能力。
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// 节点声明给 Kernel、Composition 与 Target 的文本输入能力。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TextInputSpec {
     /// 输入语义类型。
     pub kind: TextInputKind,
+    /// 当前已声明的受控文本值。
+    pub value: String,
     /// 受控文本在本帧的光标/选择快照。
     pub selection: TextSelection,
 }
@@ -321,8 +323,16 @@ impl TextInputSpec {
     pub const fn new(kind: TextInputKind) -> Self {
         Self {
             kind,
+            value: String::new(),
             selection: TextSelection::collapsed(0),
         }
+    }
+
+    /// 覆盖本帧的受控文本值。
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = value.into();
+        self.selection = TextSelection::collapsed(self.value.len().min(u32::MAX as usize) as u32);
+        self
     }
 
     /// 覆盖本帧的光标或选择快照。
@@ -377,85 +387,69 @@ impl TextInputEvent {
     }
 }
 
-/// 业务绑定标识：唯一业务变更通道，挂在 `InteractConcern.bind_id`（见 012-业务数据绑定）。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BindId(pub String);
-
-/// `ValueChange` 的类型化载荷（见 012-业务数据绑定 2）。
-#[derive(Clone, Debug, PartialEq)]
-pub enum Value {
-    /// 字符串。
-    String(String),
-    /// 数字。
-    Number(f64),
-    /// 布尔。
-    Bool(bool),
-    /// 枚举。
-    Enum(String),
-}
-
-/// 类型化交互动作，抛给宿主执行（见 008-交互焦点与宿主接口 4）。
+/// Kernel 交互事实。
 ///
-/// 核心内无业务副作用：宿主决定业务行为。`ValueChange` 是唯一业务变更通道（带 `BindId`）；
-/// 纯视图动作（滚动/模态/焦点）走 `node_id` 链路，不带 `BindId`。
+/// 它只描述 Kernel 已经规约出的交互，不携带应用命令；组件将文本、指针或激活事实
+/// 转换为自己的局部事件或 typed Output。
 #[derive(Clone, Debug, PartialEq)]
-pub enum UiAction {
-    /// 原始指针帧已被捕获节点或当前命中节点接收。
-    ///
-    /// 这是 Slider、Splitter 等需要连续坐标的通用出口；应用/Headless 按稳定部件路径
-    /// 解释它，Kernel 不认识具体组件。
+pub enum KernelInteraction {
+    /// 原始指针流。
     Pointer {
-        /// 接收当前指针帧的节点。
+        /// 当前帧节点。
         node_id: NodeId,
-        /// 已经过坐标规范化的原始帧。
+        /// 指针帧。
         event: PointerEvent,
     },
-    /// Kernel 手势仲裁后的通用输出。
+    /// 手势识别结果。
     Gesture {
-        /// 获胜候选者节点。
+        /// 获胜节点。
         node_id: NodeId,
         /// 手势数据。
         event: GestureEvent,
     },
-    /// 当前焦点文本输入节点收到 IME / 受控编辑事件。
-    ///
-    /// 当节点同时声明 `BindId` 时，同一输入帧还会额外产生 `ValueChange`；该动作保留
-    /// selection、composition 和取消语义，供 Headless 与 Application 管理临时编辑状态。
+    /// 文本编辑生命周期。
     TextInput {
-        /// 当前焦点输入节点。
+        /// 当前输入节点。
         node_id: NodeId,
-        /// 文本编辑生命周期。
+        /// 文本事件。
         event: TextInputEvent,
     },
-    /// 点击。
-    Click {
-        /// 命中的节点。
+    /// 当前焦点节点声明接管的语义键盘输入。
+    Keyboard {
+        /// 当前帧节点。
+        node_id: NodeId,
+        /// 已由应用键位表或 Target 默认表解析的语义意图。
+        event: KeyboardIntentEvent,
+    },
+    /// 已完成的激活语义。
+    Activate {
+        /// 目标节点。
         node_id: NodeId,
     },
-    /// 悬停进入/离开。
+    /// hover 状态变化。
     Hover {
-        /// 悬停节点。
+        /// 目标节点。
         node_id: NodeId,
-        /// `true` = 进入，`false` = 离开。
+        /// 是否进入。
         entered: bool,
     },
-    /// 滚动意图。
+    /// 滚动增量。
     Scroll {
-        /// 滚动容器节点。
+        /// 滚动节点。
         node_id: NodeId,
-        /// 滚动增量。
+        /// 增量。
         delta: Point,
     },
-    /// 请求聚焦某节点。
+    /// 请求焦点。
     RequestFocus {
-        /// 请求聚焦的节点。
+        /// 目标节点。
         node_id: NodeId,
     },
-    /// 焦点变更通知。
+    /// 焦点变化通知。
     FocusChanged {
-        /// 原焦点，`None` = 此前无焦点。
+        /// 原焦点。
         from: Option<NodeId>,
-        /// 新焦点，`None` = 焦点清空。
+        /// 新焦点。
         to: Option<NodeId>,
     },
     /// 打开模态。
@@ -468,27 +462,43 @@ pub enum UiAction {
         /// 模态节点。
         node_id: NodeId,
     },
-    /// 命中 portal 外部区域（关闭逻辑由宿主业务实现，见 008-交互焦点与宿主接口 3）。
-    TeleportClickOutside {
+    /// Teleport 外部命中。
+    OutsidePress {
         /// Teleport 节点。
         teleport_node_id: NodeId,
     },
-    /// 业务值变更（唯一业务变更通道，见 012-业务数据绑定）。
-    ValueChange {
-        /// 绑定标识。
-        bind_id: BindId,
-        /// 类型化载荷。
-        value: Value,
-    },
-    /// 局部快捷键命中（见 008-交互焦点与宿主接口 2.11）。
+    /// 快捷键语义。
     ShortcutActivated {
-        /// 命中的语义快捷键。
+        /// 快捷键 id。
         shortcut_id: ShortcutId,
     },
-    /// 保存当前焦点入视图状态仓库（显式原语，见 008 2.10）。
+    /// 保存焦点。
     SaveFocus,
-    /// 恢复上次保存的焦点（显式原语，无自动隐式恢复）。
+    /// 恢复焦点。
     RestoreFocus,
+}
+
+impl KernelInteraction {
+    /// 返回当前交互的帧内目标；全局焦点和快捷键没有单一目标。
+    pub const fn target_node_id(&self) -> Option<NodeId> {
+        match self {
+            Self::Pointer { node_id, .. }
+            | Self::Gesture { node_id, .. }
+            | Self::TextInput { node_id, .. }
+            | Self::Keyboard { node_id, .. }
+            | Self::Activate { node_id }
+            | Self::Hover { node_id, .. }
+            | Self::Scroll { node_id, .. }
+            | Self::RequestFocus { node_id }
+            | Self::OpenModal { node_id }
+            | Self::CloseModal { node_id } => Some(*node_id),
+            Self::OutsidePress { teleport_node_id } => Some(*teleport_node_id),
+            Self::FocusChanged { .. }
+            | Self::ShortcutActivated { .. }
+            | Self::SaveFocus
+            | Self::RestoreFocus => None,
+        }
+    }
 }
 
 /// 修饰键集合。
@@ -739,6 +749,10 @@ pub enum KeyboardIntent {
     FocusPrevious,
     /// 按焦点图的方向移动。
     MoveFocus(FocusDirection),
+    /// 移动到当前局部交互范围的起点。
+    MoveToStart,
+    /// 移动到当前局部交互范围的终点。
+    MoveToEnd,
     /// 激活当前焦点。
     Activate,
     /// 取消当前交互/关闭当前模态。
@@ -754,6 +768,36 @@ pub struct KeyboardIntentEvent {
     pub intent: KeyboardIntent,
     /// 是否为键盘自动重复。
     pub repeat: bool,
+}
+
+/// 节点可声明接管的局部键盘意图集合。
+///
+/// 未声明的意图继续由 Kernel 默认焦点/激活语义处理；组件不会接触平台物理键码。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardInputSpec {
+    /// 接管四向移动意图。
+    pub directional: bool,
+    /// 接管起点/终点意图。
+    pub boundary: bool,
+}
+
+impl KeyboardInputSpec {
+    /// Slider 等连续值控件使用的方向与边界键集合。
+    pub const fn directional_value() -> Self {
+        Self {
+            directional: true,
+            boundary: true,
+        }
+    }
+
+    /// 判断该节点是否声明接管给定语义意图。
+    pub const fn accepts(self, intent: &KeyboardIntent) -> bool {
+        matches!(intent, KeyboardIntent::MoveFocus(_)) && self.directional
+            || matches!(
+                intent,
+                KeyboardIntent::MoveToStart | KeyboardIntent::MoveToEnd
+            ) && self.boundary
+    }
 }
 
 /// 键位表作用域的稳定标识。

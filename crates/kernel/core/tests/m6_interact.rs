@@ -1,18 +1,18 @@
-//! M6 验收测试：输入 → 命中 → 焦点转移 → UiAction、模态栈、快捷键（见 010-落地路线 M6、008）。
+//! M6 验收测试：输入 → 命中 → 焦点转移 → KernelInteraction、模态栈、快捷键（见 010-落地路线 M6、008）。
 
 use std::collections::HashMap;
 use tela_contract::{
-    BindId, Color, Fill, FocusDirection, FocusEdge, FocusGraph, FocusPort, FocusRef,
-    FocusScopeSpec, GestureAxis, GestureConfig, GestureKind, GesturePhase, IdentityConcern,
-    InputEvent, InteractConcern, KeyStrategy, KeyboardIntent, KeyboardIntentEvent, LayoutConcern,
-    Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase, SemanticKey,
-    ShortcutId, Size, TextInputEvent, TextInputKind, TextInputSpec, TextMeasureRequest,
-    TextMeasurer, TextMetrics, TextSelection, UiAction, Value, Viewport, VirtualListSpec,
-    VisualConcern,
+    Color, Fill, FocusDirection, FocusEdge, FocusGraph, FocusPort, FocusRef, FocusScopeSpec,
+    GestureAxis, GestureConfig, GestureKind, GesturePhase, IdentityConcern, InputEvent,
+    InteractConcern, KernelInteraction, KeyStrategy, KeyboardInputSpec, KeyboardIntent,
+    KeyboardIntentEvent, LayoutConcern, Point, PointerButtons, PointerEvent, PointerId,
+    PointerKind, PointerPhase, SemanticKey, ShortcutId, Size, TextInputEvent, TextInputKind,
+    TextInputSpec, TextMeasureRequest, TextMeasurer, TextMetrics, TextSelection, Viewport,
+    VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{
-    DefaultApplicationProfile, UiTree, ViewStateStore, ensure_modal_focus, handle_input,
+    DefaultApplicationProfile, UiTree, ViewStateStore, ensure_modal_focus, handle_kernel_input,
     restore_focus, save_focus,
 };
 
@@ -154,7 +154,7 @@ trait IntoNode: Into<tela_contract::UiNode> {
 }
 impl<T: Into<tela_contract::UiNode>> IntoNode for T {}
 
-// ---------- 验收：命中测试 → UiAction 序列 ----------
+// ---------- 验收：命中测试 → KernelInteraction 序列 ----------
 
 #[test]
 fn pointer_sequence_defers_click_until_release_and_focuses_on_down() {
@@ -167,7 +167,7 @@ fn pointer_sequence_defers_click_until_release_and_focuses_on_down() {
     let scroll_frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 按下只交付原始帧；Click 必须由同一稳定命中目标的 Up 生成。
-    let down = handle_input(
+    let down = handle_kernel_input(
         &tree,
         &scroll_frame,
         &mut state,
@@ -175,15 +175,15 @@ fn pointer_sequence_defers_click_until_release_and_focuses_on_down() {
     );
     assert!(
         down.iter()
-            .any(|action| matches!(action, UiAction::Pointer { .. }))
+            .any(|action| matches!(action, KernelInteraction::Pointer { .. }))
     );
     assert!(
         !down
             .iter()
-            .any(|action| matches!(action, UiAction::Click { .. })),
+            .any(|action| matches!(action, KernelInteraction::Activate { .. })),
         "Down 不能被预判成 Click"
     );
-    let up = handle_input(
+    let up = handle_kernel_input(
         &tree,
         &scroll_frame,
         &mut state,
@@ -191,11 +191,11 @@ fn pointer_sequence_defers_click_until_release_and_focuses_on_down() {
     );
     assert!(
         up.iter()
-            .any(|action| matches!(action, UiAction::Click { .. }))
+            .any(|action| matches!(action, KernelInteraction::Activate { .. }))
     );
 
     // 按下第二个（可聚焦）：焦点在 Down 时转移。
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &scroll_frame,
         &mut state,
@@ -204,12 +204,12 @@ fn pointer_sequence_defers_click_until_release_and_focuses_on_down() {
     assert!(
         actions
             .iter()
-            .any(|a| matches!(a, UiAction::FocusChanged { .. }))
+            .any(|a| matches!(a, KernelInteraction::FocusChanged { .. }))
     );
 }
 
 #[test]
-fn focused_text_input_emits_lifecycle_and_only_edits_write_the_bound_field() {
+fn focused_text_input_emits_the_complete_edit_lifecycle() {
     let tree = UiTree::new(keyed_interactive_rect(
         "filter.input",
         120.0,
@@ -217,16 +217,17 @@ fn focused_text_input_emits_lifecycle_and_only_edits_write_the_bound_field() {
         InteractConcern {
             focusable: true,
             input: Some(
-                TextInputSpec::new(TextInputKind::Search).selection(TextSelection::collapsed(2)),
+                TextInputSpec::new(TextInputKind::Search)
+                    .value("ab")
+                    .selection(TextSelection::collapsed(2)),
             ),
-            bind_id: Some(BindId("filter.query".to_owned())),
             ..InteractConcern::default()
         },
     ))
     .unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(
+    handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -238,34 +239,28 @@ fn focused_text_input_emits_lifecycle_and_only_edits_write_the_bound_field() {
         selection: TextSelection::collapsed(2),
         composing: true,
     };
-    let actions = handle_input(&tree, &frame, &mut state, &InputEvent::Text(edit.clone()));
+    let actions = handle_kernel_input(&tree, &frame, &mut state, &InputEvent::Text(edit.clone()));
     let node_id = tree
         .node_id_for_key(&SemanticKey("filter.input".to_owned()))
         .expect("focused input key");
     assert_eq!(
         actions,
-        vec![
-            UiAction::TextInput {
-                node_id,
-                event: edit,
-            },
-            UiAction::ValueChange {
-                bind_id: BindId("filter.query".to_owned()),
-                value: Value::String("te".to_owned()),
-            },
-        ]
+        vec![KernelInteraction::TextInput {
+            node_id,
+            event: edit,
+        }]
     );
 
     let cancel = TextInputEvent::Cancel {
         selection: TextSelection::collapsed(2),
     };
     assert_eq!(
-        handle_input(&tree, &frame, &mut state, &InputEvent::Text(cancel.clone())),
-        vec![UiAction::TextInput {
+        handle_kernel_input(&tree, &frame, &mut state, &InputEvent::Text(cancel.clone())),
+        vec![KernelInteraction::TextInput {
             node_id,
             event: cancel,
         }],
-        "取消保留组件编辑生命周期，但不得写入 BindId"
+        "取消事件也必须保留完整组件编辑生命周期"
     );
 }
 
@@ -287,7 +282,7 @@ fn hit_test_respects_clip() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 盒内 (10,10) 命中；clip 内容区 (0,0,50,50) 内 ✓。
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -329,7 +324,7 @@ fn scroll_bubbles_from_child_button_to_virtual_list() {
     .unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -339,7 +334,7 @@ fn scroll_bubbles_from_child_button_to_virtual_list() {
         )),
     );
     assert!(actions.iter().any(
-        |action| matches!(action, UiAction::Scroll { node_id, .. } if *node_id == tree.node_ids()[0])
+        |action| matches!(action, KernelInteraction::Scroll { node_id, .. } if *node_id == tree.node_ids()[0])
     ));
 }
 
@@ -356,32 +351,63 @@ fn tab_moves_in_tree_order() {
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
     // 无焦点时 Tab → 首个可聚焦。
-    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     let first = ids[1];
-    assert!(
-        actions
-            .iter()
-            .any(|a| matches!(a, UiAction::FocusChanged { to: Some(id), .. } if *id == first))
-    );
+    assert!(actions.iter().any(
+        |a| matches!(a, KernelInteraction::FocusChanged { to: Some(id), .. } if *id == first)
+    ));
     // 再 Tab → 第二个。
-    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     let second = ids[2];
-    assert!(
-        actions
-            .iter()
-            .any(|a| matches!(a, UiAction::FocusChanged { to: Some(id), .. } if *id == second))
-    );
+    assert!(actions.iter().any(
+        |a| matches!(a, KernelInteraction::FocusChanged { to: Some(id), .. } if *id == second)
+    ));
     // Shift+Tab 回退 → 第一个。
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &key(KeyboardIntent::FocusPrevious),
     );
-    assert!(
-        actions
-            .iter()
-            .any(|a| matches!(a, UiAction::FocusChanged { to: Some(id), .. } if *id == first))
+    assert!(actions.iter().any(
+        |a| matches!(a, KernelInteraction::FocusChanged { to: Some(id), .. } if *id == first)
+    ));
+}
+
+#[test]
+fn focused_node_can_handle_semantic_direction_without_moving_default_focus() {
+    let mut local = focusable_rect(50.0, 20.0, 0);
+    local.interact.as_mut().unwrap().keyboard = Some(KeyboardInputSpec::directional_value());
+    let tree = UiTree::new(
+        LogicalContainer::focus_scope(FocusScopeSpec::default())
+            .children([local, focusable_rect(50.0, 20.0, 0)]),
+    )
+    .unwrap();
+    let frame = frame(&tree);
+    let mut state = ViewStateStore::new();
+    let local_id = tree.node_ids()[1];
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+
+    let actions = handle_kernel_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::MoveFocus(FocusDirection::Right)),
+    );
+
+    assert_eq!(
+        state.current_focus().and_then(|focus| focus.node_id),
+        Some(local_id)
+    );
+    assert_eq!(
+        actions,
+        vec![KernelInteraction::Keyboard {
+            node_id: local_id,
+            event: KeyboardIntentEvent {
+                intent: KeyboardIntent::MoveFocus(FocusDirection::Right),
+                repeat: false,
+            },
+        }]
     );
 }
 
@@ -399,10 +425,10 @@ fn tab_index_reorders_and_negative_excludes() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     // 首个 = tab_index 0 的第三个节点。
     assert!(state.current_focus().and_then(|f| f.node_id) == Some(ids[3]));
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(ids[1]),
         "tab_index 5 次之"
@@ -422,10 +448,10 @@ fn trap_focus_wraps_around() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     // 末尾再 Tab → 回绕到首项。
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(ids[1]),
         "trap 回绕到首项"
@@ -453,7 +479,7 @@ fn entry_port_resolves_direction() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 无焦点时按下方向键 → 根 scope 入口 → 首个可聚焦。
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -462,7 +488,7 @@ fn entry_port_resolves_direction() {
     assert!(
         actions
             .iter()
-            .any(|a| matches!(a, UiAction::FocusChanged { to: Some(_), .. }))
+            .any(|a| matches!(a, KernelInteraction::FocusChanged { to: Some(_), .. }))
     );
 }
 
@@ -489,8 +515,8 @@ fn focus_graph_edge_replaces_auto_rules() {
     let mut state = ViewStateStore::new();
     let ids = tree.node_ids();
     // 聚焦到第一个 → 方向键 → 沿显式边到第二个。
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    handle_input(
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -513,10 +539,12 @@ fn confirm_triggers_active_action() {
     .unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::Activate));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::Activate));
     assert!(
-        actions.iter().any(|a| matches!(a, UiAction::Click { .. })),
+        actions
+            .iter()
+            .any(|a| matches!(a, KernelInteraction::Activate { .. })),
         "确认触发主动作"
     );
 }
@@ -527,16 +555,16 @@ fn save_and_restore_focus_explicit() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 聚焦第二个并保存。
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     save_focus(&mut state);
     // 焦点移开。
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(state.current_focus().and_then(|f| f.node_id) != Some(tree.node_ids()[2]));
     // 显式恢复 → 回到保存的焦点。
     let actions = restore_focus(&tree, &mut state);
     assert!(actions.iter().any(
-        |a| matches!(a, UiAction::FocusChanged { to: Some(id), .. } if *id == tree.node_ids()[2])
+        |a| matches!(a, KernelInteraction::FocusChanged { to: Some(id), .. } if *id == tree.node_ids()[2])
     ));
 }
 
@@ -547,14 +575,14 @@ fn keyboard_intent_activates_shortcut() {
     let tree = UiTree::new(focusable_rect(50.0, 20.0, 0)).unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &key(KeyboardIntent::Invoke(ShortcutId::Save)),
     );
     assert!(actions.iter().any(
-        |action| matches!(action, UiAction::ShortcutActivated { shortcut_id } if *shortcut_id == ShortcutId::Save)
+        |action| matches!(action, KernelInteraction::ShortcutActivated { shortcut_id } if *shortcut_id == ShortcutId::Save)
     ));
 }
 
@@ -563,7 +591,7 @@ fn repeated_command_intent_is_ignored() {
     let tree = UiTree::new(focusable_rect(50.0, 20.0, 0)).unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -593,41 +621,45 @@ fn modal_blocks_lower_layer_input() {
     let mut state = ViewStateStore::new();
     state.push_modal(SemanticKey("modal".to_string()));
     // 点击下层区域 → 被模态拦截（无 Click 动作）。
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 90.0, y: 90.0 })),
     );
-    let blocked_up = handle_input(
+    let blocked_up = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 90.0, y: 90.0 })),
     );
     assert!(
-        !actions.iter().any(|a| matches!(a, UiAction::Click { .. }))
+        !actions
+            .iter()
+            .any(|a| matches!(a, KernelInteraction::Activate { .. }))
             && !blocked_up
                 .iter()
-                .any(|a| matches!(a, UiAction::Click { .. })),
+                .any(|a| matches!(a, KernelInteraction::Activate { .. })),
         "下层输入被模态拦截"
     );
     // 关闭模态后 → 下层可点击。
     state.pop_modal();
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 90.0, y: 90.0 })),
     );
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 90.0, y: 90.0 })),
     );
     assert!(
-        actions.iter().any(|a| matches!(a, UiAction::Click { .. })),
+        actions
+            .iter()
+            .any(|a| matches!(a, KernelInteraction::Activate { .. })),
         "模态关闭后下层恢复"
     );
 }
@@ -647,12 +679,12 @@ fn cancel_closes_modal_when_focus_inside() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     state.push_modal(SemanticKey("modal".to_string()));
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::Cancel));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::Cancel));
     assert!(
         actions
             .iter()
-            .any(|a| matches!(a, UiAction::CloseModal { .. })),
+            .any(|a| matches!(a, KernelInteraction::CloseModal { .. })),
         "取消先关当前模态"
     );
 }
@@ -673,17 +705,17 @@ fn active_modal_captures_default_keyboard_focus() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     state.push_modal(SemanticKey("modal".to_owned()));
-    let actions = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    let actions = handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     let focused = actions.iter().find_map(|action| match action {
-        UiAction::FocusChanged {
+        KernelInteraction::FocusChanged {
             to: Some(node_id), ..
         } => Some(*node_id),
         _ => None,
     });
     assert_eq!(focused, Some(tree.node_ids()[3]));
-    let activate = handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::Activate));
+    let activate = handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::Activate));
     assert!(activate.iter().any(
-        |action| matches!(action, UiAction::Click { node_id } if *node_id == tree.node_ids()[3])
+        |action| matches!(action, KernelInteraction::Activate { node_id } if *node_id == tree.node_ids()[3])
     ));
 }
 
@@ -705,7 +737,7 @@ fn modal_opening_assigns_default_focus_without_a_component_focus_key() {
     let actions = ensure_modal_focus(&tree, &mut state);
     assert!(matches!(
         actions.as_slice(),
-        [UiAction::FocusChanged { to: Some(node_id), .. }] if *node_id == tree.node_ids()[3]
+        [KernelInteraction::FocusChanged { to: Some(node_id), .. }] if *node_id == tree.node_ids()[3]
     ));
     assert_eq!(state.current_focus_key(), Some(&tree.keys()[3]));
 }
@@ -776,8 +808,8 @@ fn teleport_focus_chain_mounts_to_modal_host_scope() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // Tab → 首个可聚焦（page-btn）；再 Tab → menu-item（Teleport 迁移进 ModalHost 遍历链）。
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) != Some(tree.node_ids()[1]),
         "Teleport 子树可 Tab 进入（焦点链迁移）"
@@ -800,8 +832,8 @@ fn draw_order_does_not_change_tab_order() {
     .unwrap();
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     // 第二个 Tab 落在树序第二个（bottom），与绘制层级无关。
     assert!(state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[3]));
 }
@@ -830,12 +862,12 @@ fn entry_port_binding_lands_on_target() {
     let mut state = ViewStateStore::new();
     // 聚焦 a（树序第一个可聚焦 = inner-target？—— 父 scope focusables 只有 a；子 scope 的在其内）。
     // 先 Tab（首个可聚焦 = a），再 Down（越界 → 默认回退 → 进入子 scope entry_down）。
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
     assert!(
         state.current_focus().and_then(|f| f.node_id) == Some(tree.node_ids()[1]),
         "焦点在 a"
     );
-    handle_input(
+    handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -878,8 +910,8 @@ fn parent_graph_may_target_child_scope_itself() {
     let _ = ok;
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
-    handle_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
-    handle_input(
+    handle_kernel_input(&tree, &frame, &mut state, &key(KeyboardIntent::FocusNext));
+    handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -900,7 +932,7 @@ fn hover_emits_enter_and_leave() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 移入第一个。
-    let a = handle_input(
+    let a = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -908,10 +940,10 @@ fn hover_emits_enter_and_leave() {
     );
     assert!(
         a.iter()
-            .any(|x| matches!(x, UiAction::Hover { entered: true, .. }))
+            .any(|x| matches!(x, KernelInteraction::Hover { entered: true, .. }))
     );
     // 移入第二个：先发第一个的离开。
-    let b = handle_input(
+    let b = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -919,16 +951,16 @@ fn hover_emits_enter_and_leave() {
     );
     assert!(
         b.iter()
-            .any(|x| matches!(x, UiAction::Hover { entered: false, .. })),
+            .any(|x| matches!(x, KernelInteraction::Hover { entered: false, .. })),
         "应发离开事件"
     );
     assert!(
         b.iter()
-            .any(|x| matches!(x, UiAction::Hover { entered: true, .. })),
+            .any(|x| matches!(x, KernelInteraction::Hover { entered: true, .. })),
         "应发进入事件"
     );
     // 移出全部：发离开。
-    let c = handle_input(
+    let c = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -936,7 +968,7 @@ fn hover_emits_enter_and_leave() {
     );
     assert!(
         c.iter()
-            .any(|x| matches!(x, UiAction::Hover { entered: false, .. })),
+            .any(|x| matches!(x, KernelInteraction::Hover { entered: false, .. })),
         "移出应发离开"
     );
 }
@@ -973,7 +1005,7 @@ fn pointer_capture_routes_raw_events_and_releases_on_terminal_or_unmount() {
     let captured_id = tree.node_id_for_key(&capture_key).unwrap();
     let mut state = ViewStateStore::new();
 
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -981,7 +1013,7 @@ fn pointer_capture_routes_raw_events_and_releases_on_terminal_or_unmount() {
     );
     assert_eq!(state.captured_pointer_key(PointerId(0)), Some(&capture_key));
 
-    let moved = handle_input(
+    let moved = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -996,35 +1028,35 @@ fn pointer_capture_routes_raw_events_and_releases_on_terminal_or_unmount() {
         )),
     );
     assert!(moved.iter().any(
-        |action| matches!(action, UiAction::Pointer { node_id, event }
+        |action| matches!(action, KernelInteraction::Pointer { node_id, event }
             if *node_id == captured_id && event.phase == PointerPhase::Move)
     ));
 
-    let released = handle_input(
+    let released = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &InputEvent::Pointer(PointerEvent::mouse_up(Point { x: 90.0, y: 10.0 })),
     );
     assert!(released.iter().any(
-        |action| matches!(action, UiAction::Pointer { node_id, event }
+        |action| matches!(action, KernelInteraction::Pointer { node_id, event }
             if *node_id == captured_id && event.phase == PointerPhase::Up)
     ));
     assert!(
         !released
             .iter()
-            .any(|action| matches!(action, UiAction::Click { .. })),
+            .any(|action| matches!(action, KernelInteraction::Activate { .. })),
         "释放位置不再命中原目标时不得产生 Click"
     );
     assert_eq!(state.captured_pointer_key(PointerId(0)), None);
 
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
         &InputEvent::Pointer(PointerEvent::mouse_down(Point { x: 10.0, y: 10.0 })),
     );
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -1040,7 +1072,7 @@ fn pointer_capture_routes_raw_events_and_releases_on_terminal_or_unmount() {
     );
     assert_eq!(state.captured_pointer_key(PointerId(0)), None);
 
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -1093,24 +1125,24 @@ fn nested_scroll_prefers_inner_pan_and_explicit_swipe_wins_conflict() {
     let scroll_frame = frame(&tree);
     let inner_id = tree.node_id_for_key(&inner_key).unwrap();
     let mut state = ViewStateStore::new();
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &tree,
         &scroll_frame,
         &mut state,
         &InputEvent::Pointer(touch(1, PointerPhase::Down, Point { x: 10.0, y: 10.0 }, 10)),
     );
-    let pan = handle_input(
+    let pan = handle_kernel_input(
         &tree,
         &scroll_frame,
         &mut state,
         &InputEvent::Pointer(touch(1, PointerPhase::Move, Point { x: 10.0, y: 30.0 }, 20)),
     );
     assert!(pan.iter().any(
-        |action| matches!(action, UiAction::Gesture { node_id, event }
+        |action| matches!(action, KernelInteraction::Gesture { node_id, event }
             if *node_id == inner_id && event.kind == GestureKind::Pan && event.phase == GesturePhase::Start)
     ));
     assert!(pan.iter().any(
-        |action| matches!(action, UiAction::Scroll { node_id, delta }
+        |action| matches!(action, KernelInteraction::Scroll { node_id, delta }
             if *node_id == inner_id && *delta == Point { x: 0.0, y: -20.0 })
     ));
 
@@ -1141,26 +1173,26 @@ fn nested_scroll_prefers_inner_pan_and_explicit_swipe_wins_conflict() {
     let explicit_frame = frame(&explicit);
     let swipe_id = explicit.node_id_for_key(&swipe_key).unwrap();
     let mut explicit_state = ViewStateStore::new();
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &explicit,
         &explicit_frame,
         &mut explicit_state,
         &InputEvent::Pointer(touch(2, PointerPhase::Down, Point { x: 10.0, y: 10.0 }, 10)),
     );
-    let swipe = handle_input(
+    let swipe = handle_kernel_input(
         &explicit,
         &explicit_frame,
         &mut explicit_state,
         &InputEvent::Pointer(touch(2, PointerPhase::Move, Point { x: 32.0, y: 10.0 }, 20)),
     );
     assert!(swipe.iter().any(
-        |action| matches!(action, UiAction::Gesture { node_id, event }
+        |action| matches!(action, KernelInteraction::Gesture { node_id, event }
             if *node_id == swipe_id && event.kind == GestureKind::Swipe && event.phase == GesturePhase::Start)
     ));
     assert!(
         !swipe
             .iter()
-            .any(|action| matches!(action, UiAction::Scroll { .. })),
+            .any(|action| matches!(action, KernelInteraction::Scroll { .. })),
         "显式水平 Swipe 不能被低优先级滚动 Pan 抢走"
     );
 }
@@ -1184,13 +1216,13 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
     let long_press_frame = frame(&long_press_tree);
     let long_press_id = long_press_tree.node_id_for_key(&long_press_key).unwrap();
     let mut long_press_state = ViewStateStore::new();
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &long_press_tree,
         &long_press_frame,
         &mut long_press_state,
         &InputEvent::Pointer(touch(7, PointerPhase::Down, Point { x: 10.0, y: 10.0 }, 10)),
     );
-    let held = handle_input(
+    let held = handle_kernel_input(
         &long_press_tree,
         &long_press_frame,
         &mut long_press_state,
@@ -1202,10 +1234,10 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
         )),
     );
     assert!(held.iter().any(
-        |action| matches!(action, UiAction::Gesture { node_id, event }
+        |action| matches!(action, KernelInteraction::Gesture { node_id, event }
             if *node_id == long_press_id && event.kind == GestureKind::LongPress && event.phase == GesturePhase::Start)
     ));
-    let ended = handle_input(
+    let ended = handle_kernel_input(
         &long_press_tree,
         &long_press_frame,
         &mut long_press_state,
@@ -1217,7 +1249,7 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
         )),
     );
     assert!(ended.iter().any(
-        |action| matches!(action, UiAction::Gesture { node_id, event }
+        |action| matches!(action, KernelInteraction::Gesture { node_id, event }
             if *node_id == long_press_id && event.kind == GestureKind::LongPress && event.phase == GesturePhase::End)
     ));
 
@@ -1238,7 +1270,7 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
     let pinch_frame = frame(&pinch_tree);
     let pinch_id = pinch_tree.node_id_for_key(&pinch_key).unwrap();
     let mut pinch_state = ViewStateStore::new();
-    let _ = handle_input(
+    let _ = handle_kernel_input(
         &pinch_tree,
         &pinch_frame,
         &mut pinch_state,
@@ -1249,7 +1281,7 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
             10,
         )),
     );
-    let began = handle_input(
+    let began = handle_kernel_input(
         &pinch_tree,
         &pinch_frame,
         &mut pinch_state,
@@ -1261,10 +1293,10 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
         )),
     );
     assert!(began.iter().any(
-        |action| matches!(action, UiAction::Gesture { node_id, event }
+        |action| matches!(action, KernelInteraction::Gesture { node_id, event }
             if *node_id == pinch_id && event.kind == GestureKind::Pinch && event.phase == GesturePhase::Start)
     ));
-    let updated = handle_input(
+    let updated = handle_kernel_input(
         &pinch_tree,
         &pinch_frame,
         &mut pinch_state,
@@ -1276,7 +1308,7 @@ fn long_press_and_pinch_are_recognized_from_raw_touch_sequences() {
         )),
     );
     assert!(updated.iter().any(
-        |action| matches!(action, UiAction::Gesture { node_id, event }
+        |action| matches!(action, KernelInteraction::Gesture { node_id, event }
             if *node_id == pinch_id
                 && event.kind == GestureKind::Pinch
                 && event.phase == GesturePhase::Update
@@ -1329,7 +1361,7 @@ fn teleport_click_outside_emits_action() {
     let frame = frame(&tree);
     let mut state = ViewStateStore::new();
     // 点击 Teleport 外区域 → TeleportClickOutside。
-    let actions = handle_input(
+    let actions = handle_kernel_input(
         &tree,
         &frame,
         &mut state,
@@ -1338,6 +1370,6 @@ fn teleport_click_outside_emits_action() {
     assert!(
         actions
             .iter()
-            .any(|a| matches!(a, UiAction::TeleportClickOutside { .. }))
+            .any(|a| matches!(a, KernelInteraction::OutsidePress { .. }))
     );
 }

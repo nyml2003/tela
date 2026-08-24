@@ -4,24 +4,24 @@
 //! `ActionFrame`。它不拥有窗口、renderer、GUI loop 或 Host 的 `ViewStateStore`；Host 在
 //! 调用候选 resolve 闭包时必须自行保证没有不可回滚的副作用。
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-use tela_contract::{UiAction, UiBuildError, UiFrame};
+use tela_contract::{KernelInteraction, NodeId, UiBuildError, UiFrame};
 use tela_core::{IdentityAllocator, UiTree};
 
 use crate::view::ResolvedPlans;
 use crate::{
-    ActionFrame, ActionRegistry, ComponentDispatch, ComponentInput, ComponentRuntime, ViewBuild,
-    ViewBuildError, ViewOutput,
+    ActionFrame, ActionRegistry, ComponentDispatch, ComponentInput, ComponentRuntime,
+    FramedInteraction, InteractionIndex, ViewBuild, ViewBuildError, ViewOutput,
     owner::{
-        ComponentActionRoute, ComponentOwnerFrame, ComponentOwnerRuntime, ComponentRouteOutcome,
-        OwnerFrameToken,
+        ComponentActionRoute, ComponentEffectScope, ComponentLifecycleEvent, ComponentOwnerFrame,
+        ComponentOwnerRuntime, ComponentRouteOutcome, OwnerFrameToken,
     },
 };
 
 /// Host 在成功发布一个 active frame 时分配的单调来源标识。
 ///
-/// 这是 Composition / Host 边界的值，故意不进入 Kernel 的 [`UiAction`]。它也不等同于
+/// 这是 Composition / Host 边界的值，故意不进入 Kernel 的 [`KernelInteraction`]。它也不等同于
 /// [`crate::ActionFrame`] 的内部 generation：前者证明 Target 输入来自当前呈现帧，后者
 /// 只标记 DSL action map 的安装顺序。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -38,39 +38,6 @@ impl FrameToken {
     /// `0` 从不分配给成功帧，因此可作为“尚未呈现任何帧”的显式哨兵值。
     pub fn from_raw(value: u64) -> Option<Self> {
         (value != 0).then_some(Self(value))
-    }
-}
-
-/// Target 采样输入时保留的 active-frame provenance。
-///
-/// Host 必须先在输入源处附上当前已呈现帧的 [`FrameToken`]，再将内层 Kernel 动作交给
-/// [`FrameCoordinator::dispatch`] 或可选的 Headless adapter。只保存 `UiAction` 会让新树
-/// 复用旧 `NodeId` 时产生错误路由。
-#[derive(Clone, Debug, PartialEq)]
-pub struct FramedUiAction {
-    token: FrameToken,
-    action: UiAction,
-}
-
-impl FramedUiAction {
-    /// 将一个 Kernel 动作与 Target 采样到的 active-frame token 绑定。
-    pub fn new(token: FrameToken, action: UiAction) -> Self {
-        Self { token, action }
-    }
-
-    /// 返回输入来源帧的 token。
-    pub fn token(&self) -> FrameToken {
-        self.token
-    }
-
-    /// 返回未改变的 Kernel 动作。
-    pub fn action(&self) -> &UiAction {
-        &self.action
-    }
-
-    /// 消费包装并返回两个纯数据字段。
-    pub fn into_parts(self) -> (FrameToken, UiAction) {
-        (self.token, self.action)
     }
 }
 
@@ -105,6 +72,8 @@ pub struct PreparedFrame<A> {
     allocator: IdentityAllocator,
     plans: ResolvedPlans<A>,
     owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
+    component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
+    interaction_index: InteractionIndex,
 }
 
 impl<A> PreparedFrame<A> {
@@ -152,7 +121,8 @@ pub struct ActiveFrame<A> {
     tree: UiTree,
     frame: UiFrame,
     actions: ActionFrame<A>,
-    component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
+    component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
+    interaction_index: InteractionIndex,
 }
 
 impl<A: 'static> ActiveFrame<A> {
@@ -175,13 +145,18 @@ impl<A: 'static> ActiveFrame<A> {
     pub fn generation(&self) -> u64 {
         self.actions.generation()
     }
+
+    /// 当前帧的逻辑父链和组件路由索引。
+    pub fn interaction_index(&self) -> &InteractionIndex {
+        &self.interaction_index
+    }
 }
 
 /// Composition 层拥有的帧协调器。
 ///
 /// 每帧先通过 [`Self::prepare`] 隔离 tree、identity、watch 和动作候选状态，随后由
 /// [`PreparedFrame::resolve`] 执行 Host resolve，最后以 [`Self::commit`] 一次性替换活跃帧。
-/// 它不依赖 Headless、Kit、Renderer 或具体 Target。
+/// 它不依赖 Kit、Renderer 或具体 Target。
 pub struct FrameCoordinator<A: Clone + 'static> {
     allocator: IdentityAllocator,
     runtime: ComponentRuntime,
@@ -190,6 +165,7 @@ pub struct FrameCoordinator<A: Clone + 'static> {
     active: Option<ActiveFrame<A>>,
     pending_component_outputs: RefCell<Vec<A>>,
     committed_component_outputs: Vec<A>,
+    committed_component_lifecycle: Vec<ComponentLifecycleEvent>,
     next_token: u64,
 }
 
@@ -204,6 +180,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             active: None,
             pending_component_outputs: RefCell::new(Vec::new()),
             committed_component_outputs: Vec::new(),
+            committed_component_lifecycle: Vec::new(),
             next_token: 0,
         }
     }
@@ -239,11 +216,32 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
                 return Err(FramePrepareError::Plans(error));
             }
         };
+        let ResolvedPlans {
+            watches,
+            actions,
+            component_actions: raw_component_actions,
+        } = plans;
+        let component_actions = match resolve_component_actions(&tree, raw_component_actions) {
+            Ok(actions) => actions,
+            Err(error) => {
+                self.abort_component_transaction();
+                return Err(FramePrepareError::Plans(error));
+            }
+        };
+        let interaction_index =
+            InteractionIndex::from_tree(&tree, component_actions.keys().copied());
+        let plans = ResolvedPlans {
+            watches,
+            actions,
+            component_actions: Vec::new(),
+        };
         Ok(PreparedFrame {
             tree,
             allocator,
             plans,
             owner_frame,
+            component_actions,
+            interaction_index,
         })
     }
 
@@ -284,6 +282,8 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             allocator,
             plans,
             owner_frame: prepared_owner,
+            component_actions,
+            interaction_index,
         } = prepared;
         let token = FrameToken(
             self.next_token
@@ -292,17 +292,18 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         );
         self.runtime.reconcile(plans.watches);
         let actions = self.registry.install(&tree, plans.actions);
-        let component_actions = plans.component_actions;
         // No fallible work remains after this callback. The Host candidate and all DSL snapshots
         // therefore become externally visible as one GUI-loop transaction.
         commit_host(token);
-        if let Some(owner_frame) = prepared_owner.map(|frame| frame.borrow().clone()) {
-            self.owners.commit(
-                owner_frame,
-                OwnerFrameToken::from_frame_token(token.get())
-                    .expect("successful FrameToken is non-zero"),
-            );
-        }
+        let owner_frame = prepared_owner
+            .map(|frame| frame.borrow().clone())
+            .unwrap_or_else(|| self.owners.begin_frame());
+        let lifecycle = self.owners.commit(
+            owner_frame,
+            OwnerFrameToken::from_frame_token(token.get())
+                .expect("successful FrameToken is non-zero"),
+        );
+        self.committed_component_lifecycle.extend(lifecycle);
         self.committed_component_outputs
             .append(self.pending_component_outputs.get_mut());
         self.next_token = token.get();
@@ -313,6 +314,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             frame,
             actions,
             component_actions,
+            interaction_index,
         });
         self.active
             .as_ref()
@@ -346,41 +348,52 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         std::mem::take(&mut self.committed_component_outputs)
     }
 
-    /// 判断一个 Target 输入是否来自当前 active frame。
+    /// 取得最近成功提交后产生的组件挂载/卸载通知。
     ///
-    /// Host 在调用 Kernel input dispatch 前后都可以使用它：前者避免旧 frame 被命中测试，
-    /// 后者保证 DSL action 与任意可选 Headless adapter 使用相同的 provenance 规则。
-    pub fn accepts(&self, action: &FramedUiAction) -> bool {
+    /// 宿主应在成功 present 后消费这些通知并启动或失效 Effect。通知带有成功帧代际号；
+    /// 候选帧失败、`abort_component_transaction` 或旧输入不会生成通知。
+    pub fn take_component_lifecycle_events(&mut self) -> Vec<ComponentLifecycleEvent> {
+        std::mem::take(&mut self.committed_component_lifecycle)
+    }
+
+    /// 验证宿主 Effect 回调是否仍属于当前 active 组件实例和成功帧代际。
+    pub fn accepts_component_effect(&self, scope: &ComponentEffectScope) -> bool {
+        self.owners.accepts_effect(scope)
+    }
+
+    /// 判断新的 Kernel 交互是否来自当前 active frame。
+    pub fn accepts_interaction(&self, interaction: &FramedInteraction) -> bool {
         self.active
             .as_ref()
-            .is_some_and(|active| active.token == action.token)
+            .is_some_and(|active| active.token == interaction.token())
     }
 
-    /// 将当前 active frame 的带来源 Kernel 动作映射为 Application action。
-    ///
-    /// Host 必须在 Target 采样输入时包装为 [`FramedUiAction`]；旧 token 即使携带和新树
-    /// 相同数值的 `NodeId` 也会被安全丢弃。
-    pub fn dispatch(&self, action: &FramedUiAction) -> Option<A> {
+    /// 将新的 Kernel 交互事实映射为 Application action。
+    pub fn dispatch_interaction(&self, interaction: &FramedInteraction) -> Option<A> {
         let active = self.active.as_ref()?;
-        (active.token == action.token).then_some(())?;
-        self.registry.dispatch(&active.actions, &action.action)
+        (active.token == interaction.token()).then_some(())?;
+        self.registry.dispatch(&active.actions, interaction.event())
     }
 
-    /// 将输入路由到 active frame 的组件本地 handler。
-    pub fn dispatch_component(&self, action: &FramedUiAction) -> Option<ComponentDispatch> {
+    /// 将新的 Kernel 交互事实路由到当前帧组件 owner。
+    pub fn dispatch_component_interaction(
+        &self,
+        interaction: &FramedInteraction,
+    ) -> Option<ComponentDispatch> {
         let active = self.active.as_ref()?;
-        (active.token == action.token).then_some(())?;
-        let key = match &action.action {
-            UiAction::Click { node_id }
-            | UiAction::Pointer { node_id, .. }
-            | UiAction::TextInput { node_id, .. }
-            | UiAction::Hover { node_id, .. } => active.tree.key_for_node_id(*node_id)?.clone(),
-            UiAction::ValueChange { bind_id, .. } => tela_contract::SemanticKey(bind_id.0.clone()),
-            _ => return None,
-        };
+        (active.token == interaction.token()).then_some(())?;
+        self.dispatch_component_action(active, interaction.event())
+    }
+
+    fn dispatch_component_action(
+        &self,
+        active: &ActiveFrame<A>,
+        action: &KernelInteraction,
+    ) -> Option<ComponentDispatch> {
+        let node_id = component_node_id(action)?;
         let owner_token = OwnerFrameToken::from_frame_token(active.token.get())?;
-        let bounds = match &action.action {
-            UiAction::Pointer { node_id, .. } => active
+        let bounds = match action {
+            KernelInteraction::Pointer { node_id, .. } => active
                 .frame
                 .hit_regions
                 .iter()
@@ -388,69 +401,44 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
                 .map(|region| region.rect),
             _ => None,
         };
-        let dispatch = active
-            .component_actions
-            .iter()
-            .find(|route| route.key() == &key)
-            .and_then(|route| {
-                route.dispatch(
-                    &self.owners,
-                    owner_token,
-                    ComponentInput::Ui {
-                        action: &action.action,
-                        bounds,
-                    },
-                )
-            })?;
-        Some(self.stage_component_dispatch(dispatch))
-    }
-
-    /// 将当前焦点组件的原始键盘输入交给组件 handler。
-    pub fn dispatch_component_keyboard(
-        &self,
-        key: &tela_contract::SemanticKey,
-        physical_key: u16,
-        modifier_bits: u8,
-        repeat: bool,
-    ) -> Option<ComponentDispatch> {
-        let active = self.active.as_ref()?;
-        let owner_token = OwnerFrameToken::from_frame_token(active.token.get())?;
-        let dispatch = active
-            .component_actions
-            .iter()
-            .find(|route| route.key() == key)
-            .and_then(|route| {
-                route.dispatch(
-                    &self.owners,
-                    owner_token,
-                    ComponentInput::Keyboard {
-                        physical_key,
-                        modifier_bits,
-                        repeat,
-                    },
-                )
-            })?;
-        Some(self.stage_component_dispatch(dispatch))
-    }
-
-    /// 判断语义 key 是否由组件本地事件路由拥有。
-    pub fn has_component_route(&self, key: &tela_contract::SemanticKey) -> bool {
-        self.active.as_ref().is_some_and(|active| {
+        let mut targets = if bubbles_semantic_event(action) {
             active
-                .component_actions
-                .iter()
-                .any(|route| route.key() == key)
-        })
+                .interaction_index
+                .logical_path()
+                .path(node_id)
+                .unwrap_or_else(|| vec![node_id])
+        } else {
+            vec![node_id]
+        };
+        targets.reverse();
+        for target in targets {
+            let Some(route) = active.component_actions.get(&target) else {
+                continue;
+            };
+            let Some(dispatch) = route.dispatch(
+                &self.owners,
+                owner_token,
+                ComponentInput::Ui { action, bounds },
+            ) else {
+                continue;
+            };
+            return Some(self.stage_component_dispatch(dispatch));
+        }
+        None
     }
 
-    /// 读取组件拥有的受控文本输入值。
-    pub fn component_input_value(&self, key: &tela_contract::SemanticKey) -> Option<String> {
+    /// 读取 active tree 声明的受控文本值。
+    pub fn input_value(&self, key: &tela_contract::SemanticKey) -> Option<String> {
         let active = self.active.as_ref()?;
-        active
-            .component_actions
-            .iter()
-            .find(|route| route.key() == key)
-            .and_then(|route| route.input_value(&self.owners))
+        Some(
+            active
+                .tree
+                .interact_for_key(key)?
+                .input
+                .as_ref()?
+                .value
+                .clone(),
+        )
     }
 
     fn stage_component_dispatch(&self, dispatch: ComponentRouteOutcome<A>) -> ComponentDispatch {
@@ -459,6 +447,54 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         }
         ComponentDispatch::Consumed
     }
+}
+
+fn component_node_id(action: &KernelInteraction) -> Option<NodeId> {
+    match action {
+        KernelInteraction::Activate { node_id }
+        | KernelInteraction::Pointer { node_id, .. }
+        | KernelInteraction::TextInput { node_id, .. }
+        | KernelInteraction::Keyboard { node_id, .. }
+        | KernelInteraction::Hover { node_id, .. } => Some(*node_id),
+        _ => None,
+    }
+}
+
+fn bubbles_semantic_event(action: &KernelInteraction) -> bool {
+    matches!(
+        action,
+        KernelInteraction::Activate { .. }
+            | KernelInteraction::OpenModal { .. }
+            | KernelInteraction::CloseModal { .. }
+            | KernelInteraction::OutsidePress { .. }
+            | KernelInteraction::ShortcutActivated { .. }
+    )
+}
+
+fn resolve_component_actions<A>(
+    tree: &UiTree,
+    routes: Vec<Box<dyn ComponentActionRoute<A>>>,
+) -> Result<BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>, ViewBuildError> {
+    let mut resolved: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>> = BTreeMap::new();
+    for route in routes {
+        let node_id = tree.node_id_for_key(route.key()).ok_or_else(|| {
+            ViewBuildError::UnresolvedComponentAction {
+                key: route.key().clone(),
+                site: route.site(),
+            }
+        })?;
+        if let Some(previous) = resolved.get(&node_id) {
+            return Err(ViewBuildError::DuplicateComponentAction {
+                key: tree
+                    .key_for_node_id(node_id)
+                    .cloned()
+                    .unwrap_or_else(|| tela_contract::SemanticKey(format!("node:{}", node_id.0))),
+                site: previous.site(),
+            });
+        }
+        resolved.insert(node_id, route);
+    }
+    Ok(resolved)
 }
 
 impl<A: Clone + 'static> Default for FrameCoordinator<A> {
@@ -470,11 +506,11 @@ impl<A: Clone + 'static> Default for FrameCoordinator<A> {
 #[cfg(test)]
 mod tests {
     use tela_contract::{
-        IdentityConcern, InteractConcern, KeyStrategy, NodeKind, SemanticKey, UiAction, UiFrame,
-        UiNode, Viewport,
+        IdentityConcern, InteractConcern, KernelInteraction, KeyStrategy, NodeKind, SemanticKey,
+        UiFrame, UiNode, Viewport,
     };
 
-    use super::{FrameCoordinator, FramePrepareError, FramedUiAction};
+    use super::{FrameCoordinator, FramePrepareError, FramedInteraction};
     use crate::{
         Body, ViewBuild, ViewBuildError, ViewChild, ViewOutput, ViewSite, view::ActionTarget,
     };
@@ -635,13 +671,13 @@ mod tests {
             .tree()
             .node_id_for_key(&SemanticKey("/".to_owned()))
             .expect("target root");
-        let stale = FramedUiAction::new(
+        let stale = FramedInteraction::new(
             first_token,
-            UiAction::Click {
+            KernelInteraction::Activate {
                 node_id: first_node,
             },
         );
-        assert_eq!(coordinator.dispatch(&stale), Some(Action::Save));
+        assert_eq!(coordinator.dispatch_interaction(&stale), Some(Action::Save));
 
         let mut build = coordinator.begin_build();
         let root = action_root(&mut build);
@@ -663,15 +699,45 @@ mod tests {
             "NodeId reuse is expected across rebuilt trees"
         );
         assert_ne!(first_token, second_token);
-        assert!(!coordinator.accepts(&stale));
-        assert_eq!(coordinator.dispatch(&stale), None);
+        assert!(!coordinator.accepts_interaction(&stale));
+        assert_eq!(coordinator.dispatch_interaction(&stale), None);
         assert_eq!(
-            coordinator.dispatch(&FramedUiAction::new(
+            coordinator.dispatch_interaction(&FramedInteraction::new(
                 second_token,
-                UiAction::Click {
+                KernelInteraction::Activate {
                     node_id: second_node,
                 },
             )),
+            Some(Action::Save)
+        );
+    }
+
+    #[test]
+    fn kernel_interaction_uses_the_same_frame_provenance_and_action_registry() {
+        let mut coordinator = FrameCoordinator::<Action>::new();
+        let mut build = coordinator.begin_build();
+        let first = coordinator
+            .prepare(action_root(&mut build))
+            .expect("candidate")
+            .resolve(|_| Ok::<_, ()>(empty_resolved_frame()))
+            .expect("resolve");
+        let token = coordinator.commit(first).token();
+        let node_id = coordinator
+            .active()
+            .expect("active")
+            .tree()
+            .node_id_for_key(&SemanticKey("/".to_owned()))
+            .expect("action target");
+        let active = coordinator.active().expect("active");
+        assert_eq!(
+            active.interaction_index().logical_path().path(node_id),
+            active.tree().logical_path(node_id)
+        );
+        let interaction = FramedInteraction::new(token, KernelInteraction::Activate { node_id });
+
+        assert!(coordinator.accepts_interaction(&interaction));
+        assert_eq!(
+            coordinator.dispatch_interaction(&interaction),
             Some(Action::Save)
         );
     }

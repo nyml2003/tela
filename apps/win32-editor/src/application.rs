@@ -1,5 +1,5 @@
 //! Editor application controller: domain state (route/settings/document/icon signals), DSL
-//! action handling, text input channel ownership, and the About page build info (queried
+//! action handling and the About page build info (queried
 //! through the in-process bridge dispatcher, static-path semantics, see docs/桥/000 §7.3).
 //!
 //! Frame lifecycle, input dispatch and the shell protocol live in the cross-application
@@ -7,16 +7,12 @@
 //! `AppController` with editor domain logic.
 
 use tela_bridge::{BridgeDispatcher, BridgeEvent, BridgeRequest, BridgeResult, VersionPolicy};
-use tela_contract::{FocusAppearance, SemanticKey, UiResources, Value, WindowCommand};
+use tela_contract::{FocusAppearance, UiResources, WindowCommand};
 use tela_target_win32_static::{AppController, FrameContext};
 use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult};
 
 use crate::presentation::render_root;
 
-/// 编辑器输入绑定 key。
-pub const EDITOR_INPUT_KEY: &str = "editor.input";
-/// 图标页搜索输入绑定 key。
-pub const ICON_SEARCH_INPUT_KEY: &str = "editor.icons.search";
 /// 焦点高亮外观（产品装配 `ApplicationConfig` 时注入）。
 pub const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
     color: tela_contract::Color::rgba(0.0, 0.47, 0.83, 1.0),
@@ -205,29 +201,6 @@ impl AppController<EditorAction> for EditorController {
         self.handle_action(action)
     }
 
-    fn handle_value_change(&mut self, bind_id: &str, value: Value) -> bool {
-        let Value::String(value) = value else {
-            return false;
-        };
-        match bind_id {
-            EDITOR_INPUT_KEY => self.handle_action(EditorAction::EditorInput(value)),
-            ICON_SEARCH_INPUT_KEY => self.handle_action(EditorAction::IconSearch(value)),
-            _ => false,
-        }
-    }
-
-    fn is_text_input(&self, key: &SemanticKey) -> bool {
-        key.0 == EDITOR_INPUT_KEY || key.0 == ICON_SEARCH_INPUT_KEY
-    }
-
-    fn input_value_for(&self, key: &SemanticKey) -> String {
-        match key.0.as_str() {
-            EDITOR_INPUT_KEY => self.document.get(),
-            ICON_SEARCH_INPUT_KEY => self.icon_query.get(),
-            _ => String::new(),
-        }
-    }
-
     fn take_window_command(&mut self) -> Option<WindowCommand> {
         self.pending_window_command.take()
     }
@@ -332,11 +305,42 @@ mod tests {
         assert!(!app.frame_presented());
     }
 
+    fn point_for_key(app: &Application<EditorAction, EditorController>, key: &str) -> Point {
+        let (tree, frame) = app.active().expect("editor frame");
+        let node_id = tree
+            .node_id_for_key(&tela_contract::SemanticKey(key.to_owned()))
+            .expect("interactive key");
+        let region = frame
+            .hit_regions
+            .iter()
+            .find(|region| region.node_id == node_id)
+            .expect("interactive hit region");
+        Point {
+            x: region.rect.x + region.rect.w / 2.0,
+            y: region.rect.y + region.rect.h / 2.0,
+        }
+    }
+
     #[test]
     fn frame_uses_the_default_application_profile() {
         let mut app = app();
         assert!(app.ensure_frame());
         assert!(!app.frame().commands.is_empty());
+    }
+
+    #[test]
+    fn native_text_channel_accumulates_edits_before_the_next_frame_is_presented() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        let point = point_for_key(&app, "editor.page.field");
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        assert!(app.input_focused());
+
+        assert_eq!(app.set_input_value("第一个值".to_owned()), 1);
+        assert_eq!(app.input_value(), "第一个值");
+        assert_eq!(app.set_input_value("第一个值 + 第二次编辑".to_owned()), 1);
+        assert_eq!(app.input_value(), "第一个值 + 第二次编辑");
+        assert_eq!(app.controller().document.get(), "第一个值 + 第二次编辑");
     }
 
     #[test]

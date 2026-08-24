@@ -3,7 +3,7 @@
 
 use tela_contract::{CrossAlign, Fill, IconProvider, SemanticKey, Viewport, WindowCommand};
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{TextActionMap, ViewBuild, ViewOutput, ViewResult, ViewSite, ui};
 
 use crate::application::{EditorAction, EditorSettings, IconCategory, Route};
 
@@ -30,7 +30,7 @@ pub fn render_root(
     hover_key: Option<&SemanticKey>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let hover = hover_key.map(|key| key.0.clone());
-    ui!(build {
+    let output = ui!(build {
         <Frame
             key={"editor.root"}
             width={viewport.width}
@@ -80,5 +80,31 @@ pub fn render_root(
                 } }
             </Column>
         </Frame>
+    })?;
+    let site = ViewSite::new(file!(), line!(), column!());
+    Ok(match route {
+        Route::Editor => output
+            .attach_input_at(
+                SemanticKey("editor.page.field".to_owned()),
+                TextActionMap::unary(EditorAction::EditorInput),
+                site,
+            )
+            .attach_submit_at(
+                SemanticKey("editor.page.field".to_owned()),
+                TextActionMap::unary(EditorAction::EditorInput),
+                site,
+            ),
+        Route::Icons => output
+            .attach_input_at(
+                SemanticKey("editor.icons.search".to_owned()),
+                TextActionMap::unary(EditorAction::IconSearch),
+                site,
+            )
+            .attach_submit_at(
+                SemanticKey("editor.icons.search".to_owned()),
+                TextActionMap::unary(EditorAction::IconSearch),
+                site,
+            ),
+        Route::Settings | Route::About => output,
     })
 }

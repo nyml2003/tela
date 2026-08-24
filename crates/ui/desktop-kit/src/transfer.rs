@@ -1,7 +1,7 @@
 //! Transfer：双栏数据选择组件。
 //!
 //! 最终目标 key 集合由上层受控；搜索词、左右临时勾选和移动中间态由组件运行时持有。
-//! 该模块的状态机不依赖窗口、异步任务或业务进程模型，可在桌面和 Headless 测试中复用。
+//! 该模块的状态机不依赖窗口、异步任务或业务进程模型，可独立测试并跨宿主复用。
 
 use std::collections::BTreeSet;
 
@@ -105,9 +105,9 @@ impl TransferState {
         &self.right_checked
     }
 
-    /// 返回受控文本输入通道需要的当前值；未知绑定不会暴露组件内部字段。
-    pub fn input_value(&self, bind_id: &str) -> Option<&str> {
-        match bind_id {
+    /// 返回组件文本输入通道需要的当前值；未知语义 key 不暴露组件内部字段。
+    pub fn input_value(&self, semantic_key: &str) -> Option<&str> {
+        match semantic_key {
             "transfer.left-search" => Some(&self.left_search),
             "transfer.right-search" => Some(&self.right_search),
             _ => None,
@@ -318,14 +318,14 @@ fn panel(
     rows: Vec<UiNode>,
     width: f32,
     height: f32,
-    bind_id: &str,
+    semantic_key: &str,
 ) -> UiNode {
     LayoutContainer::column([
         text(title, 12.0, TEXT_SECONDARY),
         Input::new()
             .value(query)
             .placeholder("搜索")
-            .bind_id(bind_id)
+            .semantic_key(semantic_key)
             .into_node(),
         LayoutContainer::scroll_view(rows)
             .visual(VisualConcern {

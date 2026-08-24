@@ -7,11 +7,11 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    FocusAppearance, InputEvent, Point, ScrollState, SemanticKey, TextMeasurer, UiAction, UiFrame,
-    UiLayoutError, Viewport,
+    FocusAppearance, InputEvent, KernelInteraction, Point, ScrollState, SemanticKey, TextMeasurer,
+    UiFrame, UiLayoutError, Viewport,
 };
 
-use crate::{LayoutCache, UiTree, ViewStateStore, ensure_modal_focus, handle_input};
+use crate::{LayoutCache, UiTree, ViewStateStore, ensure_modal_focus, handle_kernel_input};
 
 /// The concrete, built-in Tela kernel combination.
 ///
@@ -42,7 +42,7 @@ impl DefaultApplicationProfile {
         &self,
         tree: &UiTree,
         view_state: &mut ViewStateStore,
-    ) -> Vec<UiAction> {
+    ) -> Vec<KernelInteraction> {
         ensure_modal_focus(tree, view_state)
     }
 
@@ -90,15 +90,15 @@ impl DefaultApplicationProfile {
         )
     }
 
-    /// Dispatches an input event through the built-in hit-testing and focus rules.
-    pub fn dispatch_input(
+    /// Dispatches an input event as typed Kernel interaction facts.
+    pub fn dispatch_kernel_input(
         &self,
         tree: &UiTree,
         frame: &UiFrame,
         view_state: &mut ViewStateStore,
         event: &InputEvent,
-    ) -> Vec<UiAction> {
-        handle_input(tree, frame, view_state, event)
+    ) -> Vec<KernelInteraction> {
+        handle_kernel_input(tree, frame, view_state, event)
     }
 
     /// Tests whether a logical pointer position hits a hoverable node in the current frame.

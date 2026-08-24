@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tela_contract::{FocusAppearance, SemanticKey, UiResources, Value, WindowCommand};
+use tela_contract::{FocusAppearance, UiResources, WindowCommand};
 use tela_target_win32_static::{AppController, FrameContext};
 use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult};
 
@@ -34,8 +34,6 @@ pub enum SpeedGearAction {
     SetRate(Rate),
     /// Transfer 提交的最终目标集合。
     TransferTargets(BTreeSet<String>),
-    /// 搜索进程。
-    ProcessSearch(String),
     /// 重新枚举进程。
     RefreshProcesses,
     /// 窗口命令。
@@ -146,10 +144,6 @@ impl SpeedGearController {
                 }
                 false
             }
-            SpeedGearAction::ProcessSearch(query) => {
-                self.state.processes.set_query(query);
-                true
-            }
             SpeedGearAction::RefreshProcesses => self.refresh_processes(),
             SpeedGearAction::Window(command) => {
                 self.pending_window_command = Some(command);
@@ -239,30 +233,6 @@ impl AppController<SpeedGearAction> for SpeedGearController {
         self.handle(action)
     }
 
-    fn handle_value_change(&mut self, bind_id: &str, value: Value) -> bool {
-        match bind_id {
-            "speed-gear.process-search" => {
-                let Value::String(value) = value else {
-                    return false;
-                };
-                self.handle(SpeedGearAction::ProcessSearch(value))
-            }
-            _ => false,
-        }
-    }
-
-    fn is_text_input(&self, key: &SemanticKey) -> bool {
-        matches!(key.0.as_str(), "speed-gear.process-search")
-    }
-
-    fn input_value_for(&self, key: &SemanticKey) -> String {
-        if key.0 == "speed-gear.process-search" {
-            self.state.processes.query().to_owned()
-        } else {
-            String::new()
-        }
-    }
-
     fn take_window_command(&mut self) -> Option<WindowCommand> {
         self.pending_window_command.take()
     }
@@ -339,7 +309,7 @@ fn format_backend_error(error: &crate::domain::SpeedBackendError) -> String {
 mod tests {
     use super::*;
     use crate::domain::{BackendResult, ProcessAccess, ProcessInfo, SpeedBackendError};
-    use tela_contract::{UiResourceSet, Viewport};
+    use tela_contract::{PhysicalKey, Point, PointerEvent, SemanticKey, UiResourceSet, Viewport};
     use tela_icon_resources::MaterialIconFontProvider;
     use tela_target_win32_static::{Application, ApplicationConfig};
     use tela_text_resources::ControlledTextMeasurer;
@@ -485,5 +455,62 @@ mod tests {
                 .viewport,
             active_viewport
         );
+    }
+
+    #[test]
+    fn win32_session_routes_semantic_home_to_the_focused_slider() {
+        let mut controller = SpeedGearController::new(
+            &TEST_RESOURCES,
+            Box::new(FakeBackend {
+                items: vec![process()],
+                connected: false,
+                rates: Vec::new(),
+            }),
+        );
+        controller.refresh_processes();
+        assert!(controller.handle(SpeedGearAction::Select(process().identity)));
+        assert!(controller.handle(SpeedGearAction::Connect));
+        let mut application = Application::new(
+            &TEST_RESOURCES,
+            controller,
+            ApplicationConfig {
+                initial_viewport: Viewport {
+                    width: 980.0,
+                    height: 680.0,
+                },
+                focus_appearance: Some(crate::FOCUS_APPEARANCE),
+            },
+        );
+        assert!(application.ensure_frame());
+        application.frame_presented();
+
+        let slider_key = SemanticKey("speed-gear.rate".to_owned());
+        let slider_rect = {
+            let (tree, frame) = application.active().expect("presented speed gear frame");
+            let slider_id = tree
+                .node_id_for_key(&slider_key)
+                .expect("slider semantic key");
+            frame
+                .hit_regions
+                .iter()
+                .find(|region| region.node_id == slider_id)
+                .expect("slider hit region")
+                .rect
+        };
+        let center = Point {
+            x: slider_rect.x + slider_rect.w * 0.5,
+            y: slider_rect.y + slider_rect.h * 0.5,
+        };
+        assert!(application.handle_pointer(PointerEvent::mouse_down(center)) > 0);
+        assert!(application.ensure_frame());
+        application.frame_presented();
+
+        assert_eq!(
+            application.handle_key(PhysicalKey::Home.code(), 0, false),
+            1
+        );
+        assert!(application.ensure_frame());
+        assert!(application.frame_presented());
+        assert_eq!(application.controller().state().rate, Rate::new(Rate::MIN));
     }
 }

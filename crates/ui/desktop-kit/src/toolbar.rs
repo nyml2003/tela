@@ -304,7 +304,7 @@ impl Toolbar {
     ///
     /// Toolbar 的项目可由选择、权限或窗口宽度条件增删，因此它只在集合边界声明 core 的
     /// `AutoStableIdentity` 策略。每个命令的稳定语义 key 由 `ToolbarItem` 自身携带，
-    /// EventRegistry 在当前帧把该 key 路由到组件事件。
+    /// FrameCoordinator 在当前帧把该 key 解析为组件事件路由。
     pub fn into_node(self, icons: &dyn IconProvider) -> UiNode {
         let mut children: Vec<UiNode> = self
             .items

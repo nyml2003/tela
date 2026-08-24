@@ -8,8 +8,7 @@ use tela_contract::{
 use tela_core::builder::{LayoutContainer, Primitive};
 use tela_mobile_ui_kit::{
     MobileCell, MobileCellStyle, MobileEmptyState, MobileEmptyStateStyle, MobileIconButton,
-    MobileLayout, MobileNavBar, MobileNavBarStyle, MobileScaffold, MobileScaffoldStyle,
-    MobileSearchField, MobileSurfaceStyle,
+    MobileLayout, MobileSearchField, MobileSurfaceStyle,
 };
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult, ui};
@@ -63,44 +62,11 @@ pub struct MobileViewProps<'a> {
     pub icons: &'a dyn IconProvider,
 }
 
-/// Builds the complete portrait-first mobile projection.
-pub fn render(props: MobileViewProps<'_>) -> UiNode {
-    let layout = MobileLayout::with_chrome(props.viewport, props.safe_area, APP_BAR_H, SEARCH_H);
-    let content_width = layout.content_width();
-    let content_height = layout.content_height();
-    let content = match props.preview {
-        Some(entry) => preview(entry, content_width, content_height, props.icons),
-        None => browse_list(
-            &props.entries,
-            content_width,
-            content_height,
-            props.query,
-            props.icons,
-        ),
-    };
-    MobileScaffold::new(
-        layout,
-        app_bar(props.title, props.can_go_back, content_width, props.icons),
-        search_field(
-            props.query,
-            props.search_focused,
-            content_width,
-            props.icons,
-        ),
-        content,
-    )
-    .style(MobileScaffoldStyle {
-        background: BACKGROUND,
-    })
-    .into_node()
-}
-
-/// Builds the Browse route through the application DSL rather than a Headless event table.
+/// Builds the Browse route through the application DSL.
 ///
 /// The visual leaf nodes still come from the mobile kit, while the structural scroll root,
 /// collection identity, Signal dependency declarations, and application actions are all native
-/// DSL constructs. Preview remains on the existing direct projection until a separate migration
-/// decision is made.
+/// DSL constructs.
 pub(crate) fn render_browse_dsl(
     build: &mut ViewBuild<MobileAction>,
     props: MobileViewProps<'_>,
@@ -141,6 +107,48 @@ pub(crate) fn render_browse_dsl(
                 >
                     { browse_rows_dsl(build, &props, content_width) }
                 </ScrollView>
+            </Column>
+        </Frame>
+    })
+}
+
+/// Builds the Preview route with the same typed action and controlled-input plan as Browse.
+///
+/// The preview body remains an opaque visual leaf for now; its navigation chrome and input
+/// ownership are still declared in the DSL frame, so the application does not need a NodeId or
+/// 输入值由当前帧的 typed ActionTarget 路由。
+pub(crate) fn render_preview_dsl(
+    build: &mut ViewBuild<MobileAction>,
+    props: MobileViewProps<'_>,
+) -> ViewResult<ViewOutput<MobileAction>> {
+    let layout = MobileLayout::with_chrome(props.viewport, props.safe_area, APP_BAR_H, SEARCH_H);
+    let content_width = layout.content_width();
+    let content_height = layout.content_height();
+    let chrome_height = layout.chrome_height();
+    let preview = ViewOutput::opaque(preview(
+        props
+            .preview
+            .expect("preview DSL route requires a preview entry"),
+        content_width,
+        content_height,
+        props.icons,
+    ));
+
+    ui!(build {
+        <Frame
+            key={"mobile.preview"}
+            width={props.viewport.width}
+            height={props.viewport.height}
+            padding={props.safe_area}
+            fill={Fill::Solid(BACKGROUND)}
+        >
+            <Column
+                width={content_width}
+                height={chrome_height}
+            >
+                { browse_app_bar_dsl(build, &props, content_width) }
+                { search_field_dsl(build, &props, content_width) }
+                { preview }
             </Column>
         </Frame>
     })
@@ -245,7 +253,8 @@ fn search_field_dsl(
         ..LayoutConcern::default()
     })
     .into();
-    let field = MobileSearchField::unbound(inner, "mobile.search")
+    let field = MobileSearchField::new(inner, "mobile.search")
+        .value(props.query)
         .width((width - CONTENT_INSET * 2.0).max(1.0))
         .height(SEARCH_FIELD_H)
         .padding(Insets {
@@ -337,181 +346,6 @@ fn browse_rows_dsl(
             </For>
         </Column>
     })
-}
-
-fn app_bar(title: &str, can_go_back: bool, width: f32, icons: &dyn IconProvider) -> UiNode {
-    let leading = if can_go_back {
-        icon_button(IconName::ArrowBack, "mobile.back", icons)
-    } else {
-        icon_badge(IconName::FolderOpen, FOLDER, FOLDER_SURFACE, icons)
-    };
-    MobileNavBar::new(title)
-        .subtitle("本机文件")
-        .leading(leading)
-        .trailing(icon_badge(IconName::More, SECONDARY, MUTED_SURFACE, icons))
-        .width(width)
-        .height(APP_BAR_H)
-        .padding(Insets {
-            top: 8.0,
-            right: CONTENT_INSET,
-            bottom: 8.0,
-            left: CONTENT_INSET,
-        })
-        .style(MobileNavBarStyle {
-            surface: MobileSurfaceStyle {
-                fill: SURFACE,
-                border_color: Some(BORDER),
-                border_width: 1.0,
-                border_radius: BorderRadius::default(),
-            },
-            title: TEXT,
-            subtitle: SECONDARY,
-            gap: TOUCH_GAP,
-        })
-        .into_node()
-}
-
-fn search_field(query: &str, focused: bool, width: f32, icons: &dyn IconProvider) -> UiNode {
-    let label = if query.is_empty() {
-        "搜索文件和文件夹"
-    } else {
-        query
-    };
-    let color = if query.is_empty() { SECONDARY } else { TEXT };
-    let inner: UiNode = LayoutContainer::row([
-        icon(
-            IconName::Search,
-            if focused { PRIMARY } else { SECONDARY },
-            icons,
-        ),
-        text(label, 16.0, color),
-    ])
-    .layout(LayoutConcern {
-        gap: 12.0,
-        cross_align: tela_contract::CrossAlign::Center,
-        ..LayoutConcern::default()
-    })
-    .into();
-    let field = MobileSearchField::new(inner, "mobile.search")
-        .width((width - CONTENT_INSET * 2.0).max(1.0))
-        .height(SEARCH_FIELD_H)
-        .padding(Insets {
-            top: 0.0,
-            right: 16.0,
-            bottom: 0.0,
-            left: 16.0,
-        })
-        .surfaces(
-            MobileSurfaceStyle {
-                fill: MUTED_SURFACE,
-                border_color: Some(BORDER),
-                border_width: 1.0,
-                border_radius: BorderRadius::all(8.0),
-            },
-            MobileSurfaceStyle {
-                fill: SURFACE,
-                border_color: Some(PRIMARY),
-                border_width: 2.0,
-                border_radius: BorderRadius::all(8.0),
-            },
-        )
-        .focused(focused)
-        .into_node();
-    LayoutContainer::frame(field)
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            height: Some(Size::fixed(SEARCH_H)),
-            padding: Insets {
-                top: 8.0,
-                right: CONTENT_INSET,
-                bottom: 8.0,
-                left: CONTENT_INSET,
-            },
-            ..LayoutConcern::default()
-        })
-        .into()
-}
-
-fn browse_list(
-    entries: &[&Entry],
-    width: f32,
-    height: f32,
-    query: &str,
-    icons: &dyn IconProvider,
-) -> UiNode {
-    let rows: Vec<UiNode> = if entries.is_empty() {
-        vec![empty_state(query)]
-    } else {
-        entries
-            .iter()
-            .map(|entry| entry_row(entry, width, icons))
-            .collect()
-    };
-    let list: UiNode = LayoutContainer::column(rows)
-        .layout(LayoutConcern {
-            width: Some(Size::fixed((width - CONTENT_INSET * 2.0).max(1.0))),
-            padding: Insets {
-                top: 8.0,
-                right: 0.0,
-                bottom: 24.0,
-                left: 0.0,
-            },
-            gap: TOUCH_GAP,
-            ..LayoutConcern::default()
-        })
-        .into();
-    LayoutContainer::scroll_view([list])
-        .layout(LayoutConcern {
-            width: Some(Size::fixed(width)),
-            height: Some(Size::fixed(height)),
-            padding: Insets {
-                top: 0.0,
-                right: CONTENT_INSET,
-                bottom: 0.0,
-                left: CONTENT_INSET,
-            },
-            overflow: Overflow::Scroll,
-            clip: true,
-            ..LayoutConcern::default()
-        })
-        .identity(semantic_identity("mobile.content-scroll"))
-        .into()
-}
-
-fn entry_row(entry: &Entry, width: f32, icons: &dyn IconProvider) -> UiNode {
-    let (icon_name, icon_color, icon_surface) = entry_style(entry.kind);
-    let kind = match entry.kind {
-        EntryKind::Folder => "文件夹",
-        EntryKind::Document => "文档",
-        EntryKind::Asset => "资源",
-    };
-    let metadata = format!("{kind}  ·  {}", entry.metadata);
-    MobileCell::new(entry.name)
-        .label(metadata)
-        .leading(icon_badge(icon_name, icon_color, icon_surface, icons))
-        .trailing(icon(IconName::ChevronRight, SECONDARY, icons))
-        .action_key(format!("mobile.entry.{}", entry.id))
-        .width(width)
-        .min_height(ROW_H)
-        .padding(Insets {
-            top: 8.0,
-            right: 12.0,
-            bottom: 8.0,
-            left: 12.0,
-        })
-        .style(MobileCellStyle {
-            surface: MobileSurfaceStyle {
-                fill: SURFACE,
-                border_color: Some(BORDER),
-                border_width: 1.0,
-                border_radius: BorderRadius::all(8.0),
-            },
-            title: TEXT,
-            label: SECONDARY,
-            value: SECONDARY,
-            ..MobileCellStyle::default()
-        })
-        .into_node()
 }
 
 /// DSL collection item visual: it deliberately has no local semantic key because `<For>` owns
@@ -675,18 +509,6 @@ fn empty_state(query: &str) -> UiNode {
             ..MobileEmptyStateStyle::default()
         })
         .into()
-}
-
-fn icon_button(icon_name: IconName, action_key: &str, icons: &dyn IconProvider) -> UiNode {
-    MobileIconButton::new(icon(icon_name, PRIMARY, icons), action_key)
-        .size(48.0, 48.0)
-        .surface(MobileSurfaceStyle {
-            fill: MUTED_SURFACE,
-            border_color: Some(BORDER),
-            border_width: 1.0,
-            border_radius: BorderRadius::all(8.0),
-        })
-        .into_node()
 }
 
 /// DSL action-target visual: the outer DSL node owns its identity, not this Kit helper.

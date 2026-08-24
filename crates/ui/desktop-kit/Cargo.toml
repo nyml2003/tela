@@ -8,7 +8,6 @@ description = "Tela desktop UI kit: keyboard and information-dense composite pat
 [dependencies]
 tela-contract = { path = "../../kernel/contract" }
 tela-core = { path = "../../kernel/core" }
-tela-ui-headless = { path = "../headless" }
 tela-ui-foundation = { path = "../foundation" }
 
 [lints]
