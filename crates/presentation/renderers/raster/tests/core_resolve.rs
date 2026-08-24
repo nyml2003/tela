@@ -1,7 +1,7 @@
 //! M3 端到端集成：core 复杂树 → resolve → raster 渲染 → 像素断言（见 010-落地路线 M3 验收）。
 //!
 //! 覆盖：文本（中英文）、滚动裁剪、Stack 堆叠（Content + Overlay 角标）、draw_order 局部排序、
-//! 圆角卡片、渐变。raster 是基准渲染器（007-6），像素确定性可复现。
+//! 圆角卡片、渐变降级。raster 只验证确定性与弱宿主降级，不再承担视觉基准。
 
 use std::collections::HashMap;
 use tela_contract::{
@@ -218,11 +218,11 @@ fn resolve_and_render_complex_tree_end_to_end() {
     }
     assert_eq!(outside_dark, 0, "滚动容器内容不得外溢（clip 裁剪正确）");
 
-    // 3. 渐变卡片（y 55..115）：左端偏蓝、右端偏紫。
+    // 3. 圆角渐变在 raster 弱宿主按首断点降级；视觉插值由 wgpu golden 验证。
     let left = bitmap.pixel(10, 90).unwrap();
     let right = bitmap.pixel(170, 90).unwrap();
     assert!(left[2] > left[0], "左端应为蓝色系 {left:?}");
-    assert!(right[0] > left[0] * 2, "右端应偏红/紫 {right:?}");
+    assert_eq!(right, left, "raster 渐变降级应稳定采用首断点色");
 
     // 4. 角标（右上 Overlay）：卡片右上区域出现红色角标。
     let mut red_pixels = 0;

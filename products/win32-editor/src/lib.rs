@@ -18,7 +18,7 @@ use tela_target_win32_static::{
     Application, ApplicationConfig, WindowMetrics, build_dispatcher, run_static_window,
 };
 #[cfg(target_os = "windows")]
-use tela_text_resources::ControlledTextMeasurer;
+use tela_text_resources::{CONTROLLED_FONT_CATALOG, ControlledTextMeasurer};
 #[cfg(target_os = "windows")]
 use tela_win32_editor::{EditorController, FOCUS_APPEARANCE};
 
@@ -45,7 +45,8 @@ fn bundle_build_id() -> u32 {
 
 #[cfg(target_os = "windows")]
 static RESOURCES: UiResourceSet<ControlledTextMeasurer, MaterialIconFontProvider> =
-    UiResourceSet::new(ControlledTextMeasurer, MaterialIconFontProvider);
+    UiResourceSet::new(ControlledTextMeasurer, MaterialIconFontProvider)
+        .with_fonts(CONTROLLED_FONT_CATALOG);
 
 /// 启动 Win32 静态编辑器窗口（阻塞至窗口关闭）。
 #[cfg(target_os = "windows")]

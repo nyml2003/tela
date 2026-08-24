@@ -56,6 +56,9 @@ pub trait IosMobileSession {
     /// Notifies the application that native text focus was lost for its presented frame.
     fn input_blur(&mut self, frame_token: u64) -> bool;
 
+    /// CADisplayLink / UIKit 显示链注入的单调毫秒时间戳。
+    fn animation_tick(&mut self, timestamp_ms: u64) -> bool;
+
     /// Resolves the portable drawing frame and its nonzero provenance token for Metal rendering.
     ///
     /// UIKit must retain the token only after the frame is actually presented, then pass it back
@@ -65,6 +68,9 @@ pub trait IosMobileSession {
 
     /// Returns the state UIKit needs after an input or lifecycle transition.
     fn text_status(&self) -> MobileTextStatus;
+
+    /// 是否需要继续请求显示链回调。
+    fn animation_active(&self) -> bool;
 }
 
 /// Starts the UIKit-owned Winit event loop for one statically linked mobile session.

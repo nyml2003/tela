@@ -16,5 +16,5 @@ pub use about_page::{AboutPage, AboutRows};
 pub use editor_page::EditorPage;
 pub use icons_page::render_icons_page;
 pub use nav_button::{NavButton, nav_item};
-pub use settings_page::{SettingsPage, StepButton, step_item};
+pub use settings_page::{FontChoice, SettingsPage, StepButton, font_item, step_item};
 pub use title_bar::{TitleBar, window_item};

@@ -1,13 +1,13 @@
 //! 客户端固定框架：顶栏、工具栏、路径栏和状态栏。
 
 use tela_contract::{
-    Fill, IconName, IconProvider, Insets, KeymapScopeId, LayoutConcern, SemanticKey, Size, UiNode,
-    UpdateMode, Viewport, VisualConcern,
+    Color, ColorStop, Fill, Gradient, GradientKind, IconName, IconProvider, Insets, KeymapScopeId,
+    LayoutConcern, PixelOffset, Point, SemanticKey, ShadowSpec, Size, UiNode, UpdateMode, Viewport,
 };
 use tela_core::builder::LayoutContainer;
 use tela_desktop_ui_kit::{Text, Toolbar, ToolbarItem, ToolbarStyle};
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, into_view_child, ui};
+use tela_ui_dsl::{Easing, TransitionSpec, ViewBuild, ViewOutput, ViewResult, into_view_child, ui};
 use tela_ui_foundation::Icon;
 
 use crate::domain::{FileManagerModel, FileManagerSession};
@@ -100,29 +100,40 @@ fn build_app_shell_view<A>(
         narrow,
         props.icons,
     ))?;
-    let status = into_view_child::<A, UiNode>(status_bar(
+    let status = status_bar_view(
+        build,
         model,
         session,
         shell_width,
         props.hovered_action_key.clone(),
-    ))?;
+    )?;
     let workspace_shell = ui!(build {
-        <Column
+        <Frame
             width={shell_width}
             height={shell_height}
             margin={Insets { top: vertical_inset, right: horizontal_inset, bottom: vertical_inset, left: horizontal_inset }}
+            fill={surface_gradient(shell_width, shell_height)}
+            border_radius={SHELL_RADIUS}
+            shadow={ShadowSpec {
+                offset: PixelOffset { x: 0.0, y: 5.0 },
+                blur_radius: 18.0,
+                color: Color::rgba(0.04, 0.09, 0.18, 0.18),
+                inset: false,
+            }}
         >
-            { top_bar }
-            { toolbar }
-            { workspace }
-            { status }
-        </Column>
+            <Column width={shell_width} height={shell_height}>
+                { top_bar }
+                { toolbar }
+                { workspace }
+                { status }
+            </Column>
+        </Frame>
     })?;
     let shell = ui!(build {
         <Stack
             width={viewport.width}
             height={viewport.height}
-            fill={Fill::Solid(BG)}
+            fill={canvas_gradient(viewport.width, viewport.height)}
             update_mode={UpdateMode::Dirty}
         >
             { workspace_shell }
@@ -191,7 +202,7 @@ fn top_bar_view<A>(
                 padding={Insets { top: 0.0, right: 12.0, bottom: 0.0, left: 16.0 }}
                 border_width={BORDER_WIDTH}
                 cross_align={tela_contract::CrossAlign::Center}
-                fill={Fill::Solid(SURFACE)}
+                fill={surface_gradient(width, TOP_BAR_H)}
                 border_color={BORDER}
                 border_radii={SHELL_TOP_RADIUS}
             >
@@ -210,7 +221,7 @@ fn top_bar_view<A>(
                 padding={Insets { top: 0.0, right: 12.0, bottom: 0.0, left: 16.0 }}
                 border_width={BORDER_WIDTH}
                 cross_align={tela_contract::CrossAlign::Center}
-                fill={Fill::Solid(SURFACE)}
+                fill={surface_gradient(width, TOP_BAR_H)}
                 border_color={BORDER}
                 border_radii={SHELL_TOP_RADIUS}
             >
@@ -422,12 +433,13 @@ fn path_bar(model: &FileManagerModel, session: &FileManagerSession) -> UiNode {
     .into()
 }
 
-fn status_bar(
+fn status_bar_view<A>(
+    build: &mut ViewBuild<A>,
     model: &FileManagerModel,
     session: &FileManagerSession,
     width: f32,
     hovered: Option<SemanticKey>,
-) -> UiNode {
+) -> ViewResult<ViewOutput<A>> {
     let left = format!(
         "{} 个项目 · 已选 {} 项",
         model
@@ -451,34 +463,76 @@ fn status_bar(
         crate::domain::SortMode::Modified => "修改时间",
         crate::domain::SortMode::Size => "大小",
     };
+    let active = hovered.is_some();
     let right = hovered
         .map(|target| toolbar_label(&target.0).to_owned())
         .unwrap_or_else(|| format!("{scope} · 按{sort}排序 · {}", session.notice));
-    LayoutContainer::row([
-        text(&left, 12.0, SECONDARY),
-        spacer(),
-        text(&right, 12.0, SECONDARY),
-    ])
-    .layout(LayoutConcern {
-        width: Some(Size::fixed(width)),
-        height: Some(Size::fixed(STATUS_BAR_H)),
-        padding: tela_contract::Insets {
-            top: 0.0,
-            right: 12.0,
-            bottom: 0.0,
-            left: 12.0,
+    ui!(build {
+        <Frame
+            width={width}
+            height={STATUS_BAR_H}
+            padding={Insets { top: 0.0, right: 12.0, bottom: 0.0, left: 12.0 }}
+            border_width={BORDER_WIDTH}
+            border_color={BORDER}
+            border_radii={SHELL_BOTTOM_RADIUS}
+            fill={Fill::Solid(if active { Color::rgba(0.93, 0.96, 1.0, 1.0) } else { SURFACE })}
+            transition={TransitionSpec::new(160, Easing::STANDARD)}
+        >
+            <Row cross_align={tela_contract::CrossAlign::Center}>
+                { text(&left, 12.0, SECONDARY) }
+                { spacer() }
+                { text(&right, 12.0, SECONDARY) }
+            </Row>
+        </Frame>
+    })
+}
+
+fn canvas_gradient(width: f32, height: f32) -> Fill {
+    Fill::Linear(Gradient {
+        kind: GradientKind::Linear {
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point {
+                x: width,
+                y: height,
+            },
         },
-        border_width: BORDER_WIDTH,
-        cross_align: tela_contract::CrossAlign::Center,
-        ..LayoutConcern::default()
+        stops: vec![
+            ColorStop {
+                position: 0.0,
+                color: Color::rgba(0.91, 0.95, 1.0, 1.0),
+            },
+            ColorStop {
+                position: 0.52,
+                color: BG,
+            },
+            ColorStop {
+                position: 1.0,
+                color: Color::rgba(0.96, 0.97, 0.985, 1.0),
+            },
+        ],
     })
-    .visual(VisualConcern {
-        fill: Some(Fill::Solid(SURFACE)),
-        border_color: Some(BORDER),
-        border_radius: SHELL_BOTTOM_RADIUS,
-        ..VisualConcern::default()
+}
+
+fn surface_gradient(width: f32, height: f32) -> Fill {
+    Fill::Linear(Gradient {
+        kind: GradientKind::Linear {
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point {
+                x: width.max(1.0),
+                y: height.max(1.0),
+            },
+        },
+        stops: vec![
+            ColorStop {
+                position: 0.0,
+                color: Color::WHITE,
+            },
+            ColorStop {
+                position: 1.0,
+                color: Color::rgba(0.965, 0.98, 1.0, 1.0),
+            },
+        ],
     })
-    .into()
 }
 
 fn toolbar_label(target: &str) -> &str {

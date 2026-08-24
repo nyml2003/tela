@@ -26,6 +26,25 @@ export class CargoPort {
     return this.gate('test', ['test']);
   }
 
+  /** 在带 lavapipe 的专用 Nix shell 中执行唯一视觉基准。 */
+  async visualGolden(): Promise<GateResult> {
+    return this.gateWithCommand('nix', 'visual', [
+      'develop',
+      '.#render-wgpu',
+      '--command',
+      'cargo',
+      'test',
+      '-p',
+      'tela-render-wgpu',
+      '--test',
+      'render_test',
+      'renders_visual_primitive_golden_offscreen',
+      '--',
+      '--ignored',
+      '--exact',
+    ]);
+  }
+
   /** 检查一个显式产品闭包的 Rust package，不借用其它产品的 target 或 SDK。 */
   async checkPackages(packages: readonly string[]): Promise<GateResult> {
     const args = ['check'];

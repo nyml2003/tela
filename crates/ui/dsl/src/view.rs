@@ -15,7 +15,8 @@ use tela_contract::{
 use tela_core::UiTree;
 
 use crate::{
-    DslTrigger, ProvidedValue, Signal, TextActionMap, ViewContext,
+    AnimationClock, AnimationSchedule, DslTrigger, ProvidedValue, Signal, TextActionMap,
+    ViewContext,
     action::PendingAction,
     owner::{
         ComponentActionRoute, ComponentIdentity, ComponentOwnerFrame, ComponentRoute,
@@ -573,6 +574,7 @@ pub struct ViewNode<A> {
     watches: Vec<PendingWatch>,
     actions: Vec<PendingAction<A>>,
     component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
+    animation_schedule: AnimationSchedule,
 }
 
 impl<A> ViewNode<A> {
@@ -583,6 +585,7 @@ impl<A> ViewNode<A> {
             watches: Vec::new(),
             actions: Vec::new(),
             component_actions: Vec::new(),
+            animation_schedule: AnimationSchedule::default(),
         }
     }
 
@@ -594,8 +597,10 @@ impl<A> ViewNode<A> {
     }
 
     fn from_output(output: ViewOutput<A>) -> Self {
-        let (node, plans) = output.into_parts();
-        Self::opaque(node).with_plan_bundle(plans)
+        let (node, plans, animation_schedule) = output.into_parts();
+        let mut view = Self::opaque(node).with_plan_bundle(plans);
+        view.animation_schedule = animation_schedule;
+        view
     }
 
     fn attach_watches(mut self, watches: Vec<WatchHandle>) -> Self {
@@ -916,6 +921,7 @@ pub struct ViewOutput<A> {
     node: UiNode,
     plans: PlanBundle<A>,
     pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
+    pub(crate) animation_schedule: AnimationSchedule,
 }
 
 impl<A> ViewOutput<A> {
@@ -928,6 +934,7 @@ impl<A> ViewOutput<A> {
             node,
             plans: PlanBundle::empty(),
             owner_frame: None,
+            animation_schedule: AnimationSchedule::default(),
         }
     }
 
@@ -1025,8 +1032,8 @@ impl<A> ViewOutput<A> {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (UiNode, PlanBundle<A>) {
-        (self.node, self.plans)
+    pub(crate) fn into_parts(self) -> (UiNode, PlanBundle<A>, AnimationSchedule) {
+        (self.node, self.plans, self.animation_schedule)
     }
 }
 
@@ -1102,6 +1109,8 @@ pub struct ViewBuild<A> {
     scope: Arc<ViewContext>,
     component_identity_scopes: Vec<String>,
     pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
+    animation_clock: AnimationClock,
+    animation_schedule: AnimationSchedule,
     marker: std::marker::PhantomData<A>,
 }
 
@@ -1118,6 +1127,8 @@ impl<A> ViewBuild<A> {
             scope: ViewContext::root(),
             component_identity_scopes: Vec::new(),
             owner_frame: None,
+            animation_clock: AnimationClock::default(),
+            animation_schedule: AnimationSchedule::default(),
             marker: std::marker::PhantomData,
         }
     }
@@ -1125,6 +1136,19 @@ impl<A> ViewBuild<A> {
     /// 返回当前词法 Context 的 owned snapshot。
     pub fn current_scope(&self) -> Arc<ViewContext> {
         Arc::clone(&self.scope)
+    }
+
+    /// 设置当前候选帧使用的宿主单调时钟采样。
+    pub fn set_animation_clock(&mut self, clock: AnimationClock) {
+        self.animation_clock = clock;
+    }
+
+    pub(crate) fn animation_clock(&self) -> AnimationClock {
+        self.animation_clock
+    }
+
+    pub(crate) fn request_animation(&mut self, schedule: AnimationSchedule) {
+        self.animation_schedule.merge(schedule);
     }
 
     /// 将本次构建绑定到组件运行时提供的候选 owner 帧。
@@ -1229,12 +1253,14 @@ impl<A> ViewBuild<A> {
         let mut merged_watches = Vec::new();
         let mut merged_actions = Vec::new();
         let mut merged_component_actions = Vec::new();
+        let mut animation_schedule = AnimationSchedule::default();
         for (index, mut child) in children.into_iter().enumerate() {
             child.rebase(&[index]);
             lowered_children.push(child.node);
             merged_watches.extend(child.watches);
             merged_actions.extend(child.actions);
             merged_component_actions.extend(child.component_actions);
+            animation_schedule.merge(child.animation_schedule);
         }
         node.children = lowered_children;
         let node = Self::attach_body_watches(
@@ -1243,6 +1269,7 @@ impl<A> ViewBuild<A> {
                 watches: merged_watches,
                 actions: merged_actions,
                 component_actions: merged_component_actions,
+                animation_schedule,
             },
             watches,
         );
@@ -1312,6 +1339,7 @@ impl<A> ViewBuild<A> {
             });
         }
         let node = Self::attach_body_watches(children.pop().expect("length was checked"), watches);
+        self.animation_schedule.merge(node.animation_schedule);
         Ok(ViewOutput {
             node: node.node,
             plans: PlanBundle {
@@ -1320,6 +1348,7 @@ impl<A> ViewBuild<A> {
                 component_actions: node.component_actions,
             },
             owner_frame: self.owner_frame.clone(),
+            animation_schedule: self.animation_schedule,
         })
     }
 
@@ -1357,9 +1386,9 @@ mod tests {
 
     use super::{
         ActionTarget, AnchorResolver, Body, NodeAnchor, ViewBuild, ViewBuildError, ViewChild,
-        ViewSite,
+        ViewOutput, ViewSite,
     };
-    use crate::{ComponentRuntime, ProvidedValue, Signal, ViewResult};
+    use crate::{AnimationSchedule, ComponentRuntime, ProvidedValue, Signal, ViewResult};
 
     fn site() -> ViewSite {
         ViewSite::new("view.rs", 1, 1)
@@ -1431,7 +1460,7 @@ mod tests {
                 site(),
             )
             .expect("one real root");
-        let (node, _plans) = ui.into_parts();
+        let (node, _plans, _animation_schedule) = ui.into_parts();
         let tree = UiTree::new(node).expect("valid tree");
         assert_eq!(
             tree.keys(),
@@ -1440,6 +1469,38 @@ mod tests {
                 SemanticKey("/0/".to_owned()),
                 SemanticKey("/1/".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn nested_view_output_bubbles_animation_schedule_to_parent() {
+        let mut nested = ViewOutput::<Action>::opaque(UiNode::new(NodeKind::Frame));
+        nested.animation_schedule = AnimationSchedule {
+            active: true,
+            next_deadline_ms: Some(116),
+        };
+
+        let build = ViewBuild::<Action>::new();
+        let root = build
+            .container(
+                UiNode::new(NodeKind::Column),
+                Body::new(vec![ViewChild::output(nested)], Vec::new()),
+            )
+            .expect("container");
+        let mut parent = ViewBuild::<Action>::new();
+        let output = parent
+            .finish(
+                Body::new(vec![ViewChild::view_node(root)], Vec::new()),
+                site(),
+            )
+            .expect("parent output");
+
+        assert_eq!(
+            output.animation_schedule,
+            AnimationSchedule {
+                active: true,
+                next_deadline_ms: Some(116),
+            }
         );
     }
 
@@ -1490,7 +1551,7 @@ mod tests {
                 site(),
             )
             .expect("root");
-        let (node, plans) = root.into_parts();
+        let (node, plans, _animation_schedule) = root.into_parts();
         let tree = UiTree::new(node).expect("tree");
         let plans = plans.resolve(&tree).expect("action plan");
         assert_eq!(plans.actions.len(), 1);
@@ -1512,7 +1573,7 @@ mod tests {
                 site(),
             )
             .expect("root");
-        let (node, plans) = root.into_parts();
+        let (node, plans, _animation_schedule) = root.into_parts();
         let tree = UiTree::new(node).expect("tree");
         let mut runtime = ComponentRuntime::new();
         let plans = plans.resolve(&tree).expect("watch plan");

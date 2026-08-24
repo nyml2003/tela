@@ -34,7 +34,40 @@ pub fn render_frame(frame: &UiFrame, cfg: &RasterConfig) -> BitmapRGBA8 {
         pixels: &mut bitmap.pixels,
     };
     for command in &frame.commands {
-        render_command(&mut canvas, command, cfg, scale);
+        let opacity = command.opacity.clamp(0.0, 1.0);
+        if opacity >= 1.0 {
+            render_command(&mut canvas, command, cfg, scale);
+        } else if opacity > 0.0 {
+            let mut layer = BitmapRGBA8::new(width, height);
+            let mut layer_canvas = Canvas {
+                width,
+                height,
+                pixels: &mut layer.pixels,
+            };
+            render_command(&mut layer_canvas, command, cfg, scale);
+            for (destination, source) in canvas
+                .pixels
+                .chunks_exact_mut(4)
+                .zip(layer.pixels.chunks_exact(4))
+            {
+                let source = [
+                    source[0],
+                    source[1],
+                    source[2],
+                    (f32::from(source[3]) * opacity).round() as u8,
+                ];
+                let blended = blend_rgba(
+                    [
+                        destination[0],
+                        destination[1],
+                        destination[2],
+                        destination[3],
+                    ],
+                    source,
+                );
+                destination.copy_from_slice(&blended);
+            }
+        }
     }
     bitmap
 }
@@ -128,16 +161,18 @@ fn render_payload(
             border,
             radius,
         } => {
+            let fill = solid_or_degraded(fill);
             if cfg.backend_caps.rounded_rect {
-                shapes::fill_rounded_rect(canvas, &geometry, clip, fill, border, radius, scale);
+                shapes::fill_rounded_rect(canvas, &geometry, clip, &fill, border, radius, scale);
             } else {
                 // 降级：圆角退化为直角。
-                shapes::fill_rect(canvas, &geometry, clip, fill, border, 0.0);
+                shapes::fill_rect(canvas, &geometry, clip, &fill, border, 0.0);
             }
         }
         DrawPayload::Circle { fill, border } => {
             let fill = solid_or_degraded(fill);
-            shapes::fill_ellipse(canvas, &geometry, clip, &fill, border);
+            let circle = inscribed_square(geometry);
+            shapes::fill_ellipse(canvas, &circle, clip, &fill, border);
         }
         DrawPayload::Ellipse { fill, border } => {
             let fill = solid_or_degraded(fill);
@@ -160,7 +195,7 @@ fn render_payload(
                 shapes::fill_rect(canvas, &geometry, clip, &fill, border, 0.0);
             }
         }
-        DrawPayload::Image { texture } => {
+        DrawPayload::Image { texture, .. } => {
             // 不支持图片纹理：跳过（能力降级）。
             if cfg.backend_caps.image_texture
                 && let Some(tex) = cfg.textures.get(texture)
@@ -233,6 +268,16 @@ pub(crate) struct IRect {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+fn inscribed_square(rect: IRect) -> IRect {
+    let side = rect.w.min(rect.h).max(0);
+    IRect {
+        x: rect.x + (rect.w - side) / 2,
+        y: rect.y + (rect.h - side) / 2,
+        w: side,
+        h: side,
+    }
 }
 
 /// 逻辑矩形 × dpi → 像素矩形（统一取整规范，见 007-7.6）。

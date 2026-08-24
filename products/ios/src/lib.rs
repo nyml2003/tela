@@ -68,6 +68,10 @@ impl IosMobileSession for ProductMobileSession {
         self.app.input_blur(frame_token)
     }
 
+    fn animation_tick(&mut self, timestamp_ms: u64) -> bool {
+        self.app.animation_tick(timestamp_ms)
+    }
+
     fn frame(&mut self) -> (&tela_contract::UiFrame, u64) {
         self.app.frame()
     }
@@ -76,11 +80,16 @@ impl IosMobileSession for ProductMobileSession {
         let MobileAppStatus {
             input_focused,
             input_value,
+            ..
         } = self.app.status();
         MobileTextStatus {
             input_focused,
             input_value,
         }
+    }
+
+    fn animation_active(&self) -> bool {
+        self.app.status().animation_active
     }
 }
 

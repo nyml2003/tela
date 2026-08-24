@@ -23,6 +23,10 @@ pub trait Canvas2D {
     fn fill_polygon(&mut self, points: &[tela_contract::Point], color: Color);
     /// 描边矩形。
     fn stroke_rect(&mut self, rect: Rect, border: &BorderStroke);
+    /// 描边椭圆；旧宿主可降级为外接矩形描边。
+    fn stroke_ellipse(&mut self, rect: Rect, border: &BorderStroke) {
+        self.stroke_rect(rect, border);
+    }
     /// 线性渐变填充（几何 + 起止点 + 断点）。
     fn fill_linear_gradient(&mut self, rect: Rect, gradient: &Gradient);
     /// 文字。
@@ -37,6 +41,15 @@ pub trait Canvas2D {
     );
     /// 图片（宿主按纹理 id 绘制；本后端留宿主实现）。
     fn draw_image(&mut self, rect: Rect, texture: &tela_contract::TextureRef);
+    /// 带透明度的图片；旧宿主可沿用不透明绘制降级。
+    fn draw_image_with_opacity(
+        &mut self,
+        rect: Rect,
+        texture: &tela_contract::TextureRef,
+        _opacity: f32,
+    ) {
+        self.draw_image(rect, texture);
+    }
     /// 九宫格（宿主实现；本后端提供默认降级为整体拉伸）。
     fn draw_nine_patch(
         &mut self,
@@ -54,7 +67,13 @@ pub fn render_frame(canvas: &mut impl Canvas2D, frame: &UiFrame, caps: &BackendC
             canvas.save();
             canvas.clip_rect(clip.rect);
         }
-        render_payload(canvas, &command.payload, command.geometry, caps);
+        render_payload(
+            canvas,
+            &command.payload,
+            command.geometry,
+            command.opacity.clamp(0.0, 1.0),
+            caps,
+        );
         if command.clip.is_some() {
             canvas.restore();
         }
@@ -77,6 +96,7 @@ fn render_payload(
     canvas: &mut impl Canvas2D,
     payload: &DrawPayload,
     geometry: Rect,
+    opacity: f32,
     caps: &BackendCapabilities,
 ) {
     match payload {
@@ -84,10 +104,10 @@ fn render_payload(
             if let Some(color) = fill
                 && caps.solid_rect
             {
-                canvas.fill_rect(geometry, *color);
+                canvas.fill_rect(geometry, with_opacity(*color, opacity));
             }
             if let Some(border) = border {
-                canvas.stroke_rect(geometry, border);
+                canvas.stroke_rect(geometry, &border_with_opacity(*border, opacity));
             }
         }
         DrawPayload::RoundedRect {
@@ -97,41 +117,50 @@ fn render_payload(
         } => {
             let r = (radius.top_left + radius.top_right + radius.bottom_right + radius.bottom_left)
                 / 4.0;
-            if let Some(color) = fill {
+            if let Some(color) = solid_or_degraded(fill) {
                 if caps.rounded_rect {
-                    canvas.fill_rounded_rect(geometry, r, *color);
+                    canvas.fill_rounded_rect(geometry, r, with_opacity(color, opacity));
                 } else {
                     // 降级：圆角退化为直角。
-                    canvas.fill_rect(geometry, *color);
+                    canvas.fill_rect(geometry, with_opacity(color, opacity));
                 }
             }
             if let Some(border) = border {
-                canvas.stroke_rect(geometry, border);
+                canvas.stroke_rect(geometry, &border_with_opacity(*border, opacity));
             }
         }
-        DrawPayload::Circle { fill, border } | DrawPayload::Ellipse { fill, border } => {
+        DrawPayload::Circle { fill, border } => {
+            let geometry = inscribed_square(geometry);
             if let Some(color) = solid_or_degraded(fill) {
-                canvas.fill_ellipse(geometry, color);
+                canvas.fill_ellipse(geometry, with_opacity(color, opacity));
             }
             if let Some(border) = border {
-                canvas.stroke_rect(geometry, border);
+                canvas.stroke_ellipse(geometry, &border_with_opacity(*border, opacity));
+            }
+        }
+        DrawPayload::Ellipse { fill, border } => {
+            if let Some(color) = solid_or_degraded(fill) {
+                canvas.fill_ellipse(geometry, with_opacity(color, opacity));
+            }
+            if let Some(border) = border {
+                canvas.stroke_ellipse(geometry, &border_with_opacity(*border, opacity));
             }
         }
         DrawPayload::Polygon { points, fill, .. } => {
             if caps.polygon {
                 if let Some(color) = solid_or_degraded(fill) {
-                    canvas.fill_polygon(points, color);
+                    canvas.fill_polygon(points, with_opacity(color, opacity));
                 }
             } else {
                 // 降级：外接矩形。
                 if let Some(color) = solid_or_degraded(fill) {
-                    canvas.fill_rect(geometry, color);
+                    canvas.fill_rect(geometry, with_opacity(color, opacity));
                 }
             }
         }
-        DrawPayload::Image { texture } => {
+        DrawPayload::Image { texture, .. } => {
             if caps.image_texture {
-                canvas.draw_image(geometry, texture);
+                canvas.draw_image_with_opacity(geometry, texture, opacity);
             }
         }
         DrawPayload::NinePatch { texture, border } => {
@@ -150,29 +179,53 @@ fn render_payload(
                     geometry.x,
                     *baseline_y,
                     text.font_size,
-                    text.color,
+                    with_opacity(text.color, opacity),
                 );
             }
         }
         DrawPayload::LinearGradient { gradient } => {
             if caps.linear_gradient {
-                canvas.fill_linear_gradient(geometry, gradient);
+                let mut gradient = gradient.clone();
+                for stop in &mut gradient.stops {
+                    stop.color = with_opacity(stop.color, opacity);
+                }
+                canvas.fill_linear_gradient(geometry, &gradient);
             } else if let Some(first) = gradient.stops.first() {
-                canvas.fill_rect(geometry, first.color);
+                canvas.fill_rect(geometry, with_opacity(first.color, opacity));
             }
         }
         DrawPayload::RadialGradient { gradient } => {
             // 降级：起始断点纯色（raster 同规则）。
             if let Some(first) = gradient.stops.first() {
-                canvas.fill_rect(geometry, first.color);
+                canvas.fill_rect(geometry, with_opacity(first.color, opacity));
             }
         }
         DrawPayload::Shadow { target, .. } => {
             // 降级：丢弃阴影，仅绘制本体（与 raster 一致的基准规则）。
-            render_payload(canvas, target, geometry, caps);
+            render_payload(canvas, target, geometry, opacity, caps);
         }
         DrawPayload::Custom(_) => {
             // 自定义命令：按能力集跳过。
         }
     }
+}
+
+fn inscribed_square(rect: Rect) -> Rect {
+    let side = rect.w.min(rect.h).max(0.0);
+    Rect {
+        x: rect.x + (rect.w - side) * 0.5,
+        y: rect.y + (rect.h - side) * 0.5,
+        w: side,
+        h: side,
+    }
+}
+
+fn with_opacity(mut color: Color, opacity: f32) -> Color {
+    color.a *= opacity;
+    color
+}
+
+fn border_with_opacity(mut border: BorderStroke, opacity: f32) -> BorderStroke {
+    border.color = with_opacity(border.color, opacity);
+    border
 }

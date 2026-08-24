@@ -17,6 +17,8 @@ export interface WebAppStatus {
   readonly cursor: number;
   readonly input_focused: boolean;
   readonly input_value: string;
+  readonly animation_active: boolean;
+  readonly next_deadline_ms: bigint | undefined;
 }
 
 export interface TelaWebviewBindings {
@@ -25,6 +27,7 @@ export interface TelaWebviewBindings {
   validate_development_bundle(index: DevelopmentBundleIndex, bytes: Uint8Array): ValidatedBundle;
   decode_app_status(bytes: Uint8Array): WebAppStatus;
   event_viewport(width: number, height: number): Uint8Array;
+  event_tick(timestampMs: bigint): Uint8Array;
   event_pointer(
     sourceFrameToken: bigint,
     pointerId: bigint,

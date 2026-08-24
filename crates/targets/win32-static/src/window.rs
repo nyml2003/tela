@@ -8,6 +8,7 @@ use tela_contract::{
     Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase, UiFrame,
     WindowCommand,
 };
+use tela_ui_dsl::AnimationSchedule;
 use windows::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
@@ -106,6 +107,14 @@ pub trait Win32StaticSession {
     fn on_tick(&mut self) -> bool {
         false
     }
+    /// Host 单调动画时钟采样。
+    fn on_animation_tick(&mut self, _timestamp_ms: u64) -> bool {
+        false
+    }
+    /// 当前成功帧请求的动画调度状态。
+    fn animation_schedule(&self) -> AnimationSchedule {
+        AnimationSchedule::default()
+    }
     /// Host 即将销毁窗口时调用。
     fn on_close(&mut self) {}
     /// Current controlled text value.
@@ -144,6 +153,14 @@ impl<A: Clone + 'static, C: crate::session::AppController<A>> Win32StaticSession
 
     fn on_tick(&mut self) -> bool {
         self.on_tick()
+    }
+
+    fn on_animation_tick(&mut self, timestamp_ms: u64) -> bool {
+        self.on_animation_tick(timestamp_ms)
+    }
+
+    fn animation_schedule(&self) -> AnimationSchedule {
+        self.animation_schedule()
     }
 
     fn on_close(&mut self) {
@@ -664,6 +681,7 @@ unsafe extern "system" fn wnd_proc(
                         if output_staged_frame {
                             request_redraw(hwnd);
                         }
+                        state.sync_animation_timer(hwnd);
                     } else if frame_current {
                         state.session.frame_rejected();
                     }
@@ -675,8 +693,22 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             unsafe {
                 with_state(hwnd, |state| {
-                    if state.session.on_tick() {
-                        request_redraw(hwnd);
+                    match wparam.0 {
+                        1 => {
+                            if state.session.on_tick() {
+                                request_redraw(hwnd);
+                            }
+                        }
+                        2 => {
+                            // DwmFlush 对齐桌面合成器刷新；RDP/禁用 DWM 等失败场景仍由
+                            // 16ms WM_TIMER 提供保底节拍。
+                            let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                            let timestamp_ms = state.input_epoch.elapsed().as_millis() as u64;
+                            if state.session.on_animation_tick(timestamp_ms) {
+                                request_redraw(hwnd);
+                            }
+                        }
+                        _ => {}
                     }
                 });
             }
@@ -901,6 +933,7 @@ unsafe extern "system" fn wnd_proc(
         WM_KILLFOCUS => {
             unsafe {
                 with_state(hwnd, |state| {
+                    state.synchronize_animation_clock();
                     state.session.input_blur();
                     request_redraw(hwnd);
                 });
@@ -942,6 +975,7 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 eprintln!("tela-win32-trace: wm_destroy begin");
                 let _ = KillTimer(Some(hwnd), 1);
+                let _ = KillTimer(Some(hwnd), 2);
                 let value = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if value != 0 {
                     drop(Box::from_raw(value as *mut StaticWindowState));
@@ -960,6 +994,20 @@ impl StaticWindowState {
             "tela-win32-trace: t={} event={event} {details}",
             self.input_epoch.elapsed().as_micros()
         );
+    }
+
+    fn sync_animation_timer(&self, hwnd: HWND) {
+        let schedule = self.session.animation_schedule();
+        if schedule.active {
+            let now_ms = self.input_epoch.elapsed().as_millis() as u64;
+            let delay_ms = schedule
+                .next_deadline_ms
+                .map(|deadline| deadline.saturating_sub(now_ms).clamp(1, 16))
+                .unwrap_or(16) as u32;
+            let _ = unsafe { SetTimer(Some(hwnd), 2, delay_ms, None) };
+        } else {
+            let _ = unsafe { KillTimer(Some(hwnd), 2) };
+        }
     }
 
     /// 统一视口更新：GetClientRect 返回物理像素，逻辑尺寸 = 物理 / dpr；
@@ -1063,7 +1111,7 @@ impl StaticWindowState {
     }
 
     fn mouse_pointer_event(
-        &self,
+        &mut self,
         phase: PointerPhase,
         x: f32,
         y: f32,
@@ -1071,6 +1119,7 @@ impl StaticWindowState {
         delta_x: f32,
         delta_y: f32,
     ) -> PointerEvent {
+        self.synchronize_animation_clock();
         PointerEvent::new(
             PointerId(0),
             PointerKind::Mouse,
@@ -1088,7 +1137,13 @@ impl StaticWindowState {
         )
     }
 
+    fn synchronize_animation_clock(&mut self) {
+        let timestamp_ms = self.input_epoch.elapsed().as_millis() as u64;
+        let _ = self.session.on_animation_tick(timestamp_ms);
+    }
+
     fn key_down(&mut self, virtual_key: u16, repeat: bool) {
+        self.synchronize_animation_clock();
         let focused = self.session.input_focused();
         if focused {
             match virtual_key {
@@ -1115,6 +1170,7 @@ impl StaticWindowState {
     }
 
     fn character(&mut self, code_unit: u16) {
+        self.synchronize_animation_clock();
         if !self.session.input_focused() {
             return;
         }

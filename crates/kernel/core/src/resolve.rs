@@ -412,6 +412,7 @@ fn emit_focus_ring<M: TextMeasurer + ?Sized>(
     ctx.commands.push(DrawCommand {
         geometry,
         clip,
+        opacity: 1.0,
         payload: DrawPayload::RoundedRect {
             fill: None,
             border: Some(BorderStroke {
@@ -720,8 +721,12 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
                 text,
             }
         }
-        (NodeKind::Image, Some(ContentConcern::Image(image)), _) => DrawPayload::Image {
+        (NodeKind::Image, Some(ContentConcern::Image(image)), visual) => DrawPayload::Image {
             texture: image.texture.clone(),
+            radius: visual
+                .as_ref()
+                .map(|visual| visual.border_radius)
+                .unwrap_or_default(),
         },
         (NodeKind::NinePatch, Some(ContentConcern::NinePatch(nine_patch)), _) => {
             DrawPayload::NinePatch {
@@ -767,9 +772,9 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
                 width: node.layout.as_ref().map(|l| l.border_width).unwrap_or(0.0),
             });
             match &visual.fill {
-                Some(Fill::Solid(color)) if visual.border_radius != Default::default() => {
+                Some(fill) if visual.border_radius != Default::default() => {
                     DrawPayload::RoundedRect {
-                        fill: Some(*color),
+                        fill: Some(fill.clone()),
                         border,
                         radius: visual.border_radius,
                     }
@@ -804,6 +809,11 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
     ctx.commands.push(DrawCommand {
         geometry,
         clip: effective_clip,
+        opacity: node
+            .visual
+            .as_ref()
+            .map(|visual| visual.opacity.clamp(0.0, 1.0))
+            .unwrap_or(1.0),
         payload,
     });
 }

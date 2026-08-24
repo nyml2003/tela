@@ -6,7 +6,9 @@
 
 use std::fmt::Write;
 
-use tela_contract::{BorderRadius, BorderStroke, ClipRect, Color, DrawPayload, Rect, UiFrame};
+use tela_contract::{
+    BorderRadius, BorderStroke, ClipRect, Color, DrawPayload, Fill, Rect, UiFrame,
+};
 
 pub(crate) fn to_json(frame: &UiFrame) -> String {
     let mut output = String::new();
@@ -24,6 +26,7 @@ pub(crate) fn to_json(frame: &UiFrame) -> String {
         write_rect(&mut output, command.geometry);
         output.push_str(r#","clip":"#);
         write_clip(&mut output, command.clip);
+        write!(output, r#","opacity":{}"#, command.opacity).expect("写入 String 不会失败");
         output.push_str(r#","payload":"#);
         write_payload(&mut output, &command.payload);
         output.push('}');
@@ -99,16 +102,18 @@ fn write_payload(output: &mut String, payload: &DrawPayload) {
             radius,
         } => {
             output.push_str(r#"{"kind":"rounded_rect","fill":"#);
-            write_color_option(output, *fill);
+            write_fill_option(output, fill.as_ref());
             output.push_str(r#","border":"#);
             write_border_option(output, *border);
             output.push_str(r#","radius":"#);
             write_radius(output, *radius);
             output.push('}');
         }
-        DrawPayload::Image { texture } => {
+        DrawPayload::Image { texture, radius } => {
             output.push_str(r#"{"kind":"image","texture":"#);
             write_json_string(output, &texture.0);
+            output.push_str(r#","radius":"#);
+            write_radius(output, *radius);
             output.push('}');
         }
         DrawPayload::Text { text, baseline_y } => {
@@ -131,6 +136,16 @@ fn write_payload(output: &mut String, payload: &DrawPayload) {
             write_json_string(output, &format!("{other:?}"));
             output.push('}');
         }
+    }
+}
+
+fn write_fill_option(output: &mut String, fill: Option<&Fill>) {
+    match fill {
+        Some(Fill::Solid(color)) => write_color(output, *color),
+        Some(fill @ (Fill::Linear(_) | Fill::Radial(_))) => {
+            write_json_string(output, &format!("{fill:?}"));
+        }
+        None => output.push_str("null"),
     }
 }
 
@@ -209,6 +224,7 @@ mod tests {
                     h: 1.0,
                 },
                 clip: None,
+                opacity: 1.0,
                 payload: DrawPayload::Rect {
                     fill: Some(Color::BLUE),
                     border: None,
@@ -220,7 +236,7 @@ mod tests {
 
         assert_eq!(
             to_json(&frame),
-            "{\"viewport\":{\"width\":1,\"height\":1},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":1,\"h\":1},\"clip\":null,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0,\"g\":0,\"b\":1,\"a\":1},\"border\":null}}],\"hit_regions\":[],\"scroll_bounds\":[]}"
+            "{\"viewport\":{\"width\":1,\"height\":1},\"commands\":[{\"geometry\":{\"x\":0,\"y\":0,\"w\":1,\"h\":1},\"clip\":null,\"opacity\":1,\"payload\":{\"kind\":\"rect\",\"fill\":{\"r\":0,\"g\":0,\"b\":1,\"a\":1},\"border\":null}}],\"hit_regions\":[],\"scroll_bounds\":[]}"
         );
     }
 

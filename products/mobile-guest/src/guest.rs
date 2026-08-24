@@ -32,6 +32,7 @@ fn reset_app() {
 
 fn apply_event(app: &mut App, event: AppEvent) -> bool {
     match event {
+        AppEvent::Tick { timestamp_ms } => app.animation_tick(timestamp_ms),
         AppEvent::Viewport { width, height } => app.set_viewport(width, height),
         AppEvent::FrameInput {
             source_frame_token,
@@ -71,6 +72,8 @@ fn publish_app(app: &mut App) -> Result<(&tela_contract::UiFrame, AppStatus), St
             },
             input_focused: app.input_focused(),
             input_value: app.input_value(),
+            animation_active: app.animation_schedule().active,
+            next_deadline_ms: app.animation_schedule().next_deadline_ms,
         },
     ))
 }

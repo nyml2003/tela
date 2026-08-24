@@ -1,4 +1,4 @@
-// 应用层：check 用例——四道验证门（fmt/clippy/test/arch），替代 flake 里的 check 脚本。
+// 应用层：check 用例——格式/静态检查/逻辑测试/WGPU视觉/架构验证门。
 import type { Reporter } from '../domain/ports.ts';
 import type { GateResult } from '../domain/gates.ts';
 import { CHECK_GATES } from '../domain/gates.ts';
@@ -15,7 +15,7 @@ export interface CheckDeps {
   reporter: Reporter;
 }
 
-/** 顺序执行四道门；arch 门用 cargo metadata（真实依赖树）而非 TOML 正则。 */
+/** 顺序执行验证门；arch 门用 cargo metadata（真实依赖树）而非 TOML 正则。 */
 export async function runCheck(deps: CheckDeps): Promise<CheckResult> {
   const { cargo, reporter } = deps;
   const gates: GateResult[] = [];
@@ -24,6 +24,7 @@ export async function runCheck(deps: CheckDeps): Promise<CheckResult> {
   gates.push(await cargo.fmtCheck());
   gates.push(await cargo.clippy());
   gates.push(await cargo.test());
+  gates.push(await cargo.visualGolden());
 
   // arch 门：metadata → 纯规则校验（domain/architecture.ts）。
   const t0 = performance.now();

@@ -1,8 +1,10 @@
 //! 导航按钮组件（foundation Button 包装）与导航项组合（EditorAction 上下文）。
 
-use tela_contract::{IdentityConcern, KeyStrategy, SemanticKey, UpdateMode};
-use tela_ui_dsl::{Body, DslComponent, ViewBuild, ViewOutput, ViewResult, ui};
-use tela_ui_foundation::{Button, ButtonState};
+use tela_contract::{Color, Fill, Insets, PixelOffset, TextStyleRef};
+use tela_ui_dsl::prelude::*;
+use tela_ui_dsl::{
+    Body, DslComponent, Easing, TransitionSpec, ViewBuild, ViewOutput, ViewResult, ui,
+};
 
 use crate::application::{EditorAction, Route};
 
@@ -15,10 +17,12 @@ pub fn nav_item(
     label: &str,
     current: Route,
     hover_key: &Option<String>,
+    pressed_key: &Option<String>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let key = format!("editor.nav.{}", route_name(target));
     let hovered = hover_key.as_deref() == Some(key.as_str());
     let selected = target == current;
+    let pressed = pressed_key.as_deref() == Some(key.as_str());
     ui!(build {
         <ActionTarget action={EditorAction::Navigate(target)}>
             <NavButton
@@ -26,13 +30,13 @@ pub fn nav_item(
                 label={label}
                 selected={selected}
                 hovered={hovered}
+                pressed={pressed}
             />
         </ActionTarget>
     })
 }
 
-/// 导航按钮组件：foundation Button 包装，文本居中由 Button 内部
-/// `Row + [Spacer, content, Spacer]` + `cross_align: Center` 布局保证。
+/// 导航按钮组件：使用 `ui!` 原语声明，视觉变化由组件 owner 内的隐式 transition 推进。
 #[derive(DslComponent)]
 #[allow(missing_docs)]
 pub struct NavButton {
@@ -42,37 +46,45 @@ pub struct NavButton {
     pub width: f32,
     pub selected: bool,
     pub hovered: bool,
+    pub pressed: bool,
 }
 
 impl NavButton {
     /// 组件渲染（由 `DslComponent::render` 脚手架调用）。
     pub fn view<A>(
         &self,
-        _build: &mut ViewBuild<A>,
+        build: &mut ViewBuild<A>,
         _children: Body<A>,
     ) -> ViewResult<ViewOutput<A>> {
-        let mut node = Button::new(&self.label)
-            .width(self.width)
-            .height(30.0)
-            .border_radius(4.0)
-            .text_metrics(13.0, 18.0)
-            .state(ButtonState {
-                hovered: self.hovered,
-                selected: self.selected,
-                disabled: false,
-            })
-            .palette(NAV_PALETTE)
-            .into_node();
-        // 语义键使 hover_key（内核 view_state）能稳定匹配到本按钮。
-        if let Some(key) = &self.key {
-            node.identity = Some(IdentityConcern {
-                key_strategy: KeyStrategy::SemanticId,
-                semantic_key: Some(SemanticKey(key.clone())),
-                key_segment: None,
-                update_mode: UpdateMode::Dirty,
-            });
-        }
-        Ok(ViewOutput::opaque(node))
+        let fill = if self.pressed {
+            Color::rgba(0.72, 0.84, 0.94, 1.0)
+        } else if self.selected {
+            NAV_PALETTE.selected
+        } else if self.hovered {
+            NAV_PALETTE.hovered
+        } else {
+            NAV_PALETTE.normal
+        };
+        ui!(build {
+            <Frame
+                key={self.key.clone().unwrap_or_else(|| "editor.nav.item".to_owned())}
+                width={self.width}
+                height={30.0}
+                padding={Insets { top: 6.0, right: 8.0, bottom: 6.0, left: 8.0 }}
+                border_radius={5.0}
+                fill={Fill::Solid(fill)}
+                visual_offset={if self.pressed { PixelOffset { x: 0.0, y: 1.0 } } else { PixelOffset::default() }}
+                clickable={true}
+                hoverable={true}
+                transition={TransitionSpec::new(140, Easing::STANDARD)}
+            >
+                <Row cross_align={tela_contract::CrossAlign::Center}>
+                    { tela_ui_dsl::into_view_child::<A, tela_contract::UiNode>(tela_core::LayoutContainer::spacer().into())? }
+                    <Text value={self.label.clone()} font={TextStyleRef::body_medium()} font_size={13.0} line_height={18.0} color={NAV_PALETTE.text} />
+                    { tela_ui_dsl::into_view_child::<A, tela_contract::UiNode>(tela_core::LayoutContainer::spacer().into())? }
+                </Row>
+            </Frame>
+        })
     }
 }
 

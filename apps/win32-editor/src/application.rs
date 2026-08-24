@@ -7,7 +7,7 @@
 //! `AppController` with editor domain logic.
 
 use tela_bridge::{BridgeDispatcher, BridgeEvent, BridgeRequest, BridgeResult, VersionPolicy};
-use tela_contract::{FocusAppearance, UiResources, WindowCommand};
+use tela_contract::{FocusAppearance, TextStyleRef, UiResources, WindowCommand};
 use tela_target_win32_static::{AppController, FrameContext};
 use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult};
 
@@ -65,6 +65,8 @@ pub enum EditorAction {
     SetFontSize(u32),
     /// 设置行距。
     SetLineHeight(u32),
+    /// 设置编辑区字体。
+    SetFont(TextStyleRef),
     /// 编辑器输入绑定值变化。
     EditorInput(String),
     /// 图标页搜索值变化。
@@ -76,12 +78,14 @@ pub enum EditorAction {
 }
 
 /// 应用设置（内存态，不持久化）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EditorSettings {
     /// 字体大小（点）。
     pub font_size: u32,
     /// 行距（百分之一，140 = 1.4）。
     pub line_height: u32,
+    /// 编辑区文本节点使用的字体 token。
+    pub font: TextStyleRef,
 }
 
 impl Default for EditorSettings {
@@ -89,6 +93,7 @@ impl Default for EditorSettings {
         Self {
             font_size: 16,
             line_height: 140,
+            font: TextStyleRef::body(),
         }
     }
 }
@@ -147,6 +152,15 @@ impl EditorController {
                 self.settings.set(settings);
                 true
             }
+            EditorAction::SetFont(font) => {
+                let mut settings = self.settings.get();
+                if settings.font == font {
+                    return false;
+                }
+                settings.font = font;
+                self.settings.set(settings);
+                true
+            }
             EditorAction::EditorInput(value) => {
                 if self.document.get() == value {
                     return false;
@@ -193,7 +207,9 @@ impl AppController<EditorAction> for EditorController {
             self.icon_query.get(),
             self.icon_category.get(),
             self.resources.icon_provider(),
+            self.resources.fonts(),
             ctx.hover_key.as_ref(),
+            ctx.pressed_key.as_ref(),
         )
     }
 
@@ -271,7 +287,7 @@ mod tests {
     use tela_contract::{IconProvider, Point, PointerEvent, Viewport};
     use tela_icon_resources::MaterialIconFontProvider;
     use tela_target_win32_static::{Application, ApplicationConfig};
-    use tela_text_resources::ControlledTextMeasurer;
+    use tela_text_resources::{CONTROLLED_FONT_CATALOG, ControlledTextMeasurer};
 
     static TEST_TEXT_MEASURER: ControlledTextMeasurer = ControlledTextMeasurer;
     static TEST_ICON_PROVIDER: MaterialIconFontProvider = MaterialIconFontProvider;
@@ -286,6 +302,10 @@ mod tests {
 
         fn icon_provider(&self) -> &dyn IconProvider {
             &TEST_ICON_PROVIDER
+        }
+
+        fn fonts(&self) -> &'static [tela_contract::FontDescriptor] {
+            CONTROLLED_FONT_CATALOG
         }
     }
 
@@ -531,8 +551,55 @@ mod tests {
         let mut app = app();
         assert!(app.dispatch_action(EditorAction::SetFontSize(20)));
         assert!(app.dispatch_action(EditorAction::SetLineHeight(160)));
+        assert!(app.dispatch_action(EditorAction::SetFont(TextStyleRef::body_medium())));
         let settings = app.controller_mut().settings.get();
         assert_eq!(settings.font_size, 20);
         assert_eq!(settings.line_height, 160);
+        assert_eq!(settings.font, TextStyleRef::body_medium());
+        assert!(!app.dispatch_action(EditorAction::SetFont(TextStyleRef::body_medium())));
+        assert!(app.ensure_frame());
+        assert!(!app.frame_presented());
+        assert!(tree_contains_text_font(
+            app.active().expect("active editor tree").0.root(),
+            &TextStyleRef::body_medium(),
+            "欢迎使用 Tela 文本编辑器"
+        ));
+    }
+
+    #[test]
+    fn nav_hover_transition_requests_ticks_and_stops_after_completion() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        assert!(!app.on_animation_tick(5_000));
+        let point = point_for_key(&app, "editor.nav.settings");
+
+        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
+        assert!(app.ensure_frame());
+        assert!(app.animation_schedule().active);
+        assert!(!app.frame_presented());
+
+        assert!(app.on_animation_tick(5_070));
+        assert!(app.ensure_frame());
+        assert!(app.animation_schedule().active);
+        assert!(!app.frame_presented());
+
+        assert!(app.on_animation_tick(5_200));
+        assert!(app.ensure_frame());
+        assert!(!app.animation_schedule().active);
+    }
+
+    fn tree_contains_text_font(
+        node: &tela_contract::UiNode,
+        font: &TextStyleRef,
+        text_fragment: &str,
+    ) -> bool {
+        matches!(
+            node.content.as_ref(),
+            Some(tela_contract::ContentConcern::Text(text))
+                if &text.font == font && text.text.contains(text_fragment)
+        ) || node
+            .children
+            .iter()
+            .any(|child| tree_contains_text_font(child, font, text_fragment))
     }
 }

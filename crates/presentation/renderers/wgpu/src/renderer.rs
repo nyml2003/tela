@@ -1,15 +1,21 @@
 //! 最小 WebGPU 渲染后端。
 //!
-//! 当前能力边界是纯色矩形、圆角矩形、图片、文字与矩形裁剪。后端仍然只消费
-//! `UiFrame`；未声明能力的 payload 在批次构建前跳过，不回读 `UiTree`，也不改变输入帧。
+//! 后端仍然只消费 `UiFrame`；未声明能力的 payload 在批次构建前跳过，不回读
+//! `UiTree`，也不改变输入帧。渐变、圆/椭圆、SDF 阴影和圆角图片都在 GPU 路径展开。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use tela_contract::{BackendCapabilities, ClipRect, Color, DrawPayload, Rect, TextureRef, UiFrame};
+use tela_contract::{
+    BackendCapabilities, BorderRadius, ClipRect, Color, ColorStop, DrawPayload, Fill, Gradient,
+    GradientKind, Rect, TextureRef, UiFrame,
+};
 
 #[cfg(test)]
 use crate::batch::to_ndc;
-use crate::batch::{Batch, PreparedBatch, image_batch_for, rounded_batch_for, solid_batch_for};
+use crate::batch::{
+    Batch, PreparedBatch, ShapeKind, gradient_batch_for, image_batch_for, rounded_batch_for,
+    shadow_batch_for, solid_batch_for,
+};
 use crate::pipeline::Pipelines;
 use crate::text;
 
@@ -86,6 +92,7 @@ pub struct WgpuRenderer {
     pipelines: Pipelines,
     images: BTreeMap<TextureRef, GpuImage>,
     text_images: BTreeMap<TextureRef, String>,
+    gradient_images: BTreeMap<TextureRef, String>,
     in_flight_frames: VecDeque<SubmittedFrame>,
     background: wgpu::Color,
     viewport: Rect,
@@ -112,6 +119,7 @@ impl WgpuRenderer {
             pipelines,
             images: BTreeMap::new(),
             text_images: BTreeMap::new(),
+            gradient_images: BTreeMap::new(),
             in_flight_frames: VecDeque::new(),
             background: wgpu::Color {
                 r: background.r as f64,
@@ -145,9 +153,9 @@ impl WgpuRenderer {
             rounded_rect: true,
             line_segment: false,
             polygon: false,
-            linear_gradient: false,
-            radial_gradient: false,
-            shadow: false,
+            linear_gradient: true,
+            radial_gradient: true,
+            shadow: true,
             text: true,
             nine_patch: false,
             clip_rect: true,
@@ -200,6 +208,7 @@ impl WgpuRenderer {
                 actual: rgba8.len(),
             });
         }
+        let mip_level_count = width.max(height).ilog2() + 1;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("tela image texture"),
             size: wgpu::Extent3d {
@@ -207,32 +216,44 @@ impl WgpuRenderer {
                 height,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba8,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let mut level_width = width;
+        let mut level_height = height;
+        let mut level_pixels = rgba8.to_vec();
+        for mip_level in 0..mip_level_count {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &level_pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(level_width * 4),
+                    rows_per_image: Some(level_height),
+                },
+                wgpu::Extent3d {
+                    width: level_width,
+                    height: level_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            if mip_level + 1 < mip_level_count {
+                let (next, next_width, next_height) =
+                    downsample_rgba8(&level_pixels, level_width, level_height);
+                level_pixels = next;
+                level_width = next_width;
+                level_height = next_height;
+            }
+        }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("tela image sampler"),
@@ -306,91 +327,35 @@ impl WgpuRenderer {
             ..RenderStats::default()
         };
         let mut batches = Vec::<Batch>::new();
-        let mut used_textures = BTreeSet::new();
+        let mut used_generated_textures = BTreeSet::new();
         for (command_index, command) in frame.commands.iter().enumerate() {
             let scissor = self.scissor_for(command.clip);
             if scissor.2 == 0 || scissor.3 == 0 {
                 stats.skipped_empty_clip += 1;
                 continue;
             }
-            match &command.payload {
-                DrawPayload::Rect { fill, border } => {
-                    if fill.is_none() && border.is_none() {
-                        continue;
-                    }
-                    let batch = solid_batch_for(&mut batches, scissor);
-                    batch.push_payload(command.geometry, *fill, *border, &self.viewport);
-                }
-                DrawPayload::RoundedRect {
-                    fill,
-                    border,
-                    radius,
-                } => {
-                    if fill.is_none() && border.is_none() {
-                        continue;
-                    }
-                    let batch = rounded_batch_for(&mut batches, scissor);
-                    batch.push_payload(command.geometry, *radius, *fill, *border, &self.viewport);
-                }
-                DrawPayload::Image { texture } => {
-                    if self.images.contains_key(texture) {
-                        let batch = image_batch_for(&mut batches, scissor, texture.clone());
-                        batch.push_rect(command.geometry, &self.viewport);
-                    } else {
-                        stats.missing_images += 1;
-                    }
-                }
-                DrawPayload::Text {
-                    text: content,
-                    baseline_y,
-                } => {
-                    let texture = TextureRef(format!("__tela.text.{command_index}"));
-                    let local_baseline = *baseline_y - command.geometry.y;
-                    let Some(raster) =
-                        text::rasterize(content, local_baseline, self.dpi, command.geometry.w)
-                    else {
-                        continue;
-                    };
-                    let signature = format!(
-                        "{content:?};{}x{};offset=({},{});baseline={local_baseline:.3};wrap={:.3};dpi={:.3}",
-                        raster.width,
-                        raster.height,
-                        raster.offset_x,
-                        raster.offset_y,
-                        command.geometry.w,
-                        self.dpi
-                    );
-                    if self.text_images.get(&texture) != Some(&signature) {
-                        self.upload_rgba8(
-                            texture.clone(),
-                            raster.width,
-                            raster.height,
-                            &raster.pixels,
-                        )
-                        .expect("文字纹理尺寸和 RGBA8 数据必须匹配");
-                        self.text_images.insert(texture.clone(), signature);
-                    }
-                    let batch = image_batch_for(&mut batches, scissor, texture.clone());
-                    batch.push_rect(
-                        text_quad_geometry(command.geometry, &raster, self.dpi),
-                        &self.viewport,
-                    );
-                    used_textures.insert(texture);
-                }
-                _ => {
-                    stats.unsupported_commands += 1;
-                }
-            }
+            self.append_payload(
+                &mut batches,
+                &mut used_generated_textures,
+                &mut stats,
+                command_index,
+                scissor,
+                command.geometry,
+                command.opacity.clamp(0.0, 1.0),
+                &command.payload,
+            );
         }
 
         let stale_textures: Vec<TextureRef> = self
             .text_images
             .keys()
-            .filter(|texture| !used_textures.contains(*texture))
+            .chain(self.gradient_images.keys())
+            .filter(|texture| !used_generated_textures.contains(*texture))
             .cloned()
             .collect();
         for texture in stale_textures {
             self.text_images.remove(&texture);
+            self.gradient_images.remove(&texture);
             self.images.remove(&texture);
         }
 
@@ -430,14 +395,17 @@ impl WgpuRenderer {
             pass.set_viewport(0.0, 0.0, self.pixel_w as f32, self.pixel_h as f32, 0.0, 1.0);
             for batch in &prepared {
                 let image_bind_group = match batch {
-                    PreparedBatch::Image { texture, .. } => Some(
+                    PreparedBatch::Image { texture, .. }
+                    | PreparedBatch::Gradient { texture, .. } => Some(
                         &self
                             .images
                             .get(texture)
                             .expect("已准备的图片必须已注册")
                             .bind_group,
                     ),
-                    _ => None,
+                    PreparedBatch::Solid { .. }
+                    | PreparedBatch::Rounded { .. }
+                    | PreparedBatch::Shadow { .. } => None,
                 };
                 self.pipelines.draw(&mut pass, batch, image_bind_group);
                 stats.draw_calls += 1;
@@ -450,6 +418,277 @@ impl WgpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.last_stats = stats;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_payload(
+        &mut self,
+        batches: &mut Vec<Batch>,
+        used_generated_textures: &mut BTreeSet<TextureRef>,
+        stats: &mut RenderStats,
+        command_index: usize,
+        scissor: (u32, u32, u32, u32),
+        geometry: Rect,
+        opacity: f32,
+        payload: &DrawPayload,
+    ) {
+        if opacity <= 0.0 {
+            return;
+        }
+        match payload {
+            DrawPayload::Rect { fill, border } => {
+                if fill.is_none() && border.is_none() {
+                    return;
+                }
+                solid_batch_for(batches, scissor).push_payload(
+                    geometry,
+                    fill.map(|color| color_with_opacity(color, opacity)),
+                    border.map(|mut border| {
+                        border.color = color_with_opacity(border.color, opacity);
+                        border
+                    }),
+                    &self.viewport,
+                );
+            }
+            DrawPayload::RoundedRect {
+                fill,
+                border,
+                radius,
+            } => {
+                if let Some(fill) = fill {
+                    match fill {
+                        Fill::Solid(color) => rounded_batch_for(batches, scissor).push_payload(
+                            geometry,
+                            *radius,
+                            Some(*color),
+                            *border,
+                            opacity,
+                            &self.viewport,
+                        ),
+                        Fill::Linear(gradient) | Fill::Radial(gradient) => {
+                            let texture = self.gradient_texture(
+                                command_index * 8,
+                                gradient,
+                                used_generated_textures,
+                            );
+                            gradient_batch_for(batches, scissor, texture).push_shape(
+                                geometry,
+                                *radius,
+                                gradient,
+                                ShapeKind::RoundedRect,
+                                opacity,
+                                &self.viewport,
+                            );
+                            if let Some(border) = border {
+                                rounded_batch_for(batches, scissor).push_payload(
+                                    geometry,
+                                    *radius,
+                                    None,
+                                    Some(*border),
+                                    opacity,
+                                    &self.viewport,
+                                );
+                            }
+                        }
+                    }
+                } else if border.is_some() {
+                    rounded_batch_for(batches, scissor).push_payload(
+                        geometry,
+                        *radius,
+                        None,
+                        *border,
+                        opacity,
+                        &self.viewport,
+                    );
+                }
+            }
+            DrawPayload::Circle { fill, border } | DrawPayload::Ellipse { fill, border } => {
+                let shape = if matches!(payload, DrawPayload::Circle { .. }) {
+                    ShapeKind::Circle
+                } else {
+                    ShapeKind::Ellipse
+                };
+                if let Some(border) = border {
+                    let border_gradient = solid_gradient(border.color, geometry);
+                    let texture = self.gradient_texture(
+                        command_index * 8 + 1,
+                        &border_gradient,
+                        used_generated_textures,
+                    );
+                    gradient_batch_for(batches, scissor, texture).push_shape(
+                        geometry,
+                        BorderRadius::default(),
+                        &border_gradient,
+                        shape,
+                        opacity,
+                        &self.viewport,
+                    );
+                }
+                if let Some(fill) = fill {
+                    let width = border
+                        .map(|border| {
+                            border
+                                .width
+                                .max(0.0)
+                                .min(geometry.w * 0.5)
+                                .min(geometry.h * 0.5)
+                        })
+                        .unwrap_or(0.0);
+                    let fill_geometry = Rect {
+                        x: geometry.x + width,
+                        y: geometry.y + width,
+                        w: (geometry.w - width * 2.0).max(0.0),
+                        h: (geometry.h - width * 2.0).max(0.0),
+                    };
+                    let gradient = match fill {
+                        Fill::Solid(color) => solid_gradient(*color, fill_geometry),
+                        Fill::Linear(gradient) | Fill::Radial(gradient) => gradient.clone(),
+                    };
+                    let texture = self.gradient_texture(
+                        command_index * 8 + 2,
+                        &gradient,
+                        used_generated_textures,
+                    );
+                    gradient_batch_for(batches, scissor, texture).push_shape(
+                        fill_geometry,
+                        BorderRadius::default(),
+                        &gradient,
+                        shape,
+                        opacity,
+                        &self.viewport,
+                    );
+                }
+            }
+            DrawPayload::LinearGradient { gradient } | DrawPayload::RadialGradient { gradient } => {
+                let texture =
+                    self.gradient_texture(command_index * 8, gradient, used_generated_textures);
+                gradient_batch_for(batches, scissor, texture).push_shape(
+                    geometry,
+                    BorderRadius::default(),
+                    gradient,
+                    ShapeKind::RoundedRect,
+                    opacity,
+                    &self.viewport,
+                );
+            }
+            DrawPayload::Image { texture, radius } => {
+                if self.images.contains_key(texture) {
+                    image_batch_for(batches, scissor, texture.clone()).push_rect(
+                        geometry,
+                        *radius,
+                        opacity,
+                        &self.viewport,
+                    );
+                } else {
+                    stats.missing_images += 1;
+                }
+            }
+            DrawPayload::Text {
+                text: content,
+                baseline_y,
+            } => {
+                let texture = TextureRef(format!("__tela.text.{command_index}"));
+                let local_baseline = *baseline_y - geometry.y;
+                let Some(raster) = text::rasterize(content, local_baseline, self.dpi, geometry.w)
+                else {
+                    return;
+                };
+                let signature = format!(
+                    "{content:?};{}x{};offset=({},{});baseline={local_baseline:.3};wrap={:.3};dpi={:.3}",
+                    raster.width,
+                    raster.height,
+                    raster.offset_x,
+                    raster.offset_y,
+                    geometry.w,
+                    self.dpi
+                );
+                if self.text_images.get(&texture) != Some(&signature) {
+                    self.upload_rgba8(texture.clone(), raster.width, raster.height, &raster.pixels)
+                        .expect("文字纹理尺寸和 RGBA8 数据必须匹配");
+                    self.text_images.insert(texture.clone(), signature);
+                }
+                image_batch_for(batches, scissor, texture.clone()).push_rect(
+                    text_quad_geometry(geometry, &raster, self.dpi),
+                    BorderRadius::default(),
+                    opacity,
+                    &self.viewport,
+                );
+                used_generated_textures.insert(texture);
+            }
+            DrawPayload::Shadow { spec, target } => {
+                let (radius, shape) = match target.as_ref() {
+                    DrawPayload::RoundedRect { radius, .. } => (*radius, ShapeKind::RoundedRect),
+                    DrawPayload::Circle { .. } => (BorderRadius::default(), ShapeKind::Circle),
+                    DrawPayload::Ellipse { .. } => (BorderRadius::default(), ShapeKind::Ellipse),
+                    DrawPayload::Rect { .. } => (BorderRadius::default(), ShapeKind::RoundedRect),
+                    _ => {
+                        stats.unsupported_commands += 1;
+                        self.append_payload(
+                            batches,
+                            used_generated_textures,
+                            stats,
+                            command_index,
+                            scissor,
+                            geometry,
+                            opacity,
+                            target,
+                        );
+                        return;
+                    }
+                };
+                if !spec.inset {
+                    shadow_batch_for(batches, scissor).push_shape(
+                        geometry,
+                        radius,
+                        shape,
+                        *spec,
+                        opacity,
+                        &self.viewport,
+                    );
+                }
+                self.append_payload(
+                    batches,
+                    used_generated_textures,
+                    stats,
+                    command_index,
+                    scissor,
+                    geometry,
+                    opacity,
+                    target,
+                );
+                if spec.inset {
+                    shadow_batch_for(batches, scissor).push_shape(
+                        geometry,
+                        radius,
+                        shape,
+                        *spec,
+                        opacity,
+                        &self.viewport,
+                    );
+                }
+            }
+            DrawPayload::Polygon { .. }
+            | DrawPayload::NinePatch { .. }
+            | DrawPayload::Custom(_) => stats.unsupported_commands += 1,
+        }
+    }
+
+    fn gradient_texture(
+        &mut self,
+        slot: usize,
+        gradient: &Gradient,
+        used_generated_textures: &mut BTreeSet<TextureRef>,
+    ) -> TextureRef {
+        let texture = TextureRef(format!("__tela.gradient.{slot}"));
+        let signature = format!("{gradient:?}");
+        if self.gradient_images.get(&texture) != Some(&signature) {
+            let pixels = gradient_lut(gradient);
+            self.upload_rgba8(texture.clone(), 256, 1, &pixels)
+                .expect("256 像素渐变色带必须是合法 RGBA8 纹理");
+            self.gradient_images.insert(texture.clone(), signature);
+        }
+        used_generated_textures.insert(texture.clone());
+        texture
     }
 
     fn scissor_for(&self, clip: Option<ClipRect>) -> (u32, u32, u32, u32) {
@@ -467,6 +706,114 @@ impl WgpuRenderer {
             .clamp(0.0, self.pixel_h as f32) as u32;
         (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
     }
+}
+
+fn color_with_opacity(mut color: Color, opacity: f32) -> Color {
+    color.a *= opacity;
+    color
+}
+
+fn solid_gradient(color: Color, geometry: Rect) -> Gradient {
+    Gradient {
+        kind: GradientKind::Linear {
+            start: tela_contract::Point {
+                x: geometry.x,
+                y: geometry.y,
+            },
+            end: tela_contract::Point {
+                x: geometry.x + geometry.w.max(1.0),
+                y: geometry.y,
+            },
+        },
+        stops: vec![
+            ColorStop {
+                position: 0.0,
+                color,
+            },
+            ColorStop {
+                position: 1.0,
+                color,
+            },
+        ],
+    }
+}
+
+fn gradient_lut(gradient: &Gradient) -> Vec<u8> {
+    let mut stops = gradient.stops.clone();
+    stops.sort_by(|left, right| left.position.total_cmp(&right.position));
+    if stops.is_empty() {
+        stops.push(ColorStop {
+            position: 0.0,
+            color: Color::TRANSPARENT,
+        });
+    }
+    let mut pixels = Vec::with_capacity(256 * 4);
+    for index in 0..256 {
+        let t = index as f32 / 255.0;
+        let color = sample_color_stops(&stops, t);
+        pixels.extend_from_slice(&[
+            float_to_unorm8(color.r),
+            float_to_unorm8(color.g),
+            float_to_unorm8(color.b),
+            float_to_unorm8(color.a),
+        ]);
+    }
+    pixels
+}
+
+fn sample_color_stops(stops: &[ColorStop], t: f32) -> Color {
+    if t <= stops[0].position {
+        return stops[0].color;
+    }
+    for pair in stops.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if t <= right.position {
+            let span = right.position - left.position;
+            let factor = if span <= f32::EPSILON {
+                0.0
+            } else {
+                ((t - left.position) / span).clamp(0.0, 1.0)
+            };
+            return Color::rgba(
+                left.color.r + (right.color.r - left.color.r) * factor,
+                left.color.g + (right.color.g - left.color.g) * factor,
+                left.color.b + (right.color.b - left.color.b) * factor,
+                left.color.a + (right.color.a - left.color.a) * factor,
+            );
+        }
+    }
+    stops.last().expect("渐变色标非空").color
+}
+
+fn float_to_unorm8(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn downsample_rgba8(pixels: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let next_width = (width / 2).max(1);
+    let next_height = (height / 2).max(1);
+    let mut next = vec![0_u8; (next_width * next_height * 4) as usize];
+    for y in 0..next_height {
+        for x in 0..next_width {
+            let mut channels = [0_u32; 4];
+            let mut samples = 0_u32;
+            for source_y in (y * 2)..((y * 2 + 2).min(height)) {
+                for source_x in (x * 2)..((x * 2 + 2).min(width)) {
+                    let source = ((source_y * width + source_x) * 4) as usize;
+                    for channel in 0..4 {
+                        channels[channel] += u32::from(pixels[source + channel]);
+                    }
+                    samples += 1;
+                }
+            }
+            let target = ((y * next_width + x) * 4) as usize;
+            for channel in 0..4 {
+                next[target + channel] = (channels[channel] / samples) as u8;
+            }
+        }
+    }
+    (next, next_width, next_height)
 }
 
 /// 将文字纹理的物理像素 bounds 映射回逻辑画布 quad。
@@ -512,15 +859,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_include_solid_rounded_rect_and_clip() {
+    fn capabilities_include_visual_fidelity_primitives() {
         let caps = BackendCapabilities {
             solid_rect: true,
             rounded_rect: true,
             line_segment: false,
             polygon: false,
-            linear_gradient: false,
-            radial_gradient: false,
-            shadow: false,
+            linear_gradient: true,
+            radial_gradient: true,
+            shadow: true,
             text: true,
             nine_patch: false,
             clip_rect: true,
@@ -529,7 +876,7 @@ mod tests {
         };
         assert!(caps.solid_rect && caps.rounded_rect && caps.clip_rect);
         assert!(caps.image_texture && caps.text);
-        assert!(!caps.linear_gradient);
+        assert!(caps.linear_gradient && caps.radial_gradient && caps.shadow);
     }
 
     #[test]

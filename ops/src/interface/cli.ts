@@ -2,7 +2,7 @@
 // tela-ops CLI 入口（接口层）：解析参数 → 组装依赖（依赖倒置）→ 分发到应用层用例。
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
-//   ops check                    四道验证门（fmt/clippy/test/arch）
+//   ops check                    五道验证门（fmt/clippy/test/WGPU visual/arch）
 //   ops build <core|webview|frontend|bundle|android|ios|win32|win32-editor|speed-gear|macos> [--release]  构建显式产品闭包
 //   ops verify bundle [desktop|mobile] [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
@@ -39,7 +39,7 @@ import { WindowsAdbPort } from '../infrastructure/windows-adb.ts';
 const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时零依赖）
 
 用法:
-  ops check                   四道验证门（fmt / clippy / test / arch）
+  ops check                   五道验证门（fmt / clippy / test / WGPU visual / arch）
   ops build <core|webview|frontend|bundle [desktop|mobile]|android|ios|win32|win32-editor|speed-gear|macos> [--release]
                               每次显式选择一个产品或其受控子产物。bundle desktop/mobile 是
                               两个独立 product guest；webview/win32/macos 先构建 desktop guest，android 先构建 mobile guest，

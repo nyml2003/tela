@@ -14,8 +14,8 @@ use tela_contract::{
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
 use tela_ui_dsl::{
-    FrameCoordinator, FrameToken, FramedInteraction, ResolvedFrame, ViewBuild, ViewOutput,
-    ViewResult,
+    AnimationClock, AnimationSchedule, FrameCoordinator, FrameToken, FramedInteraction,
+    ResolvedFrame, ViewBuild, ViewOutput, ViewResult,
 };
 
 /// 单帧渲染上下文：壳状态中应用渲染需要的只读投影。
@@ -27,6 +27,8 @@ pub struct FrameContext {
     pub window_maximized: bool,
     /// 当前悬停节点的语义 key（组件高亮需要）。
     pub hover_key: Option<SemanticKey>,
+    /// 当前鼠标按压命中的节点 key。
+    pub pressed_key: Option<SemanticKey>,
 }
 
 /// 应用会话配置（壳无关，由产品装配时注入）。
@@ -78,6 +80,11 @@ pub trait AppController<A: Clone + 'static> {
         false
     }
 
+    /// Host 动画时钟采样；默认控制器没有额外域状态。
+    fn on_animation_tick(&mut self, _timestamp_ms: u64) -> bool {
+        false
+    }
+
     /// Host 即将销毁窗口时调用；应用可在此完成外部资源的安全停止。
     fn on_close(&mut self) {}
 }
@@ -114,6 +121,7 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     projection_invalidated: bool,
     last_layout_measures: usize,
     last_rebuild_log_at: Instant,
+    animation_clock: AnimationClock,
 }
 
 struct PendingFrame<A> {
@@ -151,6 +159,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             projection_invalidated: true,
             last_layout_measures: 0,
             last_rebuild_log_at: Instant::now(),
+            animation_clock: AnimationClock::default(),
         }
     }
 
@@ -170,6 +179,33 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             self.invalidate_frame();
         }
         changed
+    }
+
+    /// 推进 guest 侧动画时钟，并仅在 active/candidate 帧请求动画时使投影失效。
+    pub fn on_animation_tick(&mut self, timestamp_ms: u64) -> bool {
+        if timestamp_ms < self.animation_clock.timestamp_ms {
+            return false;
+        }
+        self.animation_clock = AnimationClock { timestamp_ms };
+        let requested = self.animation_schedule().active;
+        let controller_changed = self.controller.on_animation_tick(timestamp_ms);
+        if requested || controller_changed {
+            self.invalidate_frame();
+        }
+        requested || controller_changed
+    }
+
+    /// 当前候选（优先）或 active 帧的动画调度请求。
+    pub fn animation_schedule(&self) -> AnimationSchedule {
+        self.pending_frame
+            .as_ref()
+            .map(|pending| pending.resolved.animation_schedule())
+            .or_else(|| {
+                self.frames
+                    .active()
+                    .map(|active| active.animation_schedule())
+            })
+            .unwrap_or_default()
     }
 
     /// 让应用在窗口销毁前执行关闭清理。
@@ -692,8 +728,10 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             viewport: self.viewport,
             window_maximized: self.window_maximized,
             hover_key: self.view_state.hover_key().cloned(),
+            pressed_key: self.view_state.pressed_mouse_key().cloned(),
         };
         let mut build = self.frames.begin_build();
+        build.set_animation_clock(self.animation_clock);
         let root = self
             .controller
             .render(&mut build, &ctx)

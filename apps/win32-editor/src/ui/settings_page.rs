@@ -1,8 +1,12 @@
 //! 设置页布局容器组件与步进按钮（EditorAction 上下文组合）。
 
-use tela_contract::{Fill, Insets, Viewport};
+use tela_contract::{
+    Color, Fill, FontDescriptor, Insets, PixelOffset, ShadowSpec, TextStyleRef, Viewport,
+};
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{Body, DslComponent, ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{
+    Body, DslComponent, Easing, TransitionSpec, ViewBuild, ViewOutput, ViewResult, ui,
+};
 use tela_ui_foundation::{Button, ButtonState};
 
 use crate::application::EditorAction;
@@ -31,12 +35,95 @@ impl SettingsPage {
                 padding={Insets { top: 24.0, right: CONTENT_INSET, bottom: 0.0, left: CONTENT_INSET }}
                 gap={16.0}
             >
-                <Text value={"设置"} font_size={20.0} color={TEXT} />
-                <Text value={"字体大小"} font_size={14.0} color={SECONDARY} />
+                <Text value={"设置"} font={TextStyleRef::body_medium()} font_size={20.0} color={TEXT} />
+                <Text value={"编辑区字体"} font={TextStyleRef::body_medium()} font_size={14.0} color={SECONDARY} />
                 <View key={"editor.divider.font"} width={self.viewport.width - CONTENT_INSET * 2.0}
                       height={1.0} fill={Fill::Solid(BAR_BORDER)} />
                 { build.fragment(children, tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))? }
             </Column>
+        })
+    }
+}
+
+/// 字体目录项：选择动作由调用点组合，字体预览自身使用该项 token。
+pub fn font_item(
+    build: &mut ViewBuild<EditorAction>,
+    font: &FontDescriptor,
+    selected: &TextStyleRef,
+    hover_key: &Option<String>,
+) -> ViewResult<ViewOutput<EditorAction>> {
+    let key = format!("editor.font.{}", font.text_style);
+    let hovered = hover_key.as_deref() == Some(key.as_str());
+    ui!(build {
+        <ActionTarget action={EditorAction::SetFont(TextStyleRef::new(font.text_style))}>
+            <FontChoice
+                key={key}
+                label={font.display_name}
+                font={TextStyleRef::new(font.text_style)}
+                weight={font.weight}
+                selected={selected.as_str() == font.text_style}
+                hovered={hovered}
+            />
+        </ActionTarget>
+    })
+}
+
+/// 声明式字体选择按钮。
+#[derive(DslComponent)]
+#[allow(missing_docs)]
+pub struct FontChoice {
+    pub key: Option<String>,
+    pub label: String,
+    pub font: TextStyleRef,
+    pub weight: u16,
+    pub selected: bool,
+    pub hovered: bool,
+}
+
+impl FontChoice {
+    /// 使用普通 `ui!` 原语渲染字体预览，不依赖 renderer 私有对象。
+    pub fn view<A>(
+        &self,
+        build: &mut ViewBuild<A>,
+        _children: Body<A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let fill = if self.selected {
+            Color::rgba(0.82, 0.91, 1.0, 1.0)
+        } else if self.hovered {
+            Color::rgba(0.94, 0.97, 1.0, 1.0)
+        } else {
+            Color::rgba(1.0, 1.0, 1.0, 0.92)
+        };
+        let border = if self.selected {
+            Color::rgba(0.16, 0.48, 0.82, 1.0)
+        } else {
+            Color::rgba(0.78, 0.82, 0.88, 1.0)
+        };
+        ui!(build {
+            <Frame
+                key={self.key.clone().unwrap_or_else(|| "editor.font.choice".to_owned())}
+                width={202.0}
+                height={42.0}
+                padding={Insets::all(10.0)}
+                border_width={1.0}
+                border_radius={6.0}
+                fill={Fill::Solid(fill)}
+                border_color={border}
+                shadow={ShadowSpec {
+                    offset: PixelOffset { x: 0.0, y: 2.0 },
+                    blur_radius: if self.selected { 7.0 } else { 4.0 },
+                    color: Color::rgba(0.05, 0.10, 0.18, if self.selected { 0.18 } else { 0.08 }),
+                    inset: false,
+                }}
+                transition={TransitionSpec::new(150, Easing::STANDARD)}
+                clickable={true}
+                hoverable={true}
+            >
+                <Row gap={8.0} cross_align={tela_contract::CrossAlign::Center}>
+                    <Text value={self.label.clone()} font={self.font.clone()} font_size={13.0} color={TEXT} />
+                    <Text value={format!("{}", self.weight)} font={TextStyleRef::body_medium()} font_size={11.0} color={SECONDARY} opacity={0.82} />
+                </Row>
+            </Frame>
         })
     }
 }

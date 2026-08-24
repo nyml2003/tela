@@ -12,6 +12,18 @@ crate-type = ["rlib"]
 tela-contract = { path = "../../kernel/contract" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSObject",
+    "NSRunLoop",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CABase",
+    "CADisplayLink",
+    "objc2-core-foundation",
+] }
 pollster = "0.4"
 raw-window-handle = "0.6"
 tela-render-wgpu = { path = "../../presentation/renderers/wgpu" }

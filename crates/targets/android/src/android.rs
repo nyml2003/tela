@@ -1,6 +1,7 @@
 //! Android-only GameActivity, Vulkan surface, and JNI text-channel integration.
 
 use std::{
+    ffi::c_void,
     sync::{Arc, Mutex, OnceLock},
     thread,
 };
@@ -44,6 +45,7 @@ enum HostEvent {
     CompositionStart,
     CompositionEnd,
     SystemBack,
+    AnimationFrame(u64),
 }
 
 #[derive(Default)]
@@ -52,6 +54,7 @@ struct NativeBridge {
     text: ControlledTextSync,
     bundle_index: Option<String>,
     finish_requested: bool,
+    animation_frame_pending: bool,
 }
 
 static NATIVE_BRIDGE: OnceLock<Mutex<NativeBridge>> = OnceLock::new();
@@ -71,6 +74,7 @@ fn install_bridge(proxy: EventLoopProxy<HostEvent>) {
     bridge.proxy = Some(proxy);
     bridge.text = ControlledTextSync::default();
     bridge.finish_requested = false;
+    bridge.animation_frame_pending = false;
 }
 
 fn clear_bridge() {
@@ -78,6 +82,59 @@ fn clear_bridge() {
     bridge.proxy = None;
     bridge.text = ControlledTextSync::default();
     bridge.finish_requested = false;
+    bridge.animation_frame_pending = false;
+}
+
+fn monotonic_ms() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `time` points to writable storage of the exact libc timespec type.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+    if result != 0 {
+        return 0;
+    }
+    (time.tv_sec as u64)
+        .saturating_mul(1_000)
+        .saturating_add((time.tv_nsec as u64) / 1_000_000)
+}
+
+unsafe extern "C" fn animation_frame_callback(frame_time_nanos: i64, _data: *mut c_void) {
+    let proxy = {
+        let mut bridge = bridge_lock();
+        bridge.animation_frame_pending = false;
+        bridge.proxy.clone()
+    };
+    if let Some(proxy) = proxy {
+        let timestamp_ms = frame_time_nanos.max(0) as u64 / 1_000_000;
+        let _ = proxy.send_event(HostEvent::AnimationFrame(timestamp_ms));
+    }
+}
+
+fn schedule_animation_frame() {
+    {
+        let mut bridge = bridge_lock();
+        if bridge.animation_frame_pending || bridge.proxy.is_none() {
+            return;
+        }
+        bridge.animation_frame_pending = true;
+    }
+    // SAFETY: this runs on GameActivity's main looper thread. The callback uses only a process
+    // static bridge and passes no borrowed data through the C pointer.
+    let choreographer = unsafe { ndk_sys::AChoreographer_getInstance() };
+    if choreographer.is_null() {
+        bridge_lock().animation_frame_pending = false;
+        return;
+    }
+    // SAFETY: the choreographer belongs to this looper and the callback has the exact NDK ABI.
+    unsafe {
+        ndk_sys::AChoreographer_postFrameCallback64(
+            choreographer,
+            Some(animation_frame_callback),
+            std::ptr::null_mut(),
+        );
+    }
 }
 
 fn configured_bundle_index() -> Option<String> {
@@ -273,6 +330,9 @@ impl AndroidHost {
         let Some(source_frame_token) = self.presented_frame_token else {
             return Ok(false);
         };
+        let _ = self.dispatch_guest(AppEvent::Tick {
+            timestamp_ms: monotonic_ms(),
+        })?;
         self.dispatch_guest(AppEvent::FrameInput {
             source_frame_token,
             input,
@@ -365,6 +425,13 @@ impl AndroidHost {
                         self.request_redraw();
                     }
                 }
+                if self
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.status().animation_active)
+                {
+                    schedule_animation_frame();
+                }
             }
             RenderOutcome::Outdated => {
                 self.presented_frame_token = None;
@@ -430,6 +497,7 @@ impl AndroidHost {
                         h: viewport.height,
                     },
                     clip: None,
+                    opacity: 1.0,
                     payload: DrawPayload::Rect {
                         fill: Some(Color::rgba(0.97, 0.98, 1.0, 1.0)),
                         border: None,
@@ -443,6 +511,7 @@ impl AndroidHost {
                         h: 30.0,
                     },
                     clip: None,
+                    opacity: 1.0,
                     payload: DrawPayload::Text {
                         text: diagnostic_text(title, 22.0, accent),
                         baseline_y: 94.0,
@@ -456,6 +525,7 @@ impl AndroidHost {
                         h: 80.0,
                     },
                     clip: None,
+                    opacity: 1.0,
                     payload: DrawPayload::Text {
                         text: diagnostic_text(&detail, 15.0, Color::rgba(0.2, 0.24, 0.31, 1.0)),
                         baseline_y: 142.0,
@@ -570,6 +640,16 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
                 }
             }
             HostEvent::SystemBack => self.handle_system_back(),
+            HostEvent::AnimationFrame(timestamp_ms) => {
+                if self
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.status().animation_active)
+                    && let Err(error) = self.dispatch_guest(AppEvent::Tick { timestamp_ms })
+                {
+                    self.fail(error);
+                }
+            }
         }
     }
 

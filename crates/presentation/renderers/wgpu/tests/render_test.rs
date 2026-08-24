@@ -1,7 +1,10 @@
 //! wgpu 渲染器离屏回读集成测试（lavapipe/llvmpipe 无头可跑，验证命令 → GPU 像素）。
 //! 这是"wgpu 什么都没画出来"的回归防护：同一 UiFrame 在离屏纹理回读非背景像素。
 
-use tela_contract::{Color, DrawCommand, DrawPayload, Rect, UiFrame, Viewport};
+use tela_contract::{
+    BorderRadius, Color, ColorStop, DrawCommand, DrawPayload, Fill, Gradient, GradientKind,
+    PixelOffset, Point, Rect, ShadowSpec, UiFrame, Viewport,
+};
 use tela_render_wgpu::WgpuRenderer;
 
 const W: u32 = 100;
@@ -22,9 +25,139 @@ fn make_frame() -> UiFrame {
                     h: 80.0,
                 },
                 clip: None,
+                opacity: 1.0,
                 payload: DrawPayload::Rect {
                     fill: Some(Color::rgba(1.0, 0.0, 0.0, 1.0)),
                     border: None,
+                },
+            },
+        ],
+        hit_regions: vec![],
+        scroll_bounds: vec![],
+    }
+}
+
+fn visual_golden_frame() -> UiFrame {
+    let linear = Gradient {
+        kind: GradientKind::Linear {
+            start: Point { x: 5.0, y: 0.0 },
+            end: Point { x: 95.0, y: 0.0 },
+        },
+        stops: vec![
+            ColorStop {
+                position: 0.0,
+                color: Color::RED,
+            },
+            ColorStop {
+                position: 0.5,
+                color: Color::rgba(0.2, 0.8, 0.4, 1.0),
+            },
+            ColorStop {
+                position: 1.0,
+                color: Color::BLUE,
+            },
+        ],
+    };
+    let radial = Gradient {
+        kind: GradientKind::Radial {
+            center: Point { x: 75.0, y: 75.0 },
+            radius: 18.0,
+        },
+        stops: vec![
+            ColorStop {
+                position: 0.0,
+                color: Color::WHITE,
+            },
+            ColorStop {
+                position: 1.0,
+                color: Color::rgba(0.1, 0.35, 0.95, 1.0),
+            },
+        ],
+    };
+    UiFrame {
+        viewport: Viewport {
+            width: W as f32,
+            height: H as f32,
+        },
+        commands: vec![
+            DrawCommand {
+                geometry: Rect {
+                    x: 5.0,
+                    y: 5.0,
+                    w: 90.0,
+                    h: 24.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::RoundedRect {
+                    fill: Some(Fill::Linear(linear)),
+                    border: None,
+                    radius: BorderRadius::all(8.0),
+                },
+            },
+            DrawCommand {
+                geometry: Rect {
+                    x: 10.0,
+                    y: 42.0,
+                    w: 45.0,
+                    h: 34.0,
+                },
+                clip: None,
+                opacity: 0.8,
+                payload: DrawPayload::Shadow {
+                    spec: ShadowSpec {
+                        offset: PixelOffset { x: 3.0, y: 4.0 },
+                        blur_radius: 7.0,
+                        color: Color::rgba(0.0, 0.0, 0.0, 0.45),
+                        inset: false,
+                    },
+                    target: Box::new(DrawPayload::RoundedRect {
+                        fill: Some(Fill::Solid(Color::rgba(0.95, 0.35, 0.2, 1.0))),
+                        border: None,
+                        radius: BorderRadius::all(10.0),
+                    }),
+                },
+            },
+            DrawCommand {
+                geometry: Rect {
+                    x: 58.0,
+                    y: 56.0,
+                    w: 34.0,
+                    h: 38.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::Ellipse {
+                    fill: Some(Fill::Radial(radial)),
+                    border: None,
+                },
+            },
+            DrawCommand {
+                geometry: Rect {
+                    x: 5.0,
+                    y: 82.0,
+                    w: 30.0,
+                    h: 12.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::Circle {
+                    fill: Some(Fill::Solid(Color::rgba(0.05, 0.7, 0.25, 1.0))),
+                    border: None,
+                },
+            },
+            DrawCommand {
+                geometry: Rect {
+                    x: 38.0,
+                    y: 82.0,
+                    w: 16.0,
+                    h: 12.0,
+                },
+                clip: None,
+                opacity: 0.75,
+                payload: DrawPayload::Image {
+                    texture: tela_contract::TextureRef("golden-checker".to_owned()),
+                    radius: BorderRadius::all(5.0),
                 },
             },
         ],
@@ -102,7 +235,10 @@ fn read_pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Textu
         .slice(..)
         .get_mapped_range()
         .expect("mapped range 获取失败");
-    let data = range.to_vec();
+    let mut data = Vec::with_capacity((W * H * 4) as usize);
+    for row in range.chunks_exact(bytes_per_row as usize) {
+        data.extend_from_slice(&row[..(W * 4) as usize]);
+    }
     drop(range);
     buffer.unmap();
     data
@@ -129,14 +265,34 @@ fn render_to_texture(device: &wgpu::Device, queue: &wgpu::Queue, frame: &UiFrame
         device.clone(),
         queue.clone(),
         format,
-        Color::rgba(0.0, 0.0, 0.0, 1.0),
+        Color::rgba(0.93, 0.94, 0.96, 1.0),
     );
+    let mut checker = vec![0_u8; 32 * 32 * 4];
+    for (index, pixel) in checker.chunks_exact_mut(4).enumerate() {
+        let x = index % 32;
+        let y = index / 32;
+        let bright = (x / 2 + y / 2) % 2 == 0;
+        pixel.copy_from_slice(if bright {
+            &[245, 214, 64, 255]
+        } else {
+            &[32, 96, 210, 255]
+        });
+    }
+    renderer
+        .upload_rgba8(
+            tela_contract::TextureRef("golden-checker".to_owned()),
+            32,
+            32,
+            &checker,
+        )
+        .expect("golden checker upload");
     renderer.render_frame(frame, &view, W, H);
     read_pixels(device, queue, &texture)
 }
 
 /// 回读链路验证：write_texture 直接写红 → readback 应读到红。
 #[test]
+#[ignore = "requires nix develop .#render-wgpu; GPU readback is covered by the ops visual gate"]
 fn write_texture_readback_works() {
     let (device, queue) = setup();
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -189,10 +345,10 @@ fn write_texture_readback_works() {
     );
 }
 
-/// 对照实验：raw wgpu 直接画红色三角形（不经 tela 渲染器），
-/// 验证环境渲染链路。本机 lavapipe（nix mesa 26.1.x）draw 不输出像素，
-/// 已确认是驱动/环境问题（write_texture 回读链路正常、无 validation error）；
-/// 在正常 Vulkan 环境可运行。
+/// 对照实验：raw wgpu 直接画红色三角形（不经 tela 渲染器）。
+///
+/// 该实验在当前 lavapipe 上仍不稳定，因此只保留为环境诊断；Tela renderer 的正式回归门
+/// 是下面两个非 ignored 的离屏测试。
 #[test]
 #[ignore = "lavapipe draw 不可靠（环境），浏览器 gpu_probe 为准"]
 fn raw_wgpu_draws() {
@@ -371,7 +527,7 @@ fn raw_wgpu_draws() {
 }
 
 #[test]
-#[ignore = "lavapipe draw 不可靠（环境），浏览器 gpu_probe 为准"]
+#[ignore = "requires nix develop .#render-wgpu; ops visual gate runs this test explicitly"]
 fn renders_solid_rect_offscreen() {
     let (device, queue) = setup();
     let pixels = render_to_texture(&device, &queue, &make_frame());
@@ -404,4 +560,43 @@ fn renders_solid_rect_offscreen() {
     // 中心 (50,50)：红色矩形内部（圆角蓝色在左上角 10..40，不冲突）。
     let c = px(50, 50);
     assert!(c.0 > 200 && c.1 < 60 && c.2 < 60, "中心应红色，实际 {c:?}");
+}
+
+#[test]
+#[ignore = "requires nix develop .#render-wgpu; ops visual gate runs this test explicitly"]
+fn renders_visual_primitive_golden_offscreen() {
+    let (device, queue) = setup();
+    let pixels = render_to_texture(&device, &queue, &visual_golden_frame());
+    let pixel = |x: u32, y: u32| {
+        let index = ((y * W + x) * 4) as usize;
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
+    };
+    let samples = [
+        (10, 17, pixel(10, 17)),
+        (50, 17, pixel(50, 17)),
+        (90, 17, pixel(90, 17)),
+        (32, 58, pixel(32, 58)),
+        (57, 78, pixel(57, 78)),
+        (75, 75, pixel(75, 75)),
+        (88, 75, pixel(88, 75)),
+        (10, 88, pixel(10, 88)),
+        (20, 88, pixel(20, 88)),
+        (39, 83, pixel(39, 83)),
+        (46, 88, pixel(46, 88)),
+        (5, 95, pixel(5, 95)),
+    ];
+    println!("visual golden samples: {samples:?}");
+
+    let expected = include_str!("golden/visual_primitives.samples");
+    let actual = samples
+        .iter()
+        .map(|(x, y, rgba)| format!("{x},{y}:{},{},{},{}", rgba[0], rgba[1], rgba[2], rgba[3]))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(actual.trim(), expected.trim());
 }

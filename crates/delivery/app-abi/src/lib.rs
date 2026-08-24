@@ -169,7 +169,7 @@ macro_rules! export_guest {
 
 /// ABI version expected by the current development bundle runtime.
 ///
-/// Version 4 makes every frame-owned input carry a non-zero source frame token and publishes that
-/// token in guest status. Hosts must reject a bundle whose declared version does not exactly match
-/// this value.
-pub const ABI_VERSION: u32 = 4;
+/// Version 5 adds deterministic host `Tick` events, animation scheduling status, and the visual
+/// frame fields introduced by frame packet version 2. Hosts must reject a bundle whose declared
+/// version does not exactly match this value.
+pub const ABI_VERSION: u32 = 5;

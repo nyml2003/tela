@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(frame.commands.len(), 2);
         assert!(matches!(
             frame.commands[0].payload,
-            tela_contract::DrawPayload::Image { ref texture } if texture.0 == "hero"
+            tela_contract::DrawPayload::Image { ref texture, .. } if texture.0 == "hero"
         ));
         assert!(matches!(
             frame.commands[1].payload,

@@ -130,6 +130,8 @@ const ALLOWED_NORMAL: AllowedDeps = {
   'tela-resource-protocol': ['tela-contract'],
   'tela-target-android': [
     'jni',
+    'libc',
+    'ndk-sys',
     'pollster',
     'tela-app-abi',
     'tela-contract',
@@ -141,6 +143,9 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'winit',
   ],
   'tela-target-ios': [
+    'objc2',
+    'objc2-foundation',
+    'objc2-quartz-core',
     'pollster',
     'raw-window-handle',
     'tela-contract',
@@ -152,6 +157,7 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'objc2',
     'objc2-app-kit',
     'objc2-foundation',
+    'objc2-quartz-core',
     'pollster',
     'raw-window-handle',
     'tela-app-abi',

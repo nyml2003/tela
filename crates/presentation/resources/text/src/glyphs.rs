@@ -9,7 +9,7 @@ use ab_glyph::{Font, FontArc, GlyphId, ScaleFont, point};
 use tela_contract::TextContent;
 
 use crate::{
-    font::{em_pixel_height, font_for, is_icon_font},
+    font::{FontFaceId, em_pixel_height, font_face_id, font_for},
     measure::normalized_wrap_width,
 };
 
@@ -17,7 +17,7 @@ const MAX_CACHED_GLYPH_OUTLINES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct GlyphOutlineCacheKey {
-    is_icon_font: bool,
+    font_face: FontFaceId,
     glyph_id: u16,
 }
 
@@ -38,11 +38,11 @@ fn glyph_outline_cache() -> &'static Mutex<HashMap<GlyphOutlineCacheKey, Option<
 
 fn cached_outline_bounds(
     font: &FontArc,
-    is_icon_font: bool,
+    font_face: FontFaceId,
     glyph_id: GlyphId,
 ) -> Option<GlyphOutlineBounds> {
     let key = GlyphOutlineCacheKey {
-        is_icon_font,
+        font_face,
         glyph_id: glyph_id.0,
     };
     {
@@ -197,7 +197,7 @@ pub fn glyph_ink_metrics(text: &TextContent) -> Option<GlyphInkMetrics> {
     }
 
     let font = font_for(&text.font);
-    let is_icon_font = is_icon_font(&text.font);
+    let face = font_face_id(&text.font);
     let glyph_scale = em_pixel_height(font, text.font_size);
     if !(glyph_scale.is_finite() && glyph_scale > 0.0) {
         return None;
@@ -221,7 +221,7 @@ pub fn glyph_ink_metrics(text: &TextContent) -> Option<GlyphInkMetrics> {
         }
 
         let glyph_id = scaled.glyph_id(character);
-        if let Some(bounds) = cached_outline_bounds(font, is_icon_font, glyph_id) {
+        if let Some(bounds) = cached_outline_bounds(font, face, glyph_id) {
             let scale = scaled.scale_factor();
             let x0 = pen_x + bounds.min_x * scale.horizontal;
             let x1 = pen_x + bounds.max_x * scale.horizontal;

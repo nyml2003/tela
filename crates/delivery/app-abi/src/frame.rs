@@ -10,7 +10,7 @@ use tela_contract::{
 use crate::FrameCodecError;
 
 const FRAME_MAGIC: [u8; 4] = *b"TLFR";
-const FRAME_VERSION: u16 = 1;
+const FRAME_VERSION: u16 = 2;
 const FRAME_HEADER_LEN: usize = FRAME_MAGIC.len() + std::mem::size_of::<u16>();
 
 /// Serializable frame projection consumed by a renderer-owning platform SDK.
@@ -115,6 +115,7 @@ impl From<WireViewport> for Viewport {
 struct WireDrawCommand {
     geometry: WireRect,
     clip: Option<WireRect>,
+    opacity: f32,
     payload: WireDrawPayload,
 }
 
@@ -123,6 +124,7 @@ impl WireDrawCommand {
         Ok(Self {
             geometry: command.geometry.into(),
             clip: command.clip.map(|clip| clip.rect.into()),
+            opacity: command.opacity,
             payload: WireDrawPayload::from_payload(&command.payload)?,
         })
     }
@@ -131,6 +133,7 @@ impl WireDrawCommand {
         DrawCommand {
             geometry: self.geometry.into(),
             clip: self.clip.map(|rect| ClipRect { rect: rect.into() }),
+            opacity: self.opacity,
             payload: self.payload.into_payload(),
         }
     }
@@ -143,7 +146,7 @@ enum WireDrawPayload {
         border: Option<WireBorderStroke>,
     },
     RoundedRect {
-        fill: Option<WireColor>,
+        fill: Option<WireFill>,
         border: Option<WireBorderStroke>,
         radius: WireBorderRadius,
     },
@@ -162,6 +165,7 @@ enum WireDrawPayload {
     },
     Image {
         texture: String,
+        radius: WireBorderRadius,
     },
     NinePatch {
         texture: String,
@@ -195,7 +199,7 @@ impl WireDrawPayload {
                 border,
                 radius,
             } => Self::RoundedRect {
-                fill: fill.map(Into::into),
+                fill: fill.as_ref().map(WireFill::from_fill),
                 border: border.map(Into::into),
                 radius: (*radius).into(),
             },
@@ -216,8 +220,9 @@ impl WireDrawPayload {
                 fill: fill.as_ref().map(WireFill::from_fill),
                 border: border.map(Into::into),
             },
-            DrawPayload::Image { texture } => Self::Image {
+            DrawPayload::Image { texture, radius } => Self::Image {
                 texture: texture.0.clone(),
+                radius: (*radius).into(),
             },
             DrawPayload::NinePatch { texture, border } => Self::NinePatch {
                 texture: texture.0.clone(),
@@ -252,7 +257,7 @@ impl WireDrawPayload {
                 border,
                 radius,
             } => DrawPayload::RoundedRect {
-                fill: fill.map(Into::into),
+                fill: fill.map(WireFill::into_fill),
                 border: border.map(Into::into),
                 radius: radius.into(),
             },
@@ -273,8 +278,9 @@ impl WireDrawPayload {
                 fill: fill.map(WireFill::into_fill),
                 border: border.map(Into::into),
             },
-            Self::Image { texture } => DrawPayload::Image {
+            Self::Image { texture, radius } => DrawPayload::Image {
                 texture: TextureRef(texture),
+                radius: radius.into(),
             },
             Self::NinePatch { texture, border } => DrawPayload::NinePatch {
                 texture: TextureRef(texture),
@@ -664,8 +670,9 @@ mod tests {
                             h: 100.0,
                         },
                     }),
+                    opacity: 0.75,
                     payload: DrawPayload::RoundedRect {
-                        fill: Some(Color::BLUE),
+                        fill: Some(Fill::Solid(Color::BLUE)),
                         border: Some(BorderStroke {
                             color: Color::WHITE,
                             width: 2.0,
@@ -681,6 +688,7 @@ mod tests {
                         h: 20.0,
                     },
                     clip: None,
+                    opacity: 1.0,
                     payload: DrawPayload::Text {
                         text: TextContent {
                             text: "Tela 文件".to_owned(),
@@ -700,6 +708,7 @@ mod tests {
                         h: 4.0,
                     },
                     clip: None,
+                    opacity: 0.5,
                     payload: DrawPayload::Shadow {
                         spec: ShadowSpec {
                             offset: tela_contract::PixelOffset { x: 2.0, y: 3.0 },
@@ -742,10 +751,11 @@ mod tests {
             FrameCodecError::InvalidMagic
         );
         let mut bytes = encode_frame(&full_frame()).expect("encode");
-        bytes[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        let future_version = FRAME_VERSION + 1;
+        bytes[4..6].copy_from_slice(&future_version.to_le_bytes());
         assert_eq!(
             decode_frame(&bytes).unwrap_err(),
-            FrameCodecError::UnsupportedVersion(2)
+            FrameCodecError::UnsupportedVersion(future_version)
         );
     }
 }

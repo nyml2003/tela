@@ -1,6 +1,6 @@
-// 领域层：验证门模型（check 命令的四道门 + 冒烟门），无 I/O。
+// 领域层：验证门模型（含 WGPU 离屏视觉门），无 I/O。
 
-export type GateId = 'fmt' | 'clippy' | 'test' | 'arch' | 'smoke' | 'build';
+export type GateId = 'fmt' | 'clippy' | 'test' | 'visual' | 'arch' | 'smoke' | 'build';
 
 export interface GateSpec {
   id: GateId;
@@ -12,6 +12,7 @@ export const CHECK_GATES: readonly GateSpec[] = [
   { id: 'fmt', label: 'fmt --check' },
   { id: 'clippy', label: 'clippy --all-targets -D warnings' },
   { id: 'test', label: 'cargo test' },
+  { id: 'visual', label: 'WGPU 离屏 golden' },
   { id: 'arch', label: '依赖方向检查' },
 ];
 

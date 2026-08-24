@@ -1,13 +1,15 @@
 //! WebGPU shader module 与图元 pipeline。
 
 use crate::batch::PreparedBatch;
-use crate::vertex::{VertexImage, VertexRounded, VertexSolid};
+use crate::vertex::{VertexGradient, VertexImage, VertexRounded, VertexShadow, VertexSolid};
 
 /// 已创建的后端图元 pipeline。
 pub(crate) struct Pipelines {
     solid: wgpu::RenderPipeline,
     rounded: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
+    gradient: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
     image_bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -88,10 +90,38 @@ impl Pipelines {
                 attributes: &VertexImage::ATTRS,
             },
         );
+        let gradient = create_pipeline(
+            device,
+            &shader,
+            &targets,
+            Some(&image_layout),
+            PipelineSpec {
+                label: "tela gradient pipeline",
+                vertex_entry: "vs_gradient",
+                fragment_entry: "fs_gradient",
+                array_stride: std::mem::size_of::<VertexGradient>() as wgpu::BufferAddress,
+                attributes: &VertexGradient::ATTRS,
+            },
+        );
+        let shadow = create_pipeline(
+            device,
+            &shader,
+            &targets,
+            None,
+            PipelineSpec {
+                label: "tela shadow pipeline",
+                vertex_entry: "vs_shadow",
+                fragment_entry: "fs_shadow",
+                array_stride: std::mem::size_of::<VertexShadow>() as wgpu::BufferAddress,
+                attributes: &VertexShadow::ATTRS,
+            },
+        );
         Self {
             solid,
             rounded,
             image,
+            gradient,
+            shadow,
             image_bind_group_layout,
         }
     }
@@ -145,6 +175,36 @@ impl Pipelines {
                     image_bind_group.expect("图片 batch 必须有对应已上传纹理"),
                     &[],
                 );
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
+            PreparedBatch::Gradient {
+                scissor,
+                vertex_buffer,
+                index_buffer,
+                index_count,
+                ..
+            } => {
+                pass.set_pipeline(&self.gradient);
+                pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
+                pass.set_bind_group(
+                    0,
+                    image_bind_group.expect("渐变 batch 必须有对应色带纹理"),
+                    &[],
+                );
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
+            PreparedBatch::Shadow {
+                scissor,
+                vertex_buffer,
+                index_buffer,
+                index_count,
+            } => {
+                pass.set_pipeline(&self.shadow);
+                pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 pass.draw_indexed(0..*index_count, 0, 0..1);

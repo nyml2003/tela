@@ -8,7 +8,9 @@ use tela_contract::{
     UiNode, UiResources, Viewport,
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
-use tela_ui_dsl::{FrameCoordinator, FrameToken, FramedInteraction, Signal};
+use tela_ui_dsl::{
+    AnimationClock, AnimationSchedule, FrameCoordinator, FrameToken, FramedInteraction, Signal,
+};
 
 use crate::{
     domain::{Entry, EntryKind, MobileWorkspace},
@@ -64,6 +66,7 @@ pub struct App {
     scroll_key: Option<SemanticKey>,
     frames: FrameCoordinator<MobileAction>,
     projection_invalidated: bool,
+    animation_clock: AnimationClock,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -83,6 +86,7 @@ impl App {
             scroll_key: None,
             frames: FrameCoordinator::new(),
             projection_invalidated: true,
+            animation_clock: AnimationClock::default(),
         }
     }
 
@@ -428,6 +432,27 @@ impl App {
         self.query.get()
     }
 
+    /// 同步宿主注入的单调时钟；没有活跃动画时只更新时间基，不产生新帧。
+    pub fn animation_tick(&mut self, timestamp_ms: u64) -> bool {
+        if timestamp_ms < self.animation_clock.timestamp_ms {
+            return false;
+        }
+        self.animation_clock = AnimationClock { timestamp_ms };
+        if !self.animation_schedule().active {
+            return false;
+        }
+        self.invalidate_frame();
+        true
+    }
+
+    /// 当前成功帧请求的动画调度。
+    pub fn animation_schedule(&self) -> AnimationSchedule {
+        self.frames
+            .active()
+            .map(|frame| frame.animation_schedule())
+            .unwrap_or_default()
+    }
+
     fn prepare_projection(
         &self,
         search_focused: bool,
@@ -449,6 +474,7 @@ impl App {
             icons: self.resources.icon_provider(),
         };
         let mut build = self.frames.begin_build();
+        build.set_animation_clock(self.animation_clock);
         let root = if is_browse {
             render_browse_dsl(&mut build, props, &self.route, &self.query)
                 .map_err(|error| error.to_string())?
@@ -883,7 +909,7 @@ mod tests {
         // FNV-1a 指纹是完整 RGBA 缓冲的紧凑 golden reference；视觉改动必须显式更新它。
         assert_eq!(
             raster_fingerprint(&bitmap.pixels),
-            4_663_901_108_784_084_735
+            7_726_038_891_401_182_959
         );
     }
 

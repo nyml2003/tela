@@ -650,6 +650,13 @@ pub trait UiResources {
 
     /// 返回供 UI / Application 构建语义图标的 provider。
     fn icon_provider(&self) -> &dyn IconProvider;
+
+    /// 返回当前产品实际装配的字体目录。
+    ///
+    /// 默认空目录让不提供字体选择器的轻量资源实现保持兼容；具体产品应显式装配目录。
+    fn fonts(&self) -> &'static [crate::FontDescriptor] {
+        &[]
+    }
 }
 
 /// 将一对独立实现组合成产品可注入的 [`UiResources`]。
@@ -658,6 +665,7 @@ pub trait UiResources {
 pub struct UiResourceSet<M, I> {
     text_measurer: M,
     icon_provider: I,
+    fonts: &'static [crate::FontDescriptor],
 }
 
 impl<M, I> UiResourceSet<M, I> {
@@ -666,7 +674,14 @@ impl<M, I> UiResourceSet<M, I> {
         Self {
             text_measurer,
             icon_provider,
+            fonts: &[],
         }
+    }
+
+    /// 附加当前产品实际装配的字体目录。
+    pub const fn with_fonts(mut self, fonts: &'static [crate::FontDescriptor]) -> Self {
+        self.fonts = fonts;
+        self
     }
 }
 
@@ -681,5 +696,9 @@ where
 
     fn icon_provider(&self) -> &dyn IconProvider {
         &self.icon_provider
+    }
+
+    fn fonts(&self) -> &'static [crate::FontDescriptor] {
+        self.fonts
     }
 }

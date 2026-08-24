@@ -93,6 +93,7 @@ fn translates_commands_in_tree_order_with_clip() {
                     h: 50.0,
                 },
                 clip: None,
+                opacity: 1.0,
                 payload: DrawPayload::Rect {
                     fill: Some(Color::WHITE),
                     border: None,
@@ -113,8 +114,9 @@ fn translates_commands_in_tree_order_with_clip() {
                         h: 30.0,
                     },
                 }),
+                opacity: 1.0,
                 payload: DrawPayload::RoundedRect {
-                    fill: Some(Color::BLUE),
+                    fill: Some(tela_contract::Fill::Solid(Color::BLUE)),
                     border: None,
                     radius: tela_contract::BorderRadius::all(8.0),
                 },
@@ -151,6 +153,7 @@ fn forwards_text_style_token_to_canvas_host() {
                 h: 18.0,
             },
             clip: None,
+            opacity: 1.0,
             payload: DrawPayload::Text {
                 text: tela_contract::TextContent {
                     text: "\u{e2c7}".to_owned(),
@@ -186,8 +189,9 @@ fn degrades_by_capabilities() {
                 h: 20.0,
             },
             clip: None,
+            opacity: 1.0,
             payload: DrawPayload::RoundedRect {
-                fill: Some(Color::RED),
+                fill: Some(tela_contract::Fill::Solid(Color::RED)),
                 border: None,
                 radius: tela_contract::BorderRadius::all(4.0),
             },
@@ -213,6 +217,7 @@ fn degrades_by_capabilities() {
                 h: 20.0,
             },
             clip: None,
+            opacity: 1.0,
             payload: DrawPayload::LinearGradient {
                 gradient: Gradient {
                     kind: GradientKind::Linear {

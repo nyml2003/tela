@@ -48,6 +48,7 @@ impl EditorPage {
                 >
                     <Text
                         value={self.document.clone()}
+                        font={self.settings.font.clone()}
                         font_size={font_size}
                         line_height={line_height}
                         color={TEXT}

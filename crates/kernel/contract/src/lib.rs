@@ -62,7 +62,7 @@ pub use node::{
     TeleportSpec, TextContent, UiNode, VirtualListSpec, VisualConcern,
 };
 pub use paint::{ColorStop, Fill, Gradient, GradientKind, ShadowSpec};
-pub use resource::{TextStyleRef, TextureId, TextureRef};
+pub use resource::{FontDescriptor, FontRole, TextStyleRef, TextureId, TextureRef};
 pub use text::{TextMeasureRequest, TextMeasurer, TextMetrics};
 pub use window::WindowCommand;
 
@@ -104,6 +104,7 @@ mod tests {
                     h: 10.0,
                 },
                 clip: None,
+                opacity: 1.0,
                 payload: DrawPayload::Rect {
                     fill: Some(Color::BLACK),
                     border: None,

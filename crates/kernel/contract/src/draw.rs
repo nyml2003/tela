@@ -49,6 +49,11 @@ pub struct DrawCommand {
     pub geometry: Rect,
     /// 预合并 clip rect（祖先裁剪区域求交），`None` = 不裁剪。
     pub clip: Option<ClipRect>,
+    /// 当前节点的绘制透明度，范围 `0.0..=1.0`。
+    ///
+    /// 这是 per-node opacity：只作用于本命令的最终像素，不隐式作用于子节点，也不表示
+    /// CSS 式离屏组透明度。
+    pub opacity: f32,
     /// 原语载荷。
     pub payload: DrawPayload,
 }
@@ -68,8 +73,8 @@ pub enum DrawPayload {
     },
     /// 圆角矩形：独立四角圆角半径。
     RoundedRect {
-        /// 实心填充，`None` = 不填充。
-        fill: Option<Color>,
+        /// 填充（纯色/渐变），`None` = 不填充。
+        fill: Option<Fill>,
         /// 描边，`None` = 不描边。
         border: Option<BorderStroke>,
         /// 独立四角圆角半径。
@@ -102,6 +107,8 @@ pub enum DrawPayload {
     Image {
         /// 已加载纹理引用。
         texture: TextureRef,
+        /// 图片裁剪圆角。
+        radius: BorderRadius,
     },
     /// 九宫格拉伸：3×3 切分的可拉伸贴图。
     NinePatch {
@@ -153,7 +160,7 @@ impl Clone for DrawPayload {
                 border,
                 radius,
             } => Self::RoundedRect {
-                fill: *fill,
+                fill: fill.clone(),
                 border: *border,
                 radius: *radius,
             },
@@ -174,8 +181,9 @@ impl Clone for DrawPayload {
                 fill: fill.clone(),
                 border: *border,
             },
-            Self::Image { texture } => Self::Image {
+            Self::Image { texture, radius } => Self::Image {
                 texture: texture.clone(),
+                radius: *radius,
             },
             Self::NinePatch { texture, border } => Self::NinePatch {
                 texture: texture.clone(),
@@ -257,7 +265,16 @@ impl PartialEq for DrawPayload {
                     border: bb,
                 },
             ) => ap == bp && a == b && ab == bb,
-            (Self::Image { texture: a }, Self::Image { texture: b }) => a == b,
+            (
+                Self::Image {
+                    texture: a,
+                    radius: ar,
+                },
+                Self::Image {
+                    texture: b,
+                    radius: br,
+                },
+            ) => a == b && ar == br,
             (
                 Self::NinePatch {
                     texture: a,

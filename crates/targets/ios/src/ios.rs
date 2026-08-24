@@ -1,17 +1,90 @@
 //! UIKit lifecycle, Winit events, and Metal surface management for iPhone.
 
-use std::sync::Arc;
+use std::{cell::OnceCell, sync::Arc};
 
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, sel};
+use objc2_foundation::{MainThreadMarker, NSObject, NSRunLoop, NSRunLoopCommonModes};
+use objc2_quartz_core::{CACurrentMediaTime, CADisplayLink};
 use tela_contract::{Color, UiFrame};
 use tela_render_wgpu::WgpuRenderer;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, Touch, TouchPhase as WinitTouchPhase, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
     platform::ios::{ValidOrientations, WindowExtIOS},
     window::{Window, WindowId},
 };
+
+enum HostEvent {
+    AnimationFrame(u64),
+}
+
+struct DisplayLinkIvars {
+    proxy: EventLoopProxy<HostEvent>,
+    display_link: OnceCell<Retained<CADisplayLink>>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TelaIOSDisplayLinkTarget"]
+    #[ivars = DisplayLinkIvars]
+    struct DisplayLinkTarget;
+
+    impl DisplayLinkTarget {
+        #[unsafe(method(animationFrame:))]
+        fn animation_frame(&self, display_link: &CADisplayLink) {
+            let timestamp_ms = seconds_to_millis(display_link.timestamp());
+            let _ = self
+                .ivars()
+                .proxy
+                .send_event(HostEvent::AnimationFrame(timestamp_ms));
+        }
+    }
+);
+
+impl DisplayLinkTarget {
+    fn new(mtm: MainThreadMarker, proxy: EventLoopProxy<HostEvent>) -> Retained<Self> {
+        let this = mtm.alloc().set_ivars(DisplayLinkIvars {
+            proxy,
+            display_link: OnceCell::new(),
+        });
+        // SAFETY: NSObject's initializer is valid for a freshly allocated main-thread target.
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        // SAFETY: `animationFrame:` is declared on this exact target above.
+        let display_link =
+            unsafe { CADisplayLink::displayLinkWithTarget_selector(&this, sel!(animationFrame:)) };
+        display_link.setPaused(true);
+        // SAFETY: the display link and target are main-thread-only and invalidated on shutdown.
+        unsafe {
+            display_link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
+        }
+        let _ = this.ivars().display_link.set(display_link);
+        this
+    }
+
+    fn set_active(&self, active: bool) {
+        if let Some(display_link) = self.ivars().display_link.get() {
+            display_link.setPaused(!active);
+        }
+    }
+
+    fn invalidate(&self) {
+        if let Some(display_link) = self.ivars().display_link.get() {
+            display_link.setPaused(true);
+            display_link.invalidate();
+        }
+    }
+}
+
+fn seconds_to_millis(seconds: f64) -> u64 {
+    (seconds * 1_000.0).clamp(0.0, u64::MAX as f64) as u64
+}
+
+fn current_media_time_ms() -> u64 {
+    seconds_to_millis(CACurrentMediaTime())
+}
 
 use crate::{
     IosMobileSession,
@@ -22,9 +95,13 @@ use crate::{
 
 /// Starts the UIKit-owned event loop for a product-supplied direct mobile session.
 pub(super) fn run<A: IosMobileSession + 'static>(app: A) -> Result<(), String> {
-    let event_loop =
-        EventLoop::new().map_err(|error| format!("create UIKit event loop: {error}"))?;
-    let mut host = IosHost::new(app);
+    let event_loop = EventLoop::<HostEvent>::with_user_event()
+        .build()
+        .map_err(|error| format!("create UIKit event loop: {error}"))?;
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| "create iOS display link outside the main thread".to_owned())?;
+    let display_link = DisplayLinkTarget::new(mtm, event_loop.create_proxy());
+    let mut host = IosHost::new(app, display_link);
     event_loop
         .run_app(&mut host)
         .map_err(|error| format!("run UIKit event loop: {error}"))
@@ -39,10 +116,11 @@ struct IosHost<A: IosMobileSession> {
     /// Provenance of the last frame Metal actually presented. A newer logical frame is not
     /// enough: input can still arrive from an older drawable while a redraw is queued.
     presented_frame_token: Option<u64>,
+    display_link: Retained<DisplayLinkTarget>,
 }
 
 impl<A: IosMobileSession> IosHost<A> {
-    fn new(app: A) -> Self {
+    fn new(app: A, display_link: Retained<DisplayLinkTarget>) -> Self {
         Self {
             window: None,
             gpu: None,
@@ -50,6 +128,7 @@ impl<A: IosMobileSession> IosHost<A> {
             text: ControlledTextInput::default(),
             touch: TouchAdapter::new(),
             presented_frame_token: None,
+            display_link,
         }
     }
 
@@ -113,12 +192,21 @@ impl<A: IosMobileSession> IosHost<A> {
         }
     }
 
+    fn synchronize_animation_clock(&mut self) {
+        let _ = self.app.animation_tick(current_media_time_ms());
+    }
+
+    fn synchronize_display_link(&self) {
+        self.display_link.set_active(self.app.animation_active());
+    }
+
     fn fail(&mut self, error: impl AsRef<str>) {
         eprintln!("tela-target-ios: {}", error.as_ref());
         self.request_redraw();
     }
 
     fn handle_touch(&mut self, touch: Touch) {
+        self.synchronize_animation_clock();
         let Some(phase) = touch_phase(touch.phase) else {
             return;
         };
@@ -135,10 +223,12 @@ impl<A: IosMobileSession> IosHost<A> {
         };
         self.app.dispatch_pointer(frame_token, pointer);
         self.sync_text_channel();
+        self.synchronize_display_link();
         self.request_redraw();
     }
 
     fn handle_keyboard(&mut self, event: KeyEvent) {
+        self.synchronize_animation_clock();
         let KeyEvent {
             state,
             logical_key,
@@ -176,6 +266,7 @@ impl<A: IosMobileSession> IosHost<A> {
             }
         }
         self.sync_text_channel();
+        self.synchronize_display_link();
         self.request_redraw();
     }
 
@@ -195,6 +286,7 @@ impl<A: IosMobileSession> IosHost<A> {
                     }
                     self.request_redraw();
                 }
+                self.synchronize_display_link();
             }
             RenderOutcome::Outdated => {
                 self.presented_frame_token = None;
@@ -226,15 +318,18 @@ impl<A: IosMobileSession> IosHost<A> {
     }
 }
 
-impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
+impl<A: IosMobileSession> ApplicationHandler<HostEvent> for IosHost<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.ensure_window_and_gpu(event_loop) {
             self.fail(error);
         }
+        self.synchronize_display_link();
         self.request_redraw();
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.display_link.set_active(false);
+        self.synchronize_animation_clock();
         let frame_token = self.presented_frame_token;
         for event in self.touch.cancel_all() {
             if let Some(frame_token) = frame_token {
@@ -249,6 +344,19 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
         // UIKit may invalidate its Metal drawable in the background. The next `resumed` callback
         // retains the business session but creates a fresh surface and device.
         self.gpu = None;
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: HostEvent) {
+        match event {
+            HostEvent::AnimationFrame(timestamp_ms) => {
+                if self.app.animation_active() {
+                    let _ = self.app.animation_tick(timestamp_ms);
+                    self.request_redraw();
+                } else {
+                    self.display_link.set_active(false);
+                }
+            }
+        }
     }
 
     fn window_event(
@@ -266,17 +374,21 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
             WindowEvent::Touch(touch) => self.handle_touch(touch),
             WindowEvent::KeyboardInput { event, .. } => self.handle_keyboard(event),
             WindowEvent::Ime(_) => {
+                self.synchronize_animation_clock();
                 if let Some(frame_token) = self.presented_frame_token {
                     self.app.composition_changed(frame_token);
                 }
                 self.sync_text_channel();
+                self.synchronize_display_link();
                 self.request_redraw();
             }
             WindowEvent::Focused(false) => {
+                self.synchronize_animation_clock();
                 if let Some(frame_token) = self.presented_frame_token {
                     self.app.input_blur(frame_token);
                 }
                 self.sync_text_channel();
+                self.synchronize_display_link();
                 self.request_redraw();
             }
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -285,6 +397,7 @@ impl<A: IosMobileSession> ApplicationHandler for IosHost<A> {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.display_link.invalidate();
         self.presented_frame_token = None;
         self.gpu = None;
         self.window = None;

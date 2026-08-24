@@ -12,6 +12,7 @@
 extern crate self as tela_ui_dsl;
 
 mod action;
+mod animation;
 mod component;
 mod context;
 mod frame;
@@ -23,6 +24,10 @@ mod signal;
 mod view;
 
 pub use action::{ActionFrame, ActionRegistry, DslTrigger, TextActionMap, with_context};
+pub use animation::{
+    AnimationClock, AnimationController, AnimationSample, AnimationSchedule, Easing, Interpolate,
+    TransitionExt, TransitionSpec, TransitionTarget,
+};
 pub use component::DslComponent;
 pub use component::prelude;
 pub use context::{ProvidedValue, ViewContext};

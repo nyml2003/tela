@@ -10,6 +10,8 @@ pub struct TextStyleRef(String);
 impl TextStyleRef {
     /// 通用正文排版 token。
     pub const BODY: &str = "body";
+    /// 中等字重正文排版 token。
+    pub const BODY_MEDIUM: &str = "body-medium";
     /// 图标排版 token。
     pub const ICON: &str = "icon";
 
@@ -31,10 +33,40 @@ impl TextStyleRef {
         Self::new(Self::BODY)
     }
 
+    /// 创建中等字重正文排版 token。
+    pub fn body_medium() -> Self {
+        Self::new(Self::BODY_MEDIUM)
+    }
+
     /// 创建图标排版 token。
     pub fn icon() -> Self {
         Self::new(Self::ICON)
     }
+}
+
+/// 字体目录中的用途分类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontRole {
+    /// 可用于普通文本内容的字体。
+    Text,
+    /// 只用于语义图标字形的字体。
+    Icon,
+}
+
+/// 产品装配后可供 Application 枚举的字体描述。
+///
+/// 该描述只公开稳定 token 与选择器元数据；字体字节、解析对象和平台句柄仍留在
+/// Presentation，避免资源实现泄漏进 Application。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FontDescriptor {
+    /// `TextContent.font` 使用的稳定 token。
+    pub text_style: &'static str,
+    /// 面向用户的字体名称。
+    pub display_name: &'static str,
+    /// OpenType 字重。
+    pub weight: u16,
+    /// 字体用途。
+    pub role: FontRole,
 }
 
 /// 纹理资源标识（`Host` 经此加载纹理）。

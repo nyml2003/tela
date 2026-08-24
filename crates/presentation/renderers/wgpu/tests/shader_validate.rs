@@ -1,7 +1,7 @@
 //! shader.wgsl 编译期校验。
 //!
 //! T1 语法+类型：naga 解析 + Validator 校验——WGSL 错误不再运行时才炸；
-//! T2 入口完整性：当前 renderer 的 Solid、Rounded 与 Image 入口齐全。
+//! T2 入口完整性：当前 renderer 的 Solid、Rounded、Image、Gradient 与 Shadow 入口齐全。
 
 use naga::front::wgsl::parse_str;
 
@@ -23,7 +23,7 @@ fn wgsl_parses_and_validates() {
     .expect("shader.wgsl 必须通过 naga 类型校验");
 }
 
-/// T2：六个必需入口存在，其他能力没有 shader 入口。
+/// T2：十个必需入口存在，未声明能力没有 shader 入口。
 #[test]
 fn required_entry_points_exist() {
     let module = parse();
@@ -39,11 +39,19 @@ fn required_entry_points_exist() {
         "fs_rounded",
         "vs_image",
         "fs_image",
+        "vs_gradient",
+        "fs_gradient",
+        "vs_shadow",
+        "fs_shadow",
     ] {
         assert!(
             names.contains(&required),
             "缺少 entry point: {required}，现有: {names:?}"
         );
     }
-    assert_eq!(names.len(), 6, "最小 shader 不应偷偷带入其他能力入口");
+    assert_eq!(
+        names.len(),
+        10,
+        "shader 入口必须与 renderer pipeline 一一对应"
+    );
 }

@@ -14,6 +14,8 @@ tela-app-abi = { path = "../../delivery/app-abi" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22.4"
+libc = "0.2"
+ndk-sys = "0.6"
 pollster = "0.4"
 tela-contract = { path = "../../kernel/contract" }
 tela-guest-runtime = { path = "../../delivery/guest-runtime" }

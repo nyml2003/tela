@@ -148,6 +148,8 @@ test('Target 不能静态链接应用或另一个 Target', () => {
     ...zeroDependencies(),
     crate('tela-target-android', [
       ['jni', 'normal'],
+      ['libc', 'normal'],
+      ['ndk-sys', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-mobile-demo', 'normal'],
       ['tela-target-ios', 'normal'],
@@ -162,6 +164,9 @@ test('iOS Target 保持宿主边界，静态组合由 iOS Product 负责', () =>
   const targetViolations = checkArchitecture([
     ...zeroDependencies(),
     crate('tela-target-ios', [
+      ['objc2', 'normal'],
+      ['objc2-foundation', 'normal'],
+      ['objc2-quartz-core', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-mobile-demo', 'normal'],
     ]),
@@ -336,6 +341,8 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
     crate('tela-resource-protocol', [['tela-contract', 'normal']]),
     crate('tela-target-android', [
       ['jni', 'normal'],
+      ['libc', 'normal'],
+      ['ndk-sys', 'normal'],
       ['pollster', 'normal'],
       ['tela-app-abi', 'normal'],
       ['tela-contract', 'normal'],
@@ -347,6 +354,9 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['winit', 'normal'],
     ]),
     crate('tela-target-ios', [
+      ['objc2', 'normal'],
+      ['objc2-foundation', 'normal'],
+      ['objc2-quartz-core', 'normal'],
       ['pollster', 'normal'],
       ['raw-window-handle', 'normal'],
       ['tela-contract', 'normal'],
@@ -358,6 +368,7 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['objc2', 'normal'],
       ['objc2-app-kit', 'normal'],
       ['objc2-foundation', 'normal'],
+      ['objc2-quartz-core', 'normal'],
       ['pollster', 'normal'],
       ['raw-window-handle', 'normal'],
       ['tela-app-abi', 'normal'],

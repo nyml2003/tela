@@ -139,6 +139,18 @@ impl WebAppStatus {
     pub fn input_value(&self) -> String {
         self.status.input_value.clone()
     }
+
+    /// Whether requestAnimationFrame should keep driving guest Tick events.
+    #[wasm_bindgen(getter)]
+    pub fn animation_active(&self) -> bool {
+        self.status.animation_active
+    }
+
+    /// Earliest guest-requested monotonic millisecond deadline.
+    #[wasm_bindgen(getter)]
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        self.status.next_deadline_ms
+    }
 }
 
 /// Decodes guest status after its bytes crossed the ordinary WebAssembly boundary.
@@ -153,6 +165,12 @@ pub fn decode_app_status(bytes: &[u8]) -> Result<WebAppStatus, JsValue> {
 #[wasm_bindgen]
 pub fn event_viewport(width: f32, height: f32) -> Result<Vec<u8>, JsValue> {
     encode_host_event(AppEvent::Viewport { width, height })
+}
+
+/// Encodes one browser requestAnimationFrame timestamp for the guest.
+#[wasm_bindgen]
+pub fn event_tick(timestamp_ms: u64) -> Result<Vec<u8>, JsValue> {
+    encode_host_event(AppEvent::Tick { timestamp_ms })
 }
 
 /// Encodes one complete raw browser pointer packet for the guest.

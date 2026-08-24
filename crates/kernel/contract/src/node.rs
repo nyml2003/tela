@@ -469,6 +469,8 @@ pub struct VisualConcern {
     pub border_radius: BorderRadius,
     /// 阴影（外阴影/内阴影）。
     pub shadow: Option<ShadowSpec>,
+    /// 当前节点的绘制透明度。只作用于节点自身，不形成子树离屏合成组。
+    pub opacity: f32,
     /// 局部绘制序：仅控制当前直接父布局容器内的绘制与命中顺序（见 006-布局引擎 4）。
     pub draw_order: DrawOrder,
     /// 不改变布局尺寸的微小视觉位移。
@@ -482,6 +484,7 @@ impl Default for VisualConcern {
             border_color: None,
             border_radius: BorderRadius::default(),
             shadow: None,
+            opacity: 1.0,
             draw_order: DrawOrder::normal(),
             visual_offset: PixelOffset::default(),
         }

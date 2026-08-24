@@ -1004,10 +1004,13 @@ async function startTelaWebview(options) {
   let presentedFrameToken;
   const scheduleRender = () => {
     if (closed || animationFrame !== void 0) return;
-    animationFrame = requestAnimationFrame(() => {
+    animationFrame = requestAnimationFrame((timestamp) => {
       animationFrame = void 0;
       if (closed) return;
       try {
+        if (guest.status().animation_active) {
+          dispatch(bindings.event_tick(BigInt(Math.floor(timestamp))), false);
+        }
         const framePacket = guest.framePacket();
         const frameToken = guest.status().frame_token;
         if (!bindings.render_gpu(framePacket)) {
@@ -1019,6 +1022,7 @@ async function startTelaWebview(options) {
         } else {
           presentedFrameToken = frameToken;
           renderError = void 0;
+          if (guest.status().animation_active) scheduleRender();
         }
       } catch (error) {
         const message = `tela WebView WGPU render failed: ${String(error)}; ${bindings.gpu_diagnostics()}`;
@@ -1030,8 +1034,11 @@ async function startTelaWebview(options) {
       }
     });
   };
-  const dispatch = (packet) => {
+  const dispatch = (packet, synchronizeClock = true) => {
     if (closed) return false;
+    if (synchronizeClock) {
+      guest.dispatch(bindings.event_tick(BigInt(Math.floor(performance.now()))));
+    }
     const publication = guest.dispatch(packet);
     processBridgeRequests();
     input?.synchronize();

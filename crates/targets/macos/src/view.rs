@@ -1,7 +1,7 @@
 //! AppKit content view, normalized input delivery, and main-thread shell state.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     ptr,
     sync::{
         Arc, Mutex,
@@ -11,13 +11,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, sel};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSColor, NSCursor, NSEvent, NSFont, NSResponder, NSTextField,
     NSTrackingRectTag, NSView,
 };
-use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString};
-use std::cell::RefCell;
+use objc2_foundation::{
+    MainThreadMarker, NSObject, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+};
+use objc2_quartz_core::CADisplayLink;
 use std::rc::Rc;
 
 use tela_app_abi::{
@@ -42,6 +44,7 @@ use crate::{
 pub(crate) struct TelaViewIvars {
     state: RefCell<ViewState>,
     tracking_rect: Cell<Option<NSTrackingRectTag>>,
+    display_link: OnceCell<Retained<CADisplayLink>>,
 }
 
 struct ViewState {
@@ -60,6 +63,7 @@ struct ViewState {
     terminal_error: Option<String>,
     bridge: Option<BridgeDispatcher>,
     bridge_metrics: Rc<RefCell<MacMetrics>>,
+    animation_epoch: Instant,
 }
 
 define_class!(
@@ -160,6 +164,18 @@ define_class!(
         fn wants_key_down_for_event(&self, _event: &NSEvent) -> bool {
             true
         }
+
+        #[unsafe(method(animationFrame:))]
+        fn animation_frame(&self, display_link: &CADisplayLink) {
+            let active = {
+                let mut state = self.ivars().state.borrow_mut();
+                if let Err(error) = state.tick_animation(self) {
+                    state.fail_terminal(self, error);
+                }
+                state.animation_active()
+            };
+            display_link.setPaused(!active);
+        }
     }
 );
 
@@ -188,12 +204,25 @@ impl TelaView {
                 terminal_error: None,
                 bridge_metrics: Rc::new(RefCell::new(MacMetrics::default())),
                 bridge: None,
+                animation_epoch: Instant::now(),
             }),
             tracking_rect: Cell::new(None),
+            display_link: OnceCell::new(),
         });
         // SAFETY: this invokes NSView's ordinary `init` method on a freshly allocated object with
         // Rust ivars already installed, following objc2's documented custom-view construction.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        // SAFETY: `animationFrame:` is declared on this exact object above. Associating the
+        // display link with the view makes AppKit follow the view's current screen refresh source.
+        let display_link =
+            unsafe { this.displayLinkWithTarget_selector(&this, sel!(animationFrame:)) };
+        display_link.setPaused(true);
+        // SAFETY: the view and callback are main-thread-only and the link is invalidated during
+        // close before AppKit tears down the view.
+        unsafe {
+            display_link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
+        }
+        let _ = this.ivars().display_link.set(display_link);
         this.setWantsLayer(true);
         this.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -209,10 +238,16 @@ impl TelaView {
 
     /// Called by the AppKit run-loop timer; it only transfers already-finished background work.
     pub(crate) fn poll_background_work(&self) {
-        let mut state = self.ivars().state.borrow_mut();
-        state.receive_startup_result(self);
-        state.receive_device_loss(self);
-        state.poll_surface_retry(self);
+        let active = {
+            let mut state = self.ivars().state.borrow_mut();
+            state.receive_startup_result(self);
+            state.receive_device_loss(self);
+            state.poll_surface_retry(self);
+            state.animation_active()
+        };
+        if let Some(display_link) = self.ivars().display_link.get() {
+            display_link.setPaused(!active);
+        }
     }
 
     /// Cancels the worker and releases the portable input channel before AppKit tears down the view.
@@ -232,6 +267,10 @@ impl TelaView {
         }
         state.presented_frame_token = None;
         state.gpu = None;
+        if let Some(display_link) = self.ivars().display_link.get() {
+            display_link.setPaused(true);
+            display_link.invalidate();
+        }
     }
 
     fn resize_from_appkit(&self) {
@@ -373,6 +412,25 @@ fn appkit_timestamp_micros(event: &NSEvent) -> u64 {
 }
 
 impl ViewState {
+    fn animation_active(&self) -> bool {
+        self.lifecycle.can_render()
+            && self.terminal_error.is_none()
+            && self
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.status().animation_active)
+    }
+
+    fn tick_animation(&mut self, view: &TelaView) -> Result<(), String> {
+        if !self.animation_active() {
+            return Ok(());
+        }
+        let timestamp_ms = self.animation_epoch.elapsed().as_millis() as u64;
+        self.dispatch_guest(AppEvent::Tick { timestamp_ms })?;
+        self.request_redraw(view);
+        Ok(())
+    }
+
     fn receive_startup_result(&mut self, view: &TelaView) {
         let result = match self.startup_rx.as_ref() {
             None => return,
@@ -574,6 +632,7 @@ impl ViewState {
         let Some(source_frame_token) = self.presented_frame_token else {
             return Ok(false);
         };
+        self.synchronize_animation_clock()?;
         self.dispatch_guest(AppEvent::FrameInput {
             source_frame_token,
             input,
@@ -587,10 +646,17 @@ impl ViewState {
         let Some(source_frame_token) = self.presented_frame_token else {
             return Ok(false);
         };
+        self.synchronize_animation_clock()?;
         self.dispatch_guest_without_text_reconcile(AppEvent::FrameInput {
             source_frame_token,
             input,
         })
+    }
+
+    fn synchronize_animation_clock(&mut self) -> Result<(), String> {
+        let timestamp_ms = self.animation_epoch.elapsed().as_millis() as u64;
+        let _ = self.dispatch_guest_without_text_reconcile(AppEvent::Tick { timestamp_ms })?;
+        Ok(())
     }
 
     fn synchronize_text_channel(&mut self, window_focus: Option<bool>) -> Result<(), String> {

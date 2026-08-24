@@ -1436,6 +1436,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]
@@ -2591,6 +2592,8 @@ name = "tela-target-android"
 version = "0.1.0"
 dependencies = [
  "jni",
+ "libc",
+ "ndk-sys",
  "pollster",
  "tela-app-abi",
  "tela-contract",
@@ -2606,6 +2609,9 @@ dependencies = [
 name = "tela-target-ios"
 version = "0.1.0"
 dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "pollster",
  "raw-window-handle",
  "tela-contract",
@@ -2621,6 +2627,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "pollster",
  "raw-window-handle",
  "tela-app-abi",

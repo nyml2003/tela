@@ -399,6 +399,10 @@ impl<T> ComponentState<T> {
         self.value.borrow()
     }
 
+    pub(crate) fn update<R>(&self, update: impl FnOnce(&mut T) -> R) -> R {
+        update(&mut self.value.borrow_mut())
+    }
+
     /// 读取状态并执行只读投影。
     #[cfg(test)]
     pub fn with<R>(&self, project: impl FnOnce(&T) -> R) -> R {

@@ -27,6 +27,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSView",
     "NSWindow",
     "objc2-core-foundation",
+    "objc2-quartz-core",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -34,9 +35,14 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSGeometry",
     "NSNotification",
     "NSObject",
+    "NSRunLoop",
     "NSString",
     "NSTimeZone",
     "NSTimer",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CADisplayLink",
 ] }
 pollster = "0.4"
 raw-window-handle = "0.6"

@@ -247,6 +247,14 @@ impl ViewStateStore {
             .and_then(|session| session.capture_key.as_ref())
     }
 
+    /// 当前任一尚未结束的鼠标按压所命中的稳定 key。
+    pub fn pressed_mouse_key(&self) -> Option<&SemanticKey> {
+        self.pointers
+            .values()
+            .find(|session| session.kind == PointerKind::Mouse)
+            .and_then(|session| session.target_key.as_ref())
+    }
+
     /// 新树构建后清除已卸载节点关联的指针序列与捕获。
     ///
     /// 释放由 Kernel 自动完成，不会把旧帧 `NodeId` 泄漏给新树。

@@ -16,4 +16,4 @@ pub use error::BundleError;
 pub use manifest::{BundleEntry, BundleManifest, DevelopmentManifest, sha256_hex};
 
 /// Archive format version understood by this crate.
-pub const BUNDLE_FORMAT_VERSION: u32 = 1;
+pub const BUNDLE_FORMAT_VERSION: u32 = 2;

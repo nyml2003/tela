@@ -11,6 +11,10 @@ pub struct MobileAppStatus {
     pub input_focused: bool,
     /// The full controlled search value.
     pub input_value: String,
+    /// 是否需要平台显示链继续推进动画。
+    pub animation_active: bool,
+    /// 最早下一动画唤醒时刻。
+    pub next_deadline_ms: Option<u64>,
 }
 
 /// A concrete mobile application session for a statically linked target host.
@@ -92,11 +96,18 @@ impl MobileApp {
         (self.app.frame(), self.app.active_frame_token())
     }
 
+    /// 注入平台显示链的单调毫秒时间戳。
+    pub fn animation_tick(&mut self, timestamp_ms: u64) -> bool {
+        self.app.animation_tick(timestamp_ms)
+    }
+
     /// Returns the state needed by a native controlled text channel.
     pub fn status(&self) -> MobileAppStatus {
         MobileAppStatus {
             input_focused: self.app.input_focused(),
             input_value: self.app.input_value(),
+            animation_active: self.app.animation_schedule().active,
+            next_deadline_ms: self.app.animation_schedule().next_deadline_ms,
         }
     }
 }

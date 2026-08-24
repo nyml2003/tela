@@ -65,7 +65,7 @@ Rust 静态库放到 `products/ios/build/rust/`，再以 `CODE_SIGNING_ALLOWED=N
 
 | 命令 | 做什么 | 对应旧方式 |
 |---|---|---|
-| `ops check` | 四道验证门：fmt / clippy / test / **依赖方向检查**（TS 版，cargo metadata 真实依赖树，替代 bash 正则） | flake `check` + check-architecture.sh |
+| `ops check` | 五道验证门：fmt / clippy / test / **WGPU 离屏 golden** / **依赖方向检查**（TS 版，cargo metadata 真实依赖树） | flake `check` + render-wgpu shell + cargo metadata |
 | `ops build <core\|webview\|frontend\|bundle [desktop\|mobile]\|android\|ios\|win32\|macos> [--release]` | 每次显式选择产品。`core` 只检查 Kernel + foundation；`bundle` 构建独立 desktop/mobile release Guest；`android` 先校验 mobile bundle，再构建 `arm64-v8a` Vulkan GameActivity APK；`ios` 静态链接移动应用并构建无签名 iPhone App；`webview`/`win32`/`macos` 保持各自 Target 壳职责 | 手工多步 |
 | `ops verify [bundle [desktop\|mobile]\|gpu] [--build]` | 默认 desktop `bundle`：验证 `.tela` 的 archive/ABI/guest 首帧；可显式验证 mobile；`gpu`：服务原生 JS WebGPU 回读诊断页，不经过 tela renderer | 外部 smoke 脚本 |
 | `ops serve [port]` | 开发静态服务器（默认 8000，端口占用自动递增，MIME/防穿越同旧脚本） | serve-demo.mjs |

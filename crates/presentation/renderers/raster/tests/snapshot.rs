@@ -28,6 +28,7 @@ fn cmd(geometry: Rect, clip: Option<tela_contract::ClipRect>, payload: DrawPaylo
     DrawCommand {
         geometry,
         clip,
+        opacity: 1.0,
         payload,
     }
 }
@@ -160,12 +161,12 @@ fn complex_frame() -> UiFrame {
                 },
                 None,
                 DrawPayload::RoundedRect {
-                    fill: Some(Color {
+                    fill: Some(Fill::Solid(Color {
                         r: 0.2,
                         g: 0.3,
                         b: 0.9,
                         a: 1.0,
-                    }),
+                    })),
                     border,
                     radius: BorderRadius::all(8.0),
                 },
@@ -537,7 +538,7 @@ fn rounded_rect_cuts_only_its_outer_corners() {
             },
             None,
             DrawPayload::RoundedRect {
-                fill: Some(Color::BLUE),
+                fill: Some(Fill::Solid(Color::BLUE)),
                 border: None,
                 radius: BorderRadius::all(5.0),
             },
@@ -668,6 +669,7 @@ fn text_renders_full_glyphs_at_em_scale() {
                 h: 16.8,
             },
             clip: None,
+            opacity: 1.0,
             payload: DrawPayload::Text {
                 text,
                 baseline_y: 16.0,
@@ -722,6 +724,7 @@ fn space_character_does_not_render_block() {
                 h: 20.0,
             },
             clip: None,
+            opacity: 1.0,
             payload: DrawPayload::Text {
                 text: TextContent {
                     text: "虚拟项 #100".to_string(),
@@ -760,4 +763,36 @@ fn space_character_does_not_render_block() {
         block_like < 30,
         "空格不应渲染成灰块，实际灰块像素 {block_like}"
     );
+}
+
+#[test]
+fn per_node_opacity_composites_the_complete_command() {
+    let frame = UiFrame {
+        viewport: Viewport {
+            width: 4.0,
+            height: 4.0,
+        },
+        commands: vec![DrawCommand {
+            geometry: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 4.0,
+                h: 4.0,
+            },
+            clip: None,
+            opacity: 0.5,
+            payload: DrawPayload::Rect {
+                fill: Some(Color::rgba(1.0, 0.0, 0.0, 1.0)),
+                border: None,
+            },
+        }],
+        hit_regions: vec![],
+        scroll_bounds: vec![],
+    };
+    let bitmap = render_frame(&frame, &cfg());
+    let pixel = bitmap.pixel(2, 2).expect("center pixel");
+    assert_eq!(pixel[0], 255);
+    assert!((126..=128).contains(&pixel[1]));
+    assert!((126..=128).contains(&pixel[2]));
+    assert_eq!(pixel[3], 255);
 }

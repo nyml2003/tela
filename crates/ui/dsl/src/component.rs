@@ -6,13 +6,14 @@
 use tela_contract::{
     BorderRadius, Color, ContentConcern, CrossAlign, Fill, Insets, InteractConcern,
     KeyboardInputSpec, KeymapScopeId, LayoutConcern, NodeKind, Overflow, OverlaySpec, PixelOffset,
-    ShortcutScopeSpec, Size, StackAlign, TextContent, TextInputSpec, TextStyleRef, UiNode,
-    UpdateMode, VisualConcern,
+    ShadowSpec, ShortcutScopeSpec, Size, StackAlign, TextContent, TextInputSpec, TextStyleRef,
+    UiNode, UpdateMode, VisualConcern,
 };
 
 use crate::{
     Body, Children, ComponentIdentity, ComponentOutcome, ComponentRenderContext,
-    ComponentSetupContext, ViewBuild, ViewBuildError, ViewChild, ViewOutput, ViewResult, ViewSite,
+    ComponentSetupContext, TransitionExt, TransitionSpec, ViewBuild, ViewBuildError, ViewChild,
+    ViewOutput, ViewResult, ViewSite,
 };
 
 /// 声明式组件的统一 setup/render/handler 生命周期契约。
@@ -127,6 +128,15 @@ macro_rules! apply_primitive_fields {
         if let Some(value) = $props.border_radii {
             __visual.border_radius = value;
         }
+        if let Some(value) = $props.shadow {
+            __visual.shadow = Some(value);
+        }
+        if let Some(value) = $props.opacity {
+            __visual.opacity = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = $props.visual_offset {
+            __visual.visual_offset = value;
+        }
         if __visual != VisualConcern::default() {
             $node.visual = Some(__visual);
         }
@@ -199,6 +209,10 @@ macro_rules! primitive_component {
             pub border_color: Option<Color>,
             pub border_radius: Option<f32>,
             pub border_radii: Option<BorderRadius>,
+            pub shadow: Option<ShadowSpec>,
+            pub opacity: Option<f32>,
+            pub visual_offset: Option<PixelOffset>,
+            pub transition: Option<TransitionSpec>,
             pub update_mode: Option<UpdateMode>,
             pub clickable: Option<bool>,
             pub hoverable: Option<bool>,
@@ -224,8 +238,7 @@ macro_rules! primitive_component {
                 children: Children<'a, A>,
             ) -> ViewResult<ViewOutput<A>> {
                 let site = context.site();
-                let build = context.build();
-                let children = children.build(build)?;
+                let children = children.build(context.build())?;
                 if $check_single_child && children.child_count() != 1 {
                     return Err(ViewBuildError::ExpectedSingleRoot {
                         actual: children.child_count(),
@@ -234,6 +247,18 @@ macro_rules! primitive_component {
                 }
                 let mut node = UiNode::new($kind);
                 apply_primitive_fields!(node, props);
+                if let Some(transition) = props.transition {
+                    let target = node.visual.clone().unwrap_or_default();
+                    node.visual = Some(
+                        context
+                            .transition(
+                                "visual",
+                                target.transition(transition.duration_ms, transition.easing),
+                            )
+                            .value,
+                    );
+                }
+                let build = context.build();
                 let view_node = build.container(node, children)?;
                 let view_node = apply_key(view_node, props.key);
                 finish_node(build, view_node, site)
@@ -350,6 +375,10 @@ macro_rules! text_component {
             pub border_color: Option<Color>,
             pub border_radius: Option<f32>,
             pub border_radii: Option<BorderRadius>,
+            pub shadow: Option<ShadowSpec>,
+            pub opacity: Option<f32>,
+            pub visual_offset: Option<PixelOffset>,
+            pub transition: Option<TransitionSpec>,
             pub update_mode: Option<UpdateMode>,
             pub clickable: Option<bool>,
             pub hoverable: Option<bool>,
@@ -380,8 +409,7 @@ macro_rules! text_component {
                 children: Children<'a, A>,
             ) -> ViewResult<ViewOutput<A>> {
                 let site = context.site();
-                let build = context.build();
-                let _children = children.build(build)?;
+                let _children = children.build(context.build())?;
                 let mut node =
                     UiNode::new(NodeKind::Text).with_content(ContentConcern::Text(TextContent {
                         text: props.value.unwrap_or_default(),
@@ -397,6 +425,18 @@ macro_rules! text_component {
                         color: props.color.unwrap_or(Color::BLACK),
                     }));
                 apply_primitive_fields!(node, props);
+                if let Some(transition) = props.transition {
+                    let target = node.visual.clone().unwrap_or_default();
+                    node.visual = Some(
+                        context
+                            .transition(
+                                "visual",
+                                target.transition(transition.duration_ms, transition.easing),
+                            )
+                            .value,
+                    );
+                }
+                let build = context.build();
                 let view_node = build.container(node, Body::new(Vec::new(), Vec::new()))?;
                 let view_node = apply_key(view_node, props.key);
                 finish_node(build, view_node, site)
@@ -426,6 +466,10 @@ pub struct Image {
     pub border_color: Option<Color>,
     pub border_radius: Option<f32>,
     pub border_radii: Option<BorderRadius>,
+    pub shadow: Option<ShadowSpec>,
+    pub opacity: Option<f32>,
+    pub visual_offset: Option<PixelOffset>,
+    pub transition: Option<TransitionSpec>,
     pub update_mode: Option<UpdateMode>,
     pub clickable: Option<bool>,
     pub hoverable: Option<bool>,
@@ -452,14 +496,25 @@ impl DslComponent for Image {
         children: Children<'a, A>,
     ) -> ViewResult<ViewOutput<A>> {
         let site = context.site();
-        let build = context.build();
-        let _children = children.build(build)?;
+        let _children = children.build(context.build())?;
         let mut node = UiNode::new(NodeKind::Image).with_content(ContentConcern::Image(
             tela_contract::ImageContent {
                 texture: tela_contract::TextureRef(props.texture.unwrap_or_default()),
             },
         ));
         apply_primitive_fields!(node, props);
+        if let Some(transition) = props.transition {
+            let target = node.visual.clone().unwrap_or_default();
+            node.visual = Some(
+                context
+                    .transition(
+                        "visual",
+                        target.transition(transition.duration_ms, transition.easing),
+                    )
+                    .value,
+            );
+        }
+        let build = context.build();
         let view_node = build.container(node, Body::new(Vec::new(), Vec::new()))?;
         let view_node = apply_key(view_node, props.key);
         finish_node(build, view_node, site)

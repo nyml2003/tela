@@ -1,18 +1,39 @@
 //! 共享 `UiFrame` 到 GPU 图元批次的 CPU 侧展开。
 
 use bytemuck::cast_slice;
-use tela_contract::{BorderRadius, BorderStroke, Color, Rect, TextureRef};
+use tela_contract::{
+    BorderRadius, BorderStroke, Color, Gradient, GradientKind, Rect, ShadowSpec, TextureRef,
+};
 use wgpu::util::DeviceExt;
 
-use crate::vertex::{VertexImage, VertexRounded, VertexSolid};
+use crate::vertex::{VertexGradient, VertexImage, VertexRounded, VertexShadow, VertexSolid};
 
 pub(crate) type Scissor = (u32, u32, u32, u32);
+
+#[derive(Clone, Copy)]
+pub(crate) enum ShapeKind {
+    RoundedRect,
+    Ellipse,
+    Circle,
+}
+
+impl ShapeKind {
+    const fn shader_value(self) -> f32 {
+        match self {
+            Self::RoundedRect => 0.0,
+            Self::Ellipse => 1.0,
+            Self::Circle => 2.0,
+        }
+    }
+}
 
 /// 一个保持绘制顺序与 scissor 的 GPU 图元批次。
 pub(crate) enum Batch {
     Solid(SolidBatch),
     Rounded(RoundedBatch),
     Image(ImageBatch),
+    Gradient(GradientBatch),
+    Shadow(ShadowBatch),
 }
 
 impl Batch {
@@ -21,6 +42,8 @@ impl Batch {
             Self::Solid(batch) => batch.indices.is_empty(),
             Self::Rounded(batch) => batch.indices.is_empty(),
             Self::Image(batch) => batch.indices.is_empty(),
+            Self::Gradient(batch) => batch.indices.is_empty(),
+            Self::Shadow(batch) => batch.indices.is_empty(),
         }
     }
 
@@ -29,6 +52,8 @@ impl Batch {
             Self::Solid(batch) => batch.vertices.len(),
             Self::Rounded(batch) => batch.vertices.len(),
             Self::Image(batch) => batch.vertices.len(),
+            Self::Gradient(batch) => batch.vertices.len(),
+            Self::Shadow(batch) => batch.vertices.len(),
         }
     }
 
@@ -37,6 +62,8 @@ impl Batch {
             Self::Solid(batch) => batch.indices.len(),
             Self::Rounded(batch) => batch.indices.len(),
             Self::Image(batch) => batch.indices.len(),
+            Self::Gradient(batch) => batch.indices.len(),
+            Self::Shadow(batch) => batch.indices.len(),
         }
     }
 
@@ -85,6 +112,35 @@ impl Batch {
                 }),
                 index_count: batch.indices.len() as u32,
             },
+            Self::Gradient(batch) => PreparedBatch::Gradient {
+                scissor: batch.scissor,
+                texture: batch.texture.clone(),
+                vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tela gradient vertices"),
+                    contents: cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tela gradient indices"),
+                    contents: cast_slice(&batch.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+                index_count: batch.indices.len() as u32,
+            },
+            Self::Shadow(batch) => PreparedBatch::Shadow {
+                scissor: batch.scissor,
+                vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tela shadow vertices"),
+                    contents: cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+                index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tela shadow indices"),
+                    contents: cast_slice(&batch.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
+                index_count: batch.indices.len() as u32,
+            },
         }
     }
 
@@ -112,6 +168,19 @@ impl Batch {
                 batch.indices,
                 batch.vertices.len() * std::mem::size_of::<VertexImage>(),
             ),
+            Self::Gradient(batch) => format!(
+                "batch=Gradient texture={:?} scissor={:?} vertices={} indices={}",
+                batch.texture,
+                batch.scissor,
+                batch.vertices.len(),
+                batch.indices.len(),
+            ),
+            Self::Shadow(batch) => format!(
+                "batch=Shadow scissor={:?} vertices={} indices={}",
+                batch.scissor,
+                batch.vertices.len(),
+                batch.indices.len(),
+            ),
         }
     }
 }
@@ -133,6 +202,19 @@ pub(crate) enum PreparedBatch {
     Image {
         scissor: Scissor,
         texture: TextureRef,
+        vertex_buffer: wgpu::Buffer,
+        index_buffer: wgpu::Buffer,
+        index_count: u32,
+    },
+    Gradient {
+        scissor: Scissor,
+        texture: TextureRef,
+        vertex_buffer: wgpu::Buffer,
+        index_buffer: wgpu::Buffer,
+        index_count: u32,
+    },
+    Shadow {
+        scissor: Scissor,
         vertex_buffer: wgpu::Buffer,
         index_buffer: wgpu::Buffer,
         index_count: u32,
@@ -250,28 +332,57 @@ impl ImageBatch {
         }
     }
 
-    pub(crate) fn push_rect(&mut self, rect: Rect, viewport: &Rect) {
+    pub(crate) fn push_rect(
+        &mut self,
+        rect: Rect,
+        radius: BorderRadius,
+        opacity: f32,
+        viewport: &Rect,
+    ) {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return;
         }
         let base = self.vertices.len() as u16;
         let ndc = to_ndc(rect.x, rect.y, rect.w, rect.h, viewport);
+        let corners = [[0.0, 0.0], [rect.w, 0.0], [rect.w, rect.h], [0.0, rect.h]];
+        let radii = [
+            radius.top_left,
+            radius.top_right,
+            radius.bottom_right,
+            radius.bottom_left,
+        ];
         self.vertices.extend_from_slice(&[
             VertexImage {
                 pos: [ndc[0], ndc[1]],
                 uv: [0.0, 0.0],
+                local: corners[0],
+                size: [rect.w, rect.h],
+                radius: radii,
+                opacity,
             },
             VertexImage {
                 pos: [ndc[2], ndc[3]],
                 uv: [1.0, 0.0],
+                local: corners[1],
+                size: [rect.w, rect.h],
+                radius: radii,
+                opacity,
             },
             VertexImage {
                 pos: [ndc[4], ndc[5]],
                 uv: [1.0, 1.0],
+                local: corners[2],
+                size: [rect.w, rect.h],
+                radius: radii,
+                opacity,
             },
             VertexImage {
                 pos: [ndc[6], ndc[7]],
                 uv: [0.0, 1.0],
+                local: corners[3],
+                size: [rect.w, rect.h],
+                radius: radii,
+                opacity,
             },
         ]);
         self.indices
@@ -294,6 +405,7 @@ impl RoundedBatch {
         radius: BorderRadius,
         fill: Option<Color>,
         border: Option<BorderStroke>,
+        opacity: f32,
         viewport: &Rect,
     ) {
         let Some(fill_color) = fill.or(border.map(|_| Color::TRANSPARENT)) else {
@@ -303,25 +415,6 @@ impl RoundedBatch {
         let border_width = border
             .map(|border| border.width.max(1.0).min(rect.w * 0.5).min(rect.h * 0.5))
             .unwrap_or(0.0);
-        self.push_rounded_rect(
-            rect,
-            radius,
-            fill_color,
-            border_color,
-            border_width,
-            viewport,
-        );
-    }
-
-    fn push_rounded_rect(
-        &mut self,
-        rect: Rect,
-        radius: BorderRadius,
-        fill_color: Color,
-        border_color: Color,
-        border_width: f32,
-        viewport: &Rect,
-    ) {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return;
         }
@@ -350,6 +443,7 @@ impl RoundedBatch {
                 fill_color: fill_rgba,
                 border_color: border_rgba,
                 border_width,
+                opacity,
             },
             VertexRounded {
                 pos: [ndc[2], ndc[3]],
@@ -359,6 +453,7 @@ impl RoundedBatch {
                 fill_color: fill_rgba,
                 border_color: border_rgba,
                 border_width,
+                opacity,
             },
             VertexRounded {
                 pos: [ndc[4], ndc[5]],
@@ -368,6 +463,7 @@ impl RoundedBatch {
                 fill_color: fill_rgba,
                 border_color: border_rgba,
                 border_width,
+                opacity,
             },
             VertexRounded {
                 pos: [ndc[6], ndc[7]],
@@ -377,8 +473,150 @@ impl RoundedBatch {
                 fill_color: fill_rgba,
                 border_color: border_rgba,
                 border_width,
+                opacity,
             },
         ]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+pub(crate) struct GradientBatch {
+    scissor: Scissor,
+    texture: TextureRef,
+    vertices: Vec<VertexGradient>,
+    indices: Vec<u16>,
+}
+
+impl GradientBatch {
+    fn new(scissor: Scissor, texture: TextureRef) -> Self {
+        Self {
+            scissor,
+            texture,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_shape(
+        &mut self,
+        rect: Rect,
+        radius: BorderRadius,
+        gradient: &Gradient,
+        shape: ShapeKind,
+        opacity: f32,
+        viewport: &Rect,
+    ) {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let (gradient_param, gradient_radius, gradient_kind) = match gradient.kind {
+            GradientKind::Linear { start, end } => (
+                [
+                    start.x - rect.x,
+                    start.y - rect.y,
+                    end.x - rect.x,
+                    end.y - rect.y,
+                ],
+                0.0,
+                0.0,
+            ),
+            GradientKind::Radial { center, radius } => (
+                [center.x - rect.x, center.y - rect.y, 0.0, 0.0],
+                radius.max(f32::EPSILON),
+                1.0,
+            ),
+        };
+        let base = self.vertices.len() as u16;
+        let corners = [[0.0, 0.0], [rect.w, 0.0], [rect.w, rect.h], [0.0, rect.h]];
+        let ndc = to_ndc(rect.x, rect.y, rect.w, rect.h, viewport);
+        let radii = [
+            radius.top_left,
+            radius.top_right,
+            radius.bottom_right,
+            radius.bottom_left,
+        ];
+        for (index, local) in corners.into_iter().enumerate() {
+            self.vertices.push(VertexGradient {
+                pos: [ndc[index * 2], ndc[index * 2 + 1]],
+                local,
+                size: [rect.w, rect.h],
+                radius: radii,
+                gradient: gradient_param,
+                gradient_radius,
+                gradient_kind,
+                shape_kind: shape.shader_value(),
+                opacity,
+            });
+        }
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+pub(crate) struct ShadowBatch {
+    scissor: Scissor,
+    vertices: Vec<VertexShadow>,
+    indices: Vec<u16>,
+}
+
+impl ShadowBatch {
+    fn new(scissor: Scissor) -> Self {
+        Self {
+            scissor,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_shape(
+        &mut self,
+        rect: Rect,
+        radius: BorderRadius,
+        shape: ShapeKind,
+        spec: ShadowSpec,
+        opacity: f32,
+        viewport: &Rect,
+    ) {
+        if rect.w <= 0.0 || rect.h <= 0.0 || spec.color.a <= 0.0 {
+            return;
+        }
+        let blur = spec.blur_radius.max(0.5);
+        let pad = if spec.inset { 0.0 } else { blur * 2.0 + 1.0 };
+        let draw_rect = Rect {
+            x: rect.x + spec.offset.x - pad,
+            y: rect.y + spec.offset.y - pad,
+            w: rect.w + pad * 2.0,
+            h: rect.h + pad * 2.0,
+        };
+        let local_corners = [
+            [-pad, -pad],
+            [rect.w + pad, -pad],
+            [rect.w + pad, rect.h + pad],
+            [-pad, rect.h + pad],
+        ];
+        let ndc = to_ndc(draw_rect.x, draw_rect.y, draw_rect.w, draw_rect.h, viewport);
+        let radii = [
+            radius.top_left,
+            radius.top_right,
+            radius.bottom_right,
+            radius.bottom_left,
+        ];
+        let rgba = [spec.color.r, spec.color.g, spec.color.b, spec.color.a];
+        let base = self.vertices.len() as u16;
+        for (index, local) in local_corners.into_iter().enumerate() {
+            self.vertices.push(VertexShadow {
+                pos: [ndc[index * 2], ndc[index * 2 + 1]],
+                local,
+                target_size: [rect.w, rect.h],
+                radius: radii,
+                color: rgba,
+                blur_radius: blur,
+                inset: f32::from(spec.inset),
+                shape_kind: shape.shader_value(),
+                opacity,
+            });
+        }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -391,7 +629,9 @@ pub(crate) fn solid_batch_for(batches: &mut Vec<Batch>, scissor: Scissor) -> &mu
     }
     match batches.last_mut().expect("刚创建的 Solid batch 必须存在") {
         Batch::Solid(batch) => batch,
-        Batch::Rounded(_) | Batch::Image(_) => unreachable!("Solid batch 类型必须匹配"),
+        Batch::Rounded(_) | Batch::Image(_) | Batch::Gradient(_) | Batch::Shadow(_) => {
+            unreachable!("Solid batch 类型必须匹配")
+        }
     }
 }
 
@@ -402,7 +642,9 @@ pub(crate) fn rounded_batch_for(batches: &mut Vec<Batch>, scissor: Scissor) -> &
     }
     match batches.last_mut().expect("刚创建的 Rounded batch 必须存在") {
         Batch::Rounded(batch) => batch,
-        Batch::Solid(_) | Batch::Image(_) => unreachable!("Rounded batch 类型必须匹配"),
+        Batch::Solid(_) | Batch::Image(_) | Batch::Gradient(_) | Batch::Shadow(_) => {
+            unreachable!("Rounded batch 类型必须匹配")
+        }
     }
 }
 
@@ -417,7 +659,38 @@ pub(crate) fn image_batch_for(
     }
     match batches.last_mut().expect("刚创建的 Image batch 必须存在") {
         Batch::Image(batch) => batch,
-        Batch::Solid(_) | Batch::Rounded(_) => unreachable!("Image batch 类型必须匹配"),
+        Batch::Solid(_) | Batch::Rounded(_) | Batch::Gradient(_) | Batch::Shadow(_) => {
+            unreachable!("Image batch 类型必须匹配")
+        }
+    }
+}
+
+pub(crate) fn gradient_batch_for(
+    batches: &mut Vec<Batch>,
+    scissor: Scissor,
+    texture: TextureRef,
+) -> &mut GradientBatch {
+    let reuse = matches!(batches.last(), Some(Batch::Gradient(batch)) if batch.scissor == scissor && batch.texture == texture);
+    if !reuse {
+        batches.push(Batch::Gradient(GradientBatch::new(scissor, texture)));
+    }
+    match batches
+        .last_mut()
+        .expect("刚创建的 Gradient batch 必须存在")
+    {
+        Batch::Gradient(batch) => batch,
+        _ => unreachable!("Gradient batch 类型必须匹配"),
+    }
+}
+
+pub(crate) fn shadow_batch_for(batches: &mut Vec<Batch>, scissor: Scissor) -> &mut ShadowBatch {
+    let reuse = matches!(batches.last(), Some(Batch::Shadow(batch)) if batch.scissor == scissor);
+    if !reuse {
+        batches.push(Batch::Shadow(ShadowBatch::new(scissor)));
+    }
+    match batches.last_mut().expect("刚创建的 Shadow batch 必须存在") {
+        Batch::Shadow(batch) => batch,
+        _ => unreachable!("Shadow batch 类型必须匹配"),
     }
 }
 
@@ -486,6 +759,7 @@ mod tests {
                 color: Color::BLACK,
                 width: 4.0,
             }),
+            1.0,
             &viewport,
         );
         assert_eq!(batch.vertices.len(), 4);
@@ -517,6 +791,7 @@ mod tests {
                 color: Color::BLUE,
                 width: 2.0,
             }),
+            1.0,
             &viewport,
         );
 
@@ -543,6 +818,8 @@ mod tests {
                 w: 60.0,
                 h: 40.0,
             },
+            BorderRadius::default(),
+            1.0,
             &viewport,
         );
         assert_eq!(batch.vertices.len(), 4);

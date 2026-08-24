@@ -9,7 +9,7 @@ use crate::FrameCodecError;
 
 const EVENT_MAGIC: [u8; 4] = *b"TLEV";
 const STATUS_MAGIC: [u8; 4] = *b"TLSV";
-const PACKET_VERSION: u16 = 3;
+const PACKET_VERSION: u16 = 4;
 const HEADER_LEN: usize = EVENT_MAGIC.len() + std::mem::size_of::<u16>();
 
 /// 原始指针设备类型在 Application ABI 中的稳定编码。
@@ -197,6 +197,14 @@ pub enum AppFrameInput {
 /// actually presented.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AppEvent {
+    /// Host vsync 或定时器提供的单调时钟采样。
+    ///
+    /// Host 只负责调度，不得执行 easing 或属性插值；相同时间戳序列必须在 guest 中产生
+    /// 相同动画帧。
+    Tick {
+        /// Host 单调时钟的毫秒刻度。
+        timestamp_ms: u64,
+    },
     /// The host content area changed in logical pixels.
     Viewport {
         /// Logical content width.
@@ -246,6 +254,10 @@ pub struct AppStatus {
     /// Current controlled input value. It lets a native host feed ordinary text input without
     /// owning business state.
     pub input_value: String,
+    /// guest 是否仍有需要后续 Tick 推进的动画。
+    pub animation_active: bool,
+    /// guest 希望被再次唤醒的最早单调毫秒时刻；`None` 表示无定时工作。
+    pub next_deadline_ms: Option<u64>,
 }
 
 /// Encodes a host-to-guest event with a versioned packet header.
@@ -326,6 +338,8 @@ mod tests {
             cursor: CursorKind::Text,
             input_focused: true,
             input_value: "文件".to_owned(),
+            animation_active: true,
+            next_deadline_ms: Some(144),
         };
         assert_eq!(
             decode_status(&encode_status(&status).expect("encode")).expect("decode"),
@@ -336,6 +350,7 @@ mod tests {
     #[test]
     fn extended_input_events_round_trip() {
         for event in [
+            AppEvent::Tick { timestamp_ms: 42 },
             AppEvent::FrameInput {
                 source_frame_token: AppFrameToken::new(1).expect("non-zero frame token"),
                 input: AppFrameInput::InputCompositionStart,

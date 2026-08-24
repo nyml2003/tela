@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use crate::{
-    Children, DslComponent, ViewBuild, ViewContext, ViewOutput, ViewResult, ViewSite,
+    AnimationController, AnimationSample, Children, DslComponent, Interpolate, TransitionTarget,
+    ViewBuild, ViewContext, ViewOutput, ViewResult, ViewSite, owner::ComponentIdentity,
     owner::ComponentState,
 };
 
@@ -34,11 +35,20 @@ impl ComponentSetupContext {
 pub struct ComponentRenderContext<'a, A> {
     build: &'a mut ViewBuild<A>,
     site: ViewSite,
+    identity: ComponentIdentity,
 }
 
 impl<'a, A> ComponentRenderContext<'a, A> {
-    pub(crate) fn new(build: &'a mut ViewBuild<A>, site: ViewSite) -> Self {
-        Self { build, site }
+    pub(crate) fn new(
+        build: &'a mut ViewBuild<A>,
+        site: ViewSite,
+        identity: ComponentIdentity,
+    ) -> Self {
+        Self {
+            build,
+            site,
+            identity,
+        }
     }
 
     /// 当前组件调用点。
@@ -49,6 +59,36 @@ impl<'a, A> ComponentRenderContext<'a, A> {
     /// 访问底层 ViewBuild。组件只能在 render 中用它构造候选节点。
     pub fn build(&mut self) -> &mut ViewBuild<A> {
         self.build
+    }
+
+    /// 解析组件私有、可跨帧持久的隐式 transition。
+    ///
+    /// `key` 只需在当前组件内稳定且唯一。控制器状态位于候选 owner 帧；候选失败不会
+    /// 污染 active 状态。返回值只影响作者选择写入的视觉槽位，不会改变命中盒。
+    pub fn transition<T>(
+        &mut self,
+        key: impl Into<String>,
+        target: TransitionTarget<T>,
+    ) -> AnimationSample<T>
+    where
+        T: Interpolate + PartialEq + Clone + 'static,
+    {
+        let transition_identity = self.build.component_identity(
+            std::any::type_name::<AnimationController<T>>(),
+            self.site,
+            Some(format!(
+                "{}:transition:{}",
+                self.identity.path(),
+                key.into()
+            )),
+        );
+        let state = self.build.local_state_for(transition_identity, || {
+            AnimationController::new(target.value().clone())
+        });
+        let clock = self.build.animation_clock();
+        let sample = state.update(|controller| controller.resolve(clock, target));
+        self.build.request_animation(sample.schedule);
+        sample
     }
 }
 
@@ -80,7 +120,7 @@ where
         C::setup(&ComponentSetupContext::new(setup_scope), &props)
     });
     let output = build.with_component_identity(&identity, |build| {
-        let mut context = ComponentRenderContext::new(build, site);
+        let mut context = ComponentRenderContext::new(build, site, identity.clone());
         C::render(&mut context, props, &state.get(), children)
     })?;
     // A component may intentionally return an opaque or kit-provided node. The owner frame is

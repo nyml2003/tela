@@ -11,8 +11,8 @@ use tela_core::{IdentityAllocator, UiTree};
 
 use crate::view::ResolvedPlans;
 use crate::{
-    ActionFrame, ActionRegistry, ComponentDispatch, ComponentInput, ComponentRuntime,
-    FramedInteraction, InteractionIndex, ViewBuild, ViewBuildError, ViewOutput,
+    ActionFrame, ActionRegistry, AnimationSchedule, ComponentDispatch, ComponentInput,
+    ComponentRuntime, FramedInteraction, InteractionIndex, ViewBuild, ViewBuildError, ViewOutput,
     owner::{
         ComponentActionRoute, ComponentEffectScope, ComponentLifecycleEvent, ComponentOwnerFrame,
         ComponentOwnerRuntime, ComponentRouteOutcome, OwnerFrameToken,
@@ -74,12 +74,18 @@ pub struct PreparedFrame<A> {
     owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
     component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
     interaction_index: InteractionIndex,
+    animation_schedule: AnimationSchedule,
 }
 
 impl<A> PreparedFrame<A> {
     /// 读取已完成 Kernel validation、但尚未成为 active 的候选树。
     pub fn tree(&self) -> &UiTree {
         &self.tree
+    }
+
+    /// 候选树中所有组件请求的动画调度汇总。
+    pub fn animation_schedule(&self) -> AnimationSchedule {
+        self.animation_schedule
     }
 
     /// 用 Host 提供的纯 resolve 操作将候选树转为待发布帧。
@@ -113,6 +119,11 @@ impl<A> ResolvedFrame<A> {
     pub fn frame(&self) -> &UiFrame {
         &self.frame
     }
+
+    /// 候选帧的动画调度请求；只有 present 成功后才应成为宿主 active 调度状态。
+    pub fn animation_schedule(&self) -> AnimationSchedule {
+        self.prepared.animation_schedule
+    }
 }
 
 /// 当前已发布的、彼此一致的 Kernel tree、绘制帧和 DSL 动作快照。
@@ -123,6 +134,7 @@ pub struct ActiveFrame<A> {
     actions: ActionFrame<A>,
     component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
     interaction_index: InteractionIndex,
+    animation_schedule: AnimationSchedule,
 }
 
 impl<A: 'static> ActiveFrame<A> {
@@ -149,6 +161,11 @@ impl<A: 'static> ActiveFrame<A> {
     /// 当前帧的逻辑父链和组件路由索引。
     pub fn interaction_index(&self) -> &InteractionIndex {
         &self.interaction_index
+    }
+
+    /// 该成功帧聚合出的后续动画调度请求。
+    pub fn animation_schedule(&self) -> AnimationSchedule {
+        self.animation_schedule
     }
 }
 
@@ -200,7 +217,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
     ) -> Result<PreparedFrame<A>, FramePrepareError> {
         let root = root.into();
         let owner_frame = root.owner_frame.clone();
-        let (root, plans) = root.into_parts();
+        let (root, plans, animation_schedule) = root.into_parts();
         let mut allocator = self.allocator.clone();
         let tree = match UiTree::new_with_allocator(root, &mut allocator) {
             Ok(tree) => tree,
@@ -242,6 +259,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             owner_frame,
             component_actions,
             interaction_index,
+            animation_schedule,
         })
     }
 
@@ -284,6 +302,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             owner_frame: prepared_owner,
             component_actions,
             interaction_index,
+            animation_schedule,
         } = prepared;
         let token = FrameToken(
             self.next_token
@@ -315,6 +334,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             actions,
             component_actions,
             interaction_index,
+            animation_schedule,
         });
         self.active
             .as_ref()
