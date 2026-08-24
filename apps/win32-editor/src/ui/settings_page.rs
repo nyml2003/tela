@@ -52,12 +52,12 @@ pub fn font_item(
     selected: &TextStyleRef,
     hover_key: &Option<String>,
 ) -> ViewResult<ViewOutput<EditorAction>> {
-    let key = format!("editor.font.{}", font.text_style);
-    let hovered = hover_key.as_deref() == Some(key.as_str());
+    let hovered = hover_key.as_deref().is_some_and(|key| {
+        key.contains("/@for-") && key.rsplit('/').next() == Some(font.text_style)
+    });
     ui!(build {
         <ActionTarget action={EditorAction::SetFont(TextStyleRef::new(font.text_style))}>
             <FontChoice
-                key={key}
                 label={font.display_name}
                 font={TextStyleRef::new(font.text_style)}
                 weight={font.weight}
@@ -72,7 +72,6 @@ pub fn font_item(
 #[derive(DslComponent)]
 #[allow(missing_docs)]
 pub struct FontChoice {
-    pub key: Option<String>,
     pub label: String,
     pub font: TextStyleRef,
     pub weight: u16,
@@ -101,7 +100,6 @@ impl FontChoice {
         };
         ui!(build {
             <Frame
-                key={self.key.clone().unwrap_or_else(|| "editor.font.choice".to_owned())}
                 width={202.0}
                 height={42.0}
                 padding={Insets::all(10.0)}

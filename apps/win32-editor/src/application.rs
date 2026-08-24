@@ -479,6 +479,49 @@ mod tests {
     }
 
     #[test]
+    fn settings_navigation_click_builds_and_presents_the_settings_page() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        let point = point_for_key(&app, "editor.nav.settings");
+
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
+        assert_eq!(app.controller().route.get(), Route::Settings);
+        assert!(
+            app.ensure_frame(),
+            "settings route must produce a candidate frame"
+        );
+        assert!(!app.frame_presented());
+        assert!(
+            app.active()
+                .expect("presented settings frame")
+                .0
+                .keys()
+                .iter()
+                .any(|key| key.0 == "editor.settings"),
+            "settings page root must be present after the navigation click"
+        );
+
+        let medium_key = app
+            .active()
+            .expect("presented settings frame")
+            .0
+            .keys()
+            .iter()
+            .find(|key| key.0.contains("/@for-") && key.0.ends_with("/body-medium"))
+            .expect("medium font choice key")
+            .0
+            .clone();
+        let medium_point = point_for_key(&app, &medium_key);
+        assert!(app.handle_pointer(PointerEvent::mouse_down(medium_point)) > 0);
+        assert!(app.handle_pointer(PointerEvent::mouse_up(medium_point)) > 0);
+        assert_eq!(
+            app.controller().settings.get().font,
+            TextStyleRef::body_medium()
+        );
+    }
+
+    #[test]
     fn icons_page_search_and_category_invalidate_the_projection() {
         let mut app = app();
         assert!(app.dispatch_action(EditorAction::Navigate(Route::Icons)));
