@@ -7,10 +7,10 @@ description = "Tela Win32 target host"
 
 [dependencies]
 tela-app-abi = { path = "../../delivery/app-abi" }
+tela-app-session = { path = "../../delivery/app-session" }
 tela-bridge = { path = "../../delivery/bridge", features = ["host"] }
 tela-contract = { path = "../../kernel/contract" }
 tela-desktop-runtime = { path = "../../delivery/desktop-runtime" }
-tela-target-win32-static = { path = "../win32-static" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 pollster = "0.4"
@@ -21,6 +21,13 @@ wgpu = "30"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Networking_WinInet",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Time",
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",

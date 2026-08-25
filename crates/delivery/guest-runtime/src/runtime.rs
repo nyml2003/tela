@@ -6,7 +6,8 @@ use std::{
 };
 
 use tela_app_abi::{
-    ABI_VERSION, AppEvent, AppStatus, FrameCodecError, decode_frame, decode_status, encode_event,
+    ABI_VERSION, AppDispatchOutcome, AppEvent, AppFrameToken, AppPublication, AppStatus,
+    FrameCodecError, OUTCOME_OK, decode_outcome, decode_publication, encode_event,
 };
 use tela_bridge::{BridgeRequest, decode_request_stream};
 use tela_contract::UiFrame;
@@ -16,7 +17,7 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store, TypedFunc};
 // entrypoints bounded while retaining enough headroom for a complete client frame and resize.
 const INITIALIZE_FUEL: u64 = 50_000_000;
 const DISPATCH_FUEL: u64 = 50_000_000;
-const PUBLICATION_FUEL: u64 = 1_000_000;
+const PUBLICATION_FUEL: u64 = 50_000_000;
 const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 
 /// Compilation and dispatch timings exposed to the platform shell for development diagnostics.
@@ -32,6 +33,10 @@ pub struct GuestRuntimeMetrics {
     pub last_dispatch: Duration,
     /// Fuel consumed by the most recent guest event dispatch.
     pub last_dispatch_fuel_consumed: u64,
+    /// Most recent explicit publication duration, including packet validation.
+    pub last_publish: Duration,
+    /// Fuel consumed by the most recent explicit publication.
+    pub last_publish_fuel_consumed: u64,
 }
 
 /// A guest ABI or Wasmtime runtime failure.
@@ -59,10 +64,11 @@ pub struct GuestRuntime {
     initialize: TypedFunc<(), u32>,
     input_begin: TypedFunc<u32, u32>,
     dispatch: TypedFunc<u32, u32>,
-    frame_ptr: TypedFunc<(), u32>,
-    frame_len: TypedFunc<(), u32>,
-    status_ptr: TypedFunc<(), u32>,
-    status_len: TypedFunc<(), u32>,
+    publish: TypedFunc<(), u32>,
+    publication_ptr: TypedFunc<(), u32>,
+    publication_len: TypedFunc<(), u32>,
+    presented: TypedFunc<(u32, u32), u32>,
+    rejected: TypedFunc<(u32, u32), u32>,
     error_ptr: TypedFunc<(), u32>,
     error_len: TypedFunc<(), u32>,
     // Bridge ABI exports are optional: guests that do not implement them get a transparently
@@ -73,8 +79,9 @@ pub struct GuestRuntime {
     bridge_dispatch: Option<TypedFunc<u32, ()>>,
     // Keep only portable frame bytes here. `UiFrame` can contain a host-only CustomDraw trait
     // object and is intentionally not Send; the native UI thread decodes it after worker handoff.
-    frame_packet: Vec<u8>,
+    publication_packet: Vec<u8>,
     status: AppStatus,
+    pending_publication_token: Option<AppFrameToken>,
     metrics: GuestRuntimeMetrics,
 }
 
@@ -109,10 +116,11 @@ impl GuestRuntime {
         let initialize = export(&instance, &mut store, "tela_app_init")?;
         let input_begin = export(&instance, &mut store, "tela_app_input_begin")?;
         let dispatch = export(&instance, &mut store, "tela_app_dispatch")?;
-        let frame_ptr = export(&instance, &mut store, "tela_app_frame_ptr")?;
-        let frame_len = export(&instance, &mut store, "tela_app_frame_len")?;
-        let status_ptr = export(&instance, &mut store, "tela_app_status_ptr")?;
-        let status_len = export(&instance, &mut store, "tela_app_status_len")?;
+        let publish = export(&instance, &mut store, "tela_app_publish")?;
+        let publication_ptr = export(&instance, &mut store, "tela_app_publication_ptr")?;
+        let publication_len = export(&instance, &mut store, "tela_app_publication_len")?;
+        let presented = export(&instance, &mut store, "tela_app_presented")?;
+        let rejected = export(&instance, &mut store, "tela_app_rejected")?;
         let error_ptr = export(&instance, &mut store, "tela_app_error_ptr")?;
         let error_len = export(&instance, &mut store, "tela_app_error_len")?;
         // Bridge exports are optional; any missing export makes the bridge unavailable.
@@ -137,24 +145,28 @@ impl GuestRuntime {
             initialize,
             input_begin,
             dispatch,
-            frame_ptr,
-            frame_len,
-            status_ptr,
-            status_len,
+            publish,
+            publication_ptr,
+            publication_len,
+            presented,
+            rejected,
             error_ptr,
             error_len,
             bridge_request_begin,
             bridge_request_len,
             bridge_dispatch_begin,
             bridge_dispatch,
-            frame_packet: Vec::new(),
+            publication_packet: Vec::new(),
             status: AppStatus::default(),
+            pending_publication_token: None,
             metrics: GuestRuntimeMetrics {
                 module_compile,
                 initialize: Duration::ZERO,
                 initialize_fuel_consumed: 0,
                 last_dispatch: Duration::ZERO,
                 last_dispatch_fuel_consumed: 0,
+                last_publish: Duration::ZERO,
+                last_publish_fuel_consumed: 0,
             },
         };
         set_fuel(&mut runtime.store, INITIALIZE_FUEL)?;
@@ -168,10 +180,15 @@ impl GuestRuntime {
             }
         };
         runtime.metrics.initialize_fuel_consumed = consumed_fuel(&runtime.store, INITIALIZE_FUEL)?;
-        if initialized == 0 {
+        let Some(initialized) = decode_outcome(initialized) else {
             return Err(runtime.guest_failure("guest initialization failed"));
+        };
+        if !initialized.publish_requested {
+            return Err(GuestRuntimeError::message(
+                "guest initialization did not request an initial publication",
+            ));
         }
-        runtime.refresh_publications_with_fuel()?;
+        runtime.publish_latest()?;
         runtime.metrics.initialize = initialize_started.elapsed();
         Ok(runtime)
     }
@@ -181,7 +198,9 @@ impl GuestRuntime {
     /// The cached packet was checked whenever the guest published it. Decoding again here keeps
     /// the Wasmtime runtime movable across the background startup worker and the native UI thread.
     pub fn frame(&self) -> Result<UiFrame, GuestRuntimeError> {
-        decode_frame(&self.frame_packet).map_err(codec_error)
+        decode_publication(&self.publication_packet)
+            .map(|publication| publication.frame)
+            .map_err(codec_error)
     }
 
     /// Current non-drawing state requested by the guest.
@@ -194,8 +213,8 @@ impl GuestRuntime {
         self.metrics
     }
 
-    /// Delivers one normalized event and atomically replaces the host-visible frame/status pair.
-    pub fn dispatch(&mut self, event: &AppEvent) -> Result<bool, GuestRuntimeError> {
+    /// Delivers one normalized event without constructing or decoding a frame.
+    pub fn dispatch(&mut self, event: &AppEvent) -> Result<AppDispatchOutcome, GuestRuntimeError> {
         let started = Instant::now();
         let packet = encode_event(event).map_err(codec_error)?;
         if packet.len() > MAX_PACKET_BYTES {
@@ -213,8 +232,8 @@ impl GuestRuntime {
             .map_err(|error| {
                 GuestRuntimeError::message(format!("copy event into guest memory: {error}"))
             })?;
-        let changed = match self.dispatch.call(&mut self.store, packet.len() as u32) {
-            Ok(changed) => changed,
+        let outcome = match self.dispatch.call(&mut self.store, packet.len() as u32) {
+            Ok(outcome) => outcome,
             Err(error) => {
                 let remaining = remaining_fuel(&self.store).unwrap_or_default();
                 return Err(GuestRuntimeError::message(format!(
@@ -223,15 +242,78 @@ impl GuestRuntime {
             }
         };
         self.metrics.last_dispatch_fuel_consumed = consumed_fuel(&self.store, DISPATCH_FUEL)?;
-        if changed == 0 {
-            let diagnostic = self.error_message()?;
-            if !diagnostic.is_empty() {
-                return Err(GuestRuntimeError::message(diagnostic));
-            }
-        }
-        self.refresh_publications_with_fuel()?;
+        let outcome =
+            decode_outcome(outcome).ok_or_else(|| self.guest_failure("guest dispatch failed"))?;
         self.metrics.last_dispatch = started.elapsed();
-        Ok(changed != 0)
+        Ok(outcome)
+    }
+
+    /// Explicitly constructs and validates the latest requested publication.
+    pub fn publish_latest(&mut self) -> Result<AppPublication, GuestRuntimeError> {
+        if let Some(token) = self.pending_publication_token {
+            self.rejected(token)?;
+        }
+        let started = Instant::now();
+        set_fuel(&mut self.store, PUBLICATION_FUEL)?;
+        let outcome = match self.publish.call(&mut self.store, ()) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let remaining = remaining_fuel(&self.store).unwrap_or_default();
+                return Err(GuestRuntimeError::message(format!(
+                    "publish guest frame (fuel budget={PUBLICATION_FUEL}, remaining={remaining}): {error:#}"
+                )));
+            }
+        };
+        self.metrics.last_publish_fuel_consumed = consumed_fuel(&self.store, PUBLICATION_FUEL)?;
+        if outcome & OUTCOME_OK == 0 {
+            return Err(self.guest_failure("guest publication failed"));
+        }
+        let packet =
+            self.read_export(self.publication_ptr.clone(), self.publication_len.clone())?;
+        let publication = decode_publication(&packet).map_err(codec_error)?;
+        self.status = publication.status.clone();
+        self.publication_packet = packet;
+        self.pending_publication_token = Some(publication.token);
+        self.metrics.last_publish = started.elapsed();
+        Ok(publication)
+    }
+
+    /// Acknowledges a successfully presented publication.
+    pub fn presented(
+        &mut self,
+        token: AppFrameToken,
+    ) -> Result<AppDispatchOutcome, GuestRuntimeError> {
+        let raw = token.get();
+        let outcome = self
+            .presented
+            .call(&mut self.store, (raw as u32, (raw >> 32) as u32))
+            .map_err(|error| {
+                GuestRuntimeError::message(format!("acknowledge guest presentation: {error:#}"))
+            })?;
+        let outcome = decode_outcome(outcome)
+            .ok_or_else(|| self.guest_failure("guest presentation acknowledgement failed"))?;
+        if self.pending_publication_token == Some(token) {
+            self.pending_publication_token = None;
+        }
+        Ok(outcome)
+    }
+
+    /// Rejects a publication that could not be presented.
+    pub fn rejected(&mut self, token: AppFrameToken) -> Result<(), GuestRuntimeError> {
+        let raw = token.get();
+        let outcome = self
+            .rejected
+            .call(&mut self.store, (raw as u32, (raw >> 32) as u32))
+            .map_err(|error| {
+                GuestRuntimeError::message(format!("reject guest publication: {error:#}"))
+            })?;
+        if outcome & OUTCOME_OK == 0 {
+            return Err(self.guest_failure("guest publication rejection failed"));
+        }
+        if self.pending_publication_token == Some(token) {
+            self.pending_publication_token = None;
+        }
+        Ok(())
     }
 
     /// Whether the guest exposes the full bridge ABI (all four exports present).
@@ -310,23 +392,6 @@ impl GuestRuntime {
             .map_err(|error| {
                 GuestRuntimeError::message(format!("dispatch bridge event to guest: {error}"))
             })
-    }
-
-    fn refresh_publications(&mut self) -> Result<(), GuestRuntimeError> {
-        let frame_packet = self.read_export(self.frame_ptr.clone(), self.frame_len.clone())?;
-        let status_packet = self.read_export(self.status_ptr.clone(), self.status_len.clone())?;
-        // Validate every publication before retaining the bytes. The resulting `UiFrame` stays on
-        // the current thread and is dropped here; it may contain host-only CustomDraw payloads.
-        decode_frame(&frame_packet).map_err(codec_error)?;
-        let status = decode_status(&status_packet).map_err(codec_error)?;
-        self.frame_packet = frame_packet;
-        self.status = status;
-        Ok(())
-    }
-
-    fn refresh_publications_with_fuel(&mut self) -> Result<(), GuestRuntimeError> {
-        set_fuel(&mut self.store, PUBLICATION_FUEL)?;
-        self.refresh_publications()
     }
 
     fn error_message(&mut self) -> Result<String, GuestRuntimeError> {

@@ -5,8 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tela_app_runtime::{AppController, ControllerOutcome, FrameContext};
+use tela_app_session::AppEffect;
 use tela_contract::{FocusAppearance, UiResources, WindowCommand};
-use tela_target_win32_static::{AppController, FrameContext};
 use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult};
 
 use crate::domain::{
@@ -45,7 +46,6 @@ pub struct SpeedGearController {
     resources: &'static dyn UiResources,
     backend: Box<dyn SpeedBackend>,
     state: SpeedGearState,
-    pending_window_command: Option<WindowCommand>,
     last_error: Option<String>,
     last_refresh: Instant,
 }
@@ -57,7 +57,6 @@ impl SpeedGearController {
             resources,
             backend,
             state: SpeedGearState::default(),
-            pending_window_command: None,
             last_error: None,
             last_refresh: Instant::now(),
         }
@@ -145,10 +144,7 @@ impl SpeedGearController {
                 false
             }
             SpeedGearAction::RefreshProcesses => self.refresh_processes(),
-            SpeedGearAction::Window(command) => {
-                self.pending_window_command = Some(command);
-                true
-            }
+            SpeedGearAction::Window(_) => true,
         }
     }
 
@@ -229,16 +225,16 @@ impl AppController<SpeedGearAction> for SpeedGearController {
         render_root(build, ctx.viewport, &self.state, self.last_error.as_deref())
     }
 
-    fn handle_action(&mut self, action: SpeedGearAction) -> bool {
-        self.handle(action)
-    }
-
-    fn take_window_command(&mut self) -> Option<WindowCommand> {
-        self.pending_window_command.take()
-    }
-
-    fn title_bar_drag_height(&self) -> f32 {
-        34.0
+    fn handle_action(&mut self, action: SpeedGearAction) -> ControllerOutcome {
+        let effect = match &action {
+            SpeedGearAction::Window(command) => Some(AppEffect::Window(*command)),
+            _ => None,
+        };
+        let changed = self.handle(action);
+        effect.map_or_else(
+            || ControllerOutcome::changed(changed),
+            ControllerOutcome::with_effect,
+        )
     }
 
     fn on_tick(&mut self) -> bool {
@@ -309,9 +305,9 @@ fn format_backend_error(error: &crate::domain::SpeedBackendError) -> String {
 mod tests {
     use super::*;
     use crate::domain::{BackendResult, ProcessAccess, ProcessInfo, SpeedBackendError};
+    use tela_app_runtime::{Application, ApplicationConfig};
     use tela_contract::{PhysicalKey, Point, PointerEvent, SemanticKey, UiResourceSet, Viewport};
     use tela_icon_resources::MaterialIconFontProvider;
-    use tela_target_win32_static::{Application, ApplicationConfig};
     use tela_text_resources::ControlledTextMeasurer;
 
     static TEST_RESOURCES: UiResourceSet<ControlledTextMeasurer, MaterialIconFontProvider> =

@@ -10,13 +10,14 @@ default = []
 app-runtime = []
 
 [dependencies]
+tela-app-runtime = { path = "../../crates/delivery/app-runtime" }
+tela-app-session = { path = "../../crates/delivery/app-session" }
 tela-contract = { path = "../../crates/kernel/contract" }
 tela-core = { path = "../../crates/kernel/core" }
 tela-desktop-ui-kit = { path = "../../crates/ui/desktop-kit" }
 tela-desktop-ui-dsl = { path = "../../crates/ui/desktop-ui-dsl" }
 tela-ui-dsl = { path = "../../crates/ui/dsl" }
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
-tela-target-win32-static = { path = "../../crates/targets/win32-static" }
 tela-speed-gear-protocol = { path = "../speed-gear-protocol" }
 
 [target.'cfg(target_os = "windows")'.dependencies]

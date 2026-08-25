@@ -13,7 +13,8 @@ tela-contract = { path = "../../crates/kernel/contract" }
 tela-desktop-runtime = { path = "../../crates/delivery/desktop-runtime" }
 tela-utils = { path = "../../crates/support/utils" }
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
-tela-target-win32-static = { path = "../../crates/targets/win32-static" }
+tela-app-runtime = { path = "../../crates/delivery/app-runtime" }
+tela-target-win32 = { path = "../../crates/targets/win32" }
 tela-text-resources = { path = "../../crates/presentation/resources/text" }
 tela-win32-editor = { path = "../../apps/win32-editor", features = ["app-runtime"] }
 

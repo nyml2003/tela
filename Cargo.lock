@@ -2328,6 +2328,25 @@ version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "tela-app-session",
+ "tela-contract",
+]
+
+[[package]]
+name = "tela-app-runtime"
+version = "0.1.0"
+dependencies = [
+ "tela-app-session",
+ "tela-contract",
+ "tela-core",
+ "tela-ui-dsl",
+]
+
+[[package]]
+name = "tela-app-session"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "tela-contract",
 ]
 
@@ -2500,10 +2519,11 @@ dependencies = [
 name = "tela-product-speed-gear"
 version = "0.1.0"
 dependencies = [
+ "tela-app-runtime",
  "tela-contract",
  "tela-icon-resources",
  "tela-speed-gear",
- "tela-target-win32-static",
+ "tela-target-win32",
  "tela-text-resources",
 ]
 
@@ -2511,10 +2531,11 @@ dependencies = [
 name = "tela-product-win32-editor"
 version = "0.1.0"
 dependencies = [
+ "tela-app-runtime",
  "tela-contract",
  "tela-desktop-runtime",
  "tela-icon-resources",
- "tela-target-win32-static",
+ "tela-target-win32",
  "tela-text-resources",
  "tela-utils",
  "tela-win32-editor",
@@ -2562,13 +2583,14 @@ dependencies = [
 name = "tela-speed-gear"
 version = "0.1.0"
 dependencies = [
+ "tela-app-runtime",
+ "tela-app-session",
  "tela-contract",
  "tela-core",
  "tela-desktop-ui-dsl",
  "tela-desktop-ui-kit",
  "tela-icon-resources",
  "tela-speed-gear-protocol",
- "tela-target-win32-static",
  "tela-text-resources",
  "tela-ui-dsl",
  "tela-ui-foundation",
@@ -2661,28 +2683,12 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "tela-app-abi",
+ "tela-app-session",
  "tela-bridge",
  "tela-contract",
  "tela-desktop-runtime",
  "tela-render-wgpu",
- "tela-target-win32-static",
  "ureq",
- "wgpu",
- "windows",
-]
-
-[[package]]
-name = "tela-target-win32-static"
-version = "0.1.0"
-dependencies = [
- "pollster",
- "raw-window-handle",
- "tela-bridge",
- "tela-contract",
- "tela-core",
- "tela-desktop-runtime",
- "tela-render-wgpu",
- "tela-ui-dsl",
  "wgpu",
  "windows",
 ]
@@ -2736,11 +2742,12 @@ dependencies = [
 name = "tela-win32-editor"
 version = "0.1.0"
 dependencies = [
+ "tela-app-runtime",
+ "tela-app-session",
  "tela-bridge",
  "tela-contract",
  "tela-core",
  "tela-icon-resources",
- "tela-target-win32-static",
  "tela-text-resources",
  "tela-ui-dsl",
  "tela-ui-foundation",

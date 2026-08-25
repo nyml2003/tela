@@ -59,12 +59,14 @@ export async function startTelaWebview(
         const framePacket = guest.framePacket();
         const frameToken = guest.status().frame_token;
         if (!bindings.render_gpu(framePacket)) {
-          presentedFrameToken = undefined;
           retryTimer ??= window.setTimeout(() => {
             retryTimer = undefined;
             scheduleRender();
           }, 100);
         } else {
+          if (frameToken !== undefined && frameToken !== presentedFrameToken) {
+            guest.acknowledgePresented(frameToken);
+          }
           presentedFrameToken = frameToken;
           renderError = undefined;
           if (guest.status().animation_active) scheduleRender();
@@ -75,7 +77,6 @@ export async function startTelaWebview(
           console.error(message);
           renderError = message;
         }
-        presentedFrameToken = undefined;
       }
     });
   };
@@ -84,11 +85,11 @@ export async function startTelaWebview(
     if (synchronizeClock) {
       guest.dispatch(bindings.event_tick(BigInt(Math.floor(performance.now()))));
     }
-    const publication = guest.dispatch(packet);
+    const outcome = guest.dispatch(packet);
     processBridgeRequests();
     input?.synchronize();
-    scheduleRender();
-    return publication.changed;
+    if (outcome.published) scheduleRender();
+    return outcome.handled;
   };
   /** 桥队列处理：读队列 → 逐个 provider → 回投；异步 provider 完成后再回投。 */
   const processBridgeRequests = (): void => {

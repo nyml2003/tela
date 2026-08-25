@@ -43,6 +43,9 @@ async function loadDevelopmentBundle(bindings, bundleIndex) {
 
 // src/webview-sdk/guest-runtime.ts
 var MAX_PACKET_BYTES = 64 * 1024 * 1024;
+var OUTCOME_OK = 1 << 31;
+var OUTCOME_HANDLED = 1;
+var OUTCOME_PUBLISH_REQUESTED = 1 << 1;
 var TelaGuestRuntime = class _TelaGuestRuntime {
   constructor(bindings, exports) {
     this.bindings = bindings;
@@ -51,6 +54,7 @@ var TelaGuestRuntime = class _TelaGuestRuntime {
   bindings;
   exports;
   latest;
+  pendingToken;
   static async create(bindings, guestWasm) {
     if (guestWasm.byteLength === 0) throw new Error("\u5E94\u7528 guest WASM \u4E3A\u7A7A");
     const source = guestWasm.slice().buffer;
@@ -65,25 +69,46 @@ var TelaGuestRuntime = class _TelaGuestRuntime {
   }
   /** Runs one guest initialization and reads its first frame/status publication. */
   initialize() {
-    const initialized = this.exports.tela_app_init() >>> 0;
-    if (initialized === 0) {
-      throw new Error(this.guestError() || "\u5E94\u7528 guest \u521D\u59CB\u5316\u5931\u8D25");
+    const initialized = this.requireOutcome(this.exports.tela_app_init(), "\u521D\u59CB\u5316");
+    if (!initialized.publishRequested) {
+      throw new Error("\u5E94\u7528 guest \u521D\u59CB\u5316\u540E\u672A\u8BF7\u6C42\u9996\u5E27\u53D1\u5E03");
     }
-    return this.refresh(true);
+    return this.publish();
   }
-  /** Delivers one Rust-encoded event and atomically refreshes the public frame/status pair. */
+  /** Delivers one Rust-encoded event and publishes only when the guest requests it. */
   dispatch(packet) {
     if (packet.byteLength > MAX_PACKET_BYTES) {
       throw new Error(`\u5E94\u7528\u4E8B\u4EF6\u5305\u8D85\u8FC7 ${MAX_PACKET_BYTES / 1024 / 1024} MiB \u9650\u5236`);
     }
     const pointer = this.exports.tela_app_input_begin(packet.byteLength) >>> 0;
     this.copyIntoGuest(pointer, packet);
-    const changed = this.exports.tela_app_dispatch(packet.byteLength) !== 0;
-    if (!changed) {
-      const diagnostic = this.guestError();
-      if (diagnostic) throw new Error(diagnostic);
+    const outcome = this.requireOutcome(
+      this.exports.tela_app_dispatch(packet.byteLength),
+      "\u4E8B\u4EF6\u6D3E\u53D1"
+    );
+    if (outcome.publishRequested) {
+      if (this.pendingToken !== void 0) {
+        this.rejectPublication(this.pendingToken);
+      }
+      this.publish();
     }
-    return this.refresh(changed);
+    return { handled: outcome.handled, published: outcome.publishRequested };
+  }
+  /** Acknowledges that the browser has actually presented the latest publication. */
+  acknowledgePresented(token) {
+    if (this.pendingToken !== token) {
+      throw new Error(`\u5E94\u7528\u5448\u73B0\u56DE\u6267\u4E0D\u662F\u5F53\u524D\u5F85\u786E\u8BA4\u53D1\u5E03: token=${token}`);
+    }
+    this.requireTokenOutcome(this.exports.tela_app_presented, token, "\u5448\u73B0\u56DE\u6267");
+    this.pendingToken = void 0;
+  }
+  /** Rejects the latest publication when the host cannot retain or retry it. */
+  rejectPublication(token) {
+    if (this.pendingToken !== token) {
+      throw new Error(`\u5E94\u7528\u62D2\u7EDD\u7684\u4E0D\u662F\u5F53\u524D\u5F85\u786E\u8BA4\u53D1\u5E03: token=${token}`);
+    }
+    this.requireTokenOutcome(this.exports.tela_app_rejected, token, "\u53D1\u5E03\u62D2\u7EDD");
+    this.pendingToken = void 0;
   }
   /** Whether the guest exposes the full bridge ABI (all four exports present). */
   bridgeAvailable() {
@@ -126,21 +151,40 @@ var TelaGuestRuntime = class _TelaGuestRuntime {
   status() {
     return this.publication().status;
   }
-  refresh(changed) {
-    const framePacket = this.readGuestExport(
-      this.exports.tela_app_frame_ptr,
-      this.exports.tela_app_frame_len,
-      "frame"
+  publish() {
+    this.requireOutcome(this.exports.tela_app_publish(), "\u5E94\u7528\u53D1\u5E03");
+    const packet = this.readGuestExport(
+      this.exports.tela_app_publication_ptr,
+      this.exports.tela_app_publication_len,
+      "publication"
     );
-    const statusPacket = this.readGuestExport(
-      this.exports.tela_app_status_ptr,
-      this.exports.tela_app_status_len,
-      "status"
-    );
-    const status = this.bindings.decode_app_status(statusPacket);
-    const publication = { changed, framePacket, status };
+    const decoded = this.bindings.decode_app_publication(packet);
+    const publication = {
+      framePacket: decoded.frame_packet(),
+      status: decoded.status()
+    };
+    const token = publication.status.frame_token;
+    if (token === void 0) {
+      throw new Error("\u5E94\u7528 publication \u672A\u643A\u5E26 frame token");
+    }
+    this.pendingToken = token;
     this.latest = publication;
     return publication;
+  }
+  requireOutcome(rawOutcome, operation) {
+    const outcome = rawOutcome >>> 0;
+    if ((outcome & OUTCOME_OK) === 0) {
+      throw new Error(this.guestError() || `\u5E94\u7528 guest ${operation}\u5931\u8D25`);
+    }
+    return {
+      handled: (outcome & OUTCOME_HANDLED) !== 0,
+      publishRequested: (outcome & OUTCOME_PUBLISH_REQUESTED) !== 0
+    };
+  }
+  requireTokenOutcome(call, token, operation) {
+    const low = Number(token & 0xffffffffn);
+    const high = Number(token >> 32n & 0xffffffffn);
+    this.requireOutcome(call(low, high), operation);
   }
   guestError() {
     const bytes = this.readGuestExport(
@@ -189,10 +233,11 @@ function requireGuestExports(exports) {
     "tela_app_init",
     "tela_app_input_begin",
     "tela_app_dispatch",
-    "tela_app_frame_ptr",
-    "tela_app_frame_len",
-    "tela_app_status_ptr",
-    "tela_app_status_len",
+    "tela_app_publish",
+    "tela_app_publication_ptr",
+    "tela_app_publication_len",
+    "tela_app_presented",
+    "tela_app_rejected",
     "tela_app_error_ptr",
     "tela_app_error_len"
   ];
@@ -1014,12 +1059,14 @@ async function startTelaWebview(options) {
         const framePacket = guest.framePacket();
         const frameToken = guest.status().frame_token;
         if (!bindings.render_gpu(framePacket)) {
-          presentedFrameToken = void 0;
           retryTimer ??= window.setTimeout(() => {
             retryTimer = void 0;
             scheduleRender();
           }, 100);
         } else {
+          if (frameToken !== void 0 && frameToken !== presentedFrameToken) {
+            guest.acknowledgePresented(frameToken);
+          }
           presentedFrameToken = frameToken;
           renderError = void 0;
           if (guest.status().animation_active) scheduleRender();
@@ -1030,7 +1077,6 @@ async function startTelaWebview(options) {
           console.error(message);
           renderError = message;
         }
-        presentedFrameToken = void 0;
       }
     });
   };
@@ -1039,11 +1085,11 @@ async function startTelaWebview(options) {
     if (synchronizeClock) {
       guest.dispatch(bindings.event_tick(BigInt(Math.floor(performance.now()))));
     }
-    const publication = guest.dispatch(packet);
+    const outcome = guest.dispatch(packet);
     processBridgeRequests();
     input?.synchronize();
-    scheduleRender();
-    return publication.changed;
+    if (outcome.published) scheduleRender();
+    return outcome.handled;
   };
   const processBridgeRequests = () => {
     if (closed || !guest.bridgeAvailable()) return;

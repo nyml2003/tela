@@ -3,13 +3,15 @@
 #![warn(missing_docs)]
 
 #[cfg(target_os = "windows")]
+use tela_app_runtime::{Application, ApplicationConfig};
+#[cfg(target_os = "windows")]
 use tela_contract::UiResourceSet;
 #[cfg(target_os = "windows")]
 use tela_icon_resources::MaterialIconFontProvider;
 #[cfg(target_os = "windows")]
 use tela_speed_gear::{FOCUS_APPEARANCE, SpeedGearController, WindowsSpeedBackend};
 #[cfg(target_os = "windows")]
-use tela_target_win32_static::{Application, ApplicationConfig, run_static_window};
+use tela_target_win32::{NativeWindowOptions, run_native_window};
 #[cfg(target_os = "windows")]
 use tela_text_resources::ControlledTextMeasurer;
 
@@ -33,5 +35,8 @@ pub fn run() -> Result<(), String> {
             },
         },
     );
-    run_static_window(Box::new(application))
+    run_native_window(
+        Box::new(application),
+        NativeWindowOptions::new("变速齿轮").size(980, 680),
+    )
 }

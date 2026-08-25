@@ -68,5 +68,7 @@ test('六个产品显式选择自身的应用、交付、renderer 与 Target', (
   assert.equal(ios.target, 'tela-target-ios');
 
   assert.equal(workspace.product('win32').target, 'tela-target-win32');
+  assert.equal(workspace.product('win32-editor').target, 'tela-target-win32');
+  assert.equal(workspace.product('speed-gear').target, 'tela-target-win32');
   assert.equal(workspace.product('macos').target, 'tela-target-macos');
 });

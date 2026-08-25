@@ -25,14 +25,14 @@ use raw_window_handle::{
     Win32WindowHandle, WindowsDisplayHandle,
 };
 use tela_app_abi::{
-    AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind, AppPointerPhase,
-    CursorKind,
+    AppDispatchOutcome, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
+    AppPointerPhase, CursorKind,
 };
 use tela_bridge::BridgeDispatcher;
 use tela_contract::{Color, UiFrame};
 use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
 use tela_render_wgpu::WgpuRenderer;
-use tela_target_win32_static::{WindowMetrics, build_dispatcher};
+use tela_target_win32::{WindowMetrics, build_dispatcher};
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -54,14 +54,15 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
-                DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW,
-                GetWindowLongPtrW, IDC_ARROW, IDC_HAND, IDC_IBEAM, KillTimer, LoadCursorW, MSG,
-                PostMessageW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SW_SHOW, SetCursor,
+                DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW,
+                IDC_ARROW, IDC_HAND, IDC_IBEAM, KillTimer, LoadCursorW, MSG, MWMO_INPUTAVAILABLE,
+                MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostMessageW,
+                PostQuitMessage, QS_ALLINPUT, RegisterClassW, SIZE_MINIMIZED, SW_SHOW, SetCursor,
                 SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
                 WINDOW_EX_STYLE, WM_APP, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
                 WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
-                WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT,
+                WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -447,35 +448,56 @@ impl WindowState {
         Ok(())
     }
 
-    fn dispatch_guest(&mut self, event: AppEvent) -> Result<bool, String> {
-        let changed = self.dispatch_guest_without_text_reconcile(event)?;
+    fn dispatch_guest(&mut self, event: AppEvent) -> Result<AppDispatchOutcome, String> {
+        let outcome = self.dispatch_guest_without_text_reconcile(event)?;
         self.synchronize_text_channel(None)?;
-        Ok(changed)
+        Ok(outcome)
     }
 
-    fn dispatch_guest_without_text_reconcile(&mut self, event: AppEvent) -> Result<bool, String> {
-        let (changed, frame, frame_token) = {
+    fn dispatch_guest_without_text_reconcile(
+        &mut self,
+        event: AppEvent,
+    ) -> Result<AppDispatchOutcome, String> {
+        let (outcome, publication) = {
             let runtime = self
                 .runtime
                 .as_mut()
                 .ok_or_else(|| "dispatch without a live guest runtime".to_owned())?;
-            let changed = runtime
+            let outcome = runtime
                 .dispatch(&event)
                 .map_err(|error| error.to_string())?;
-            let frame = runtime.frame().map_err(|error| error.to_string())?;
+            let publication = if outcome.publish_requested {
+                if self.frame_token != self.presented_frame_token
+                    && let Some(token) = self.frame_token
+                {
+                    runtime.rejected(token).map_err(|error| error.to_string())?;
+                }
+                Some(
+                    runtime
+                        .publish_latest()
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
             if let Some(dispatcher) = self.bridge.as_mut() {
                 process_bridge_requests(runtime, dispatcher)?;
             }
-            (changed, frame, runtime.status().frame_token)
+            (outcome, publication)
         };
-        self.frame = Some(frame);
-        self.frame_token = frame_token;
-        Ok(changed)
+        if let Some(publication) = publication {
+            self.frame_token = Some(publication.token);
+            self.frame = Some(publication.frame);
+        }
+        Ok(outcome)
     }
 
-    fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
+    fn dispatch_presented_input(
+        &mut self,
+        input: AppFrameInput,
+    ) -> Result<AppDispatchOutcome, String> {
         let Some(source_frame_token) = self.presented_frame_token else {
-            return Ok(false);
+            return Ok(AppDispatchOutcome::IDLE);
         };
         self.dispatch_guest(AppEvent::FrameInput {
             source_frame_token,
@@ -486,9 +508,9 @@ impl WindowState {
     fn dispatch_presented_input_without_text_reconcile(
         &mut self,
         input: AppFrameInput,
-    ) -> Result<bool, String> {
+    ) -> Result<AppDispatchOutcome, String> {
         let Some(source_frame_token) = self.presented_frame_token else {
-            return Ok(false);
+            return Ok(AppDispatchOutcome::IDLE);
         };
         self.dispatch_guest_without_text_reconcile(AppEvent::FrameInput {
             source_frame_token,
@@ -539,8 +561,10 @@ impl WindowState {
         if !self.lifecycle.can_render() {
             return Ok(());
         }
-        self.dispatch_presented_input(input)?;
-        self.request_redraw();
+        let outcome = self.dispatch_presented_input(input)?;
+        if outcome.publish_requested {
+            self.request_redraw();
+        }
         Ok(())
     }
 
@@ -582,13 +606,17 @@ impl WindowState {
         if input_focused {
             match virtual_key {
                 key if key == VK_RETURN.0 => {
-                    self.dispatch_presented_input(AppFrameInput::InputEnter)?;
-                    self.request_redraw();
+                    let outcome = self.dispatch_presented_input(AppFrameInput::InputEnter)?;
+                    if outcome.publish_requested {
+                        self.request_redraw();
+                    }
                     return Ok(true);
                 }
                 key if key == VK_ESCAPE.0 => {
-                    self.dispatch_presented_input(AppFrameInput::InputCancel)?;
-                    self.request_redraw();
+                    let outcome = self.dispatch_presented_input(AppFrameInput::InputCancel)?;
+                    if outcome.publish_requested {
+                        self.request_redraw();
+                    }
                     return Ok(true);
                 }
                 key if key != VK_TAB.0 && !has_command_modifier() => return Ok(false),
@@ -598,13 +626,15 @@ impl WindowState {
         let Some(physical_key) = physical_key(virtual_key) else {
             return Ok(false);
         };
-        let consumed = self.dispatch_presented_input(AppFrameInput::KeyDown {
+        let outcome = self.dispatch_presented_input(AppFrameInput::KeyDown {
             physical_key,
             modifier_bits: modifier_bits(),
             repeat,
         })?;
-        self.request_redraw();
-        Ok(consumed)
+        if outcome.publish_requested {
+            self.request_redraw();
+        }
+        Ok(outcome.handled)
     }
 
     fn character(&mut self, code_unit: u16) -> Result<bool, String> {
@@ -632,8 +662,10 @@ impl WindowState {
             }
             _ => return Ok(false),
         }
-        self.dispatch_presented_input(AppFrameInput::SetInputValue(value))?;
-        self.request_redraw();
+        let outcome = self.dispatch_presented_input(AppFrameInput::SetInputValue(value))?;
+        if outcome.publish_requested {
+            self.request_redraw();
+        }
         Ok(true)
     }
 
@@ -670,6 +702,13 @@ impl WindowState {
     fn paint_guest(&mut self) -> Result<(), String> {
         match self.render()? {
             RenderOutcome::Presented { suboptimal } => {
+                if self.frame_token != self.presented_frame_token
+                    && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), self.frame_token)
+                {
+                    let _ = runtime
+                        .presented(token)
+                        .map_err(|error| error.to_string())?;
+                }
                 self.presented_frame_token = self.frame_token;
                 self.lifecycle.surface_presented();
                 self.cancel_surface_retry();
@@ -1073,22 +1112,32 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
     }
 
     let mut message = MSG::default();
-    let message_result = loop {
-        // SAFETY: message is writable and belongs to this thread's queue.
-        let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
-        if result.0 == -1 {
-            break Err(format!(
-                "read Win32 message: {}",
-                windows::core::Error::from_thread()
-            ));
+    let message_result = 'running: loop {
+        let quantum_started = Instant::now();
+        let mut drained = 0u32;
+        while drained < 64 && quantum_started.elapsed().as_micros() < 2_000 {
+            // SAFETY: message is writable and belongs to this UI thread's queue.
+            if !unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                break;
+            }
+            if message.message == WM_QUIT {
+                break 'running Ok(());
+            }
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            drained += 1;
         }
-        if result.0 == 0 {
-            break Ok(());
-        }
-        // SAFETY: message was produced by GetMessageW and remains valid for dispatch.
-        unsafe {
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
+
+        // Give a coalesced invalid region one synchronous paint opportunity between input
+        // quanta, even while WM_MOUSEMOVE continues to arrive.
+        let _ = unsafe { UpdateWindow(hwnd) };
+
+        if drained < 64 {
+            let _ = unsafe {
+                MsgWaitForMultipleObjectsEx(None, u32::MAX, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+            };
         }
     };
 

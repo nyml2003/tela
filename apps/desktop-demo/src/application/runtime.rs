@@ -470,14 +470,12 @@ impl App {
 
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
         self.ensure_frame();
-        let frame = self.frame().clone();
-        let tree = self.frames.active().expect("共享逻辑树必须已构建").tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Pointer(event),
-        );
+        let actions = self
+            .frames
+            .active()
+            .expect("共享逻辑帧必须已构建")
+            .input_plan()
+            .dispatch(&mut self.view_state, &InputEvent::Pointer(event));
         let changed = self.handle_kernel_interactions(&actions);
         if changed {
             self.mark_view_dirty();
@@ -500,14 +498,12 @@ impl App {
         let Some(intent) = self.keymap.resolve(raw, &scopes) else {
             return 0;
         };
-        let frame = self.frame().clone();
-        let tree = self.frames.active().expect("共享逻辑树必须已构建").tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Keyboard(intent),
-        );
+        let actions = self
+            .frames
+            .active()
+            .expect("共享逻辑帧必须已构建")
+            .input_plan()
+            .dispatch(&mut self.view_state, &InputEvent::Keyboard(intent));
         if self.handle_kernel_interactions(&actions) {
             self.mark_view_dirty();
         }

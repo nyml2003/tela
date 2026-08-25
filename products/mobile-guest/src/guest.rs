@@ -32,8 +32,10 @@ fn reset_app() {
 
 fn apply_event(app: &mut App, event: AppEvent) -> bool {
     match event {
+        AppEvent::Wake { .. } => false,
         AppEvent::Tick { timestamp_ms } => app.animation_tick(timestamp_ms),
         AppEvent::Viewport { width, height } => app.set_viewport(width, height),
+        AppEvent::WindowState { .. } => false,
         AppEvent::FrameInput {
             source_frame_token,
             input,

@@ -28,13 +28,15 @@ pub struct BundleVerification {
     pub last_dispatch: std::time::Duration,
     /// Fuel used by the standard viewport dispatch.
     pub last_dispatch_fuel_consumed: u64,
+    /// Fuel used by the standard viewport publication.
+    pub last_publish_fuel_consumed: u64,
 }
 
 impl fmt::Display for BundleVerification {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "verified bundle={}KB wasm={}KB initial_commands={} commands={} input_focused={} compile={}ms init={}ms init_fuel={} dispatch={}ms dispatch_fuel={}",
+            "verified bundle={}KB wasm={}KB initial_commands={} commands={} input_focused={} compile={}ms init={}ms init_fuel={} dispatch={}ms dispatch_fuel={} publish_fuel={}",
             self.archive_bytes / 1024,
             self.wasm_bytes / 1024,
             self.initial_commands,
@@ -45,6 +47,7 @@ impl fmt::Display for BundleVerification {
             self.initialize_fuel_consumed,
             self.last_dispatch.as_millis(),
             self.last_dispatch_fuel_consumed,
+            self.last_publish_fuel_consumed,
         )
     }
 }
@@ -62,12 +65,17 @@ pub fn verify_bundle(path: &Path) -> Result<BundleVerification, String> {
         .commands
         .len();
     let input_focused = runtime.status().input_focused;
-    runtime
+    let viewport_outcome = runtime
         .dispatch(&AppEvent::Viewport {
             width: 1280.0,
             height: 720.0,
         })
         .map_err(|error| format!("dispatch verification viewport: {error}"))?;
+    if viewport_outcome.publish_requested {
+        runtime
+            .publish_latest()
+            .map_err(|error| format!("publish verification viewport: {error}"))?;
+    }
     let viewport_commands = runtime
         .frame()
         .map_err(|error| format!("decode verification frame: {error}"))?
@@ -85,5 +93,6 @@ pub fn verify_bundle(path: &Path) -> Result<BundleVerification, String> {
         initialize_fuel_consumed: metrics.initialize_fuel_consumed,
         last_dispatch: metrics.last_dispatch,
         last_dispatch_fuel_consumed: metrics.last_dispatch_fuel_consumed,
+        last_publish_fuel_consumed: metrics.last_publish_fuel_consumed,
     })
 }

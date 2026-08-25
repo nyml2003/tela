@@ -308,7 +308,7 @@ fn emit_frame<M: TextMeasurer + ?Sized>(
 
     // 自身命令与命中区域（clip 用祖先裁剪，自身裁剪不作用于自身）。
     emit_draw_command(node, box_, offset, clip, ctx);
-    if node.interact.is_some() {
+    if let Some(interact) = &node.interact {
         ctx.hit_regions.push(HitRegion {
             node_id,
             rect: Rect {
@@ -318,6 +318,7 @@ fn emit_frame<M: TextMeasurer + ?Sized>(
                 h: box_.h,
             },
             clip,
+            role: interact.hit_role,
         });
     }
 

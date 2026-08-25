@@ -172,7 +172,7 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       root: productRoot('win32-editor'),
       application: 'tela-win32-editor',
       delivery: 'static-link',
-      target: 'tela-target-win32-static',
+      target: WIN32_TARGET_CRATE,
       packages: [WIN32_EDITOR_CRATE],
     },
     'speed-gear': {
@@ -180,7 +180,7 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       root: productRoot('speed-gear'),
       application: 'tela-speed-gear',
       delivery: 'static-link',
-      target: 'tela-target-win32-static',
+      target: WIN32_TARGET_CRATE,
       packages: [SPEED_GEAR_CRATE],
     },
     macos: {

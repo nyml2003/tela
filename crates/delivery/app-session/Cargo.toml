@@ -1,15 +1,13 @@
 [package]
-name = "tela-app-abi"
+name = "tela-app-session"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-description = "Tela application WASM ABI and versioned frame wire format"
+description = "Platform-neutral Tela application session protocol"
 
 [dependencies]
-postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 tela-contract = { path = "../../kernel/contract" }
-tela-app-session = { path = "../app-session" }
 
 [lints]
 workspace = true

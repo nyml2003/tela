@@ -11,10 +11,11 @@ app-runtime = []
 
 [dependencies]
 tela-bridge = { path = "../../crates/delivery/bridge", features = ["host"] }
+tela-app-runtime = { path = "../../crates/delivery/app-runtime" }
+tela-app-session = { path = "../../crates/delivery/app-session" }
 tela-contract = { path = "../../crates/kernel/contract" }
 tela-core = { path = "../../crates/kernel/core" }
 tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
-tela-target-win32-static = { path = "../../crates/targets/win32-static" }
 tela-ui-dsl = { path = "../../crates/ui/dsl" }
 tela-ui-foundation = { path = "../../crates/ui/foundation" }
 

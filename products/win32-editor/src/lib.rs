@@ -2,11 +2,13 @@
 //!
 //! 明确选择编辑器应用、受控文本/Material 图标资源与 Win32 静态壳；不引入 bundle、WASM
 //! ABI 或 guest executor。桥按静态路径语义（进程内 dispatcher）为关于页提供构建信息。
-//! 壳协议由 `tela_target_win32_static::Application` 一次性实现，产品只装配资源、
+//! 壳协议由 `tela_app_runtime::Application` 一次性实现，产品只装配资源、
 //! 控制器与配置。
 
 #![warn(missing_docs)]
 
+#[cfg(target_os = "windows")]
+use tela_app_runtime::{Application, ApplicationConfig};
 #[cfg(target_os = "windows")]
 use tela_contract::UiResourceSet;
 #[cfg(target_os = "windows")]
@@ -14,9 +16,7 @@ use tela_desktop_runtime::bridge::common::BuildConstants;
 #[cfg(target_os = "windows")]
 use tela_icon_resources::MaterialIconFontProvider;
 #[cfg(target_os = "windows")]
-use tela_target_win32_static::{
-    Application, ApplicationConfig, WindowMetrics, build_dispatcher, run_static_window,
-};
+use tela_target_win32::{NativeWindowOptions, WindowMetrics, build_dispatcher, run_native_window};
 #[cfg(target_os = "windows")]
 use tela_text_resources::{CONTROLLED_FONT_CATALOG, ControlledTextMeasurer};
 #[cfg(target_os = "windows")]
@@ -79,5 +79,8 @@ pub fn run() -> Result<(), String> {
             ..ApplicationConfig::default()
         },
     );
-    run_static_window(Box::new(application))
+    run_native_window(
+        Box::new(application),
+        NativeWindowOptions::new(APP_NAME).size(960, 640),
+    )
 }

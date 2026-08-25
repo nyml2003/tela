@@ -3,12 +3,15 @@
 //! through the in-process bridge dispatcher, static-path semantics, see docs/桥/000 §7.3).
 //!
 //! Frame lifecycle, input dispatch and the shell protocol live in the cross-application
-//! session runtime `tela_target_win32_static::Application`; this module only implements
+//! session runtime `tela_app_runtime::Application`; this module only implements
 //! `AppController` with editor domain logic.
 
+use tela_app_runtime::{AppController, ControllerOutcome, FrameContext};
+use tela_app_session::AppEffect;
+#[cfg(test)]
+use tela_app_session::ApplicationSession;
 use tela_bridge::{BridgeDispatcher, BridgeEvent, BridgeRequest, BridgeResult, VersionPolicy};
-use tela_contract::{FocusAppearance, TextStyleRef, UiResources, WindowCommand};
-use tela_target_win32_static::{AppController, FrameContext};
+use tela_contract::{FocusAppearance, TextStyleRef, UiResources};
 use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult};
 
 use crate::presentation::render_root;
@@ -100,7 +103,7 @@ impl Default for EditorSettings {
 
 /// 编辑器域控制器：信号状态 + 渲染 + 动作处理。
 ///
-/// 由 `tela_target_win32_static::Application<EditorAction, EditorController>` 驱动；控制器
+/// 由 `tela_app_runtime::Application<EditorAction, EditorController>` 驱动；控制器
 /// 不感知窗口、消息循环或壳协议。
 pub struct EditorController {
     resources: &'static dyn UiResources,
@@ -110,7 +113,6 @@ pub struct EditorController {
     icon_query: Signal<String>,
     icon_category: Signal<IconCategory>,
     about_cache: Vec<(String, String)>,
-    pending_window_command: Option<WindowCommand>,
 }
 
 impl EditorController {
@@ -127,7 +129,6 @@ impl EditorController {
             icon_query: Signal::new(String::new()),
             icon_category: Signal::new(IconCategory::All),
             about_cache,
-            pending_window_command: None,
         }
     }
 
@@ -182,10 +183,7 @@ impl EditorController {
                 self.icon_category.set(category);
                 true
             }
-            EditorAction::Window(command) => {
-                self.pending_window_command = Some(command);
-                true
-            }
+            EditorAction::Window(_) => true,
         }
     }
 }
@@ -213,16 +211,16 @@ impl AppController<EditorAction> for EditorController {
         )
     }
 
-    fn handle_action(&mut self, action: EditorAction) -> bool {
-        self.handle_action(action)
-    }
-
-    fn take_window_command(&mut self) -> Option<WindowCommand> {
-        self.pending_window_command.take()
-    }
-
-    fn title_bar_drag_height(&self) -> f32 {
-        crate::ui::theme::TITLE_BAR_H
+    fn handle_action(&mut self, action: EditorAction) -> ControllerOutcome {
+        let effect = match &action {
+            EditorAction::Window(command) => Some(AppEffect::Window(*command)),
+            _ => None,
+        };
+        let changed = self.handle_action(action);
+        effect.map_or_else(
+            || ControllerOutcome::changed(changed),
+            ControllerOutcome::with_effect,
+        )
     }
 }
 
@@ -284,9 +282,9 @@ fn decode_about_payload(capability: &tela_bridge::CapabilityId, bytes: &[u8]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tela_app_runtime::{Application, ApplicationConfig};
     use tela_contract::{IconProvider, Point, PointerEvent, Viewport};
     use tela_icon_resources::MaterialIconFontProvider;
-    use tela_target_win32_static::{Application, ApplicationConfig};
     use tela_text_resources::{CONTROLLED_FONT_CATALOG, ControlledTextMeasurer};
 
     static TEST_TEXT_MEASURER: ControlledTextMeasurer = ControlledTextMeasurer;
@@ -391,6 +389,26 @@ mod tests {
     }
 
     #[test]
+    fn title_bar_exposes_a_declarative_window_drag_region() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        let point = Point { x: 600.0, y: 17.0 };
+        let (_, frame) = app.active().expect("editor frame");
+        let role = frame
+            .hit_regions
+            .iter()
+            .rev()
+            .find(|region| {
+                point.x >= region.rect.x
+                    && point.y >= region.rect.y
+                    && point.x < region.rect.x + region.rect.w
+                    && point.y < region.rect.y + region.rect.h
+            })
+            .map(|region| region.role);
+        assert_eq!(role, Some(tela_contract::HitRole::WindowDrag));
+    }
+
+    #[test]
     fn close_button_click_publishes_window_command() {
         let mut app = app();
         ensure_and_present(&mut app);
@@ -415,10 +433,13 @@ mod tests {
 
         assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
         assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
+        assert!(app.ensure_frame());
+        let publication = ApplicationSession::publish(&mut app).expect("window publication");
         assert_eq!(
-            app.take_window_command(),
-            Some(tela_contract::WindowCommand::Close)
+            publication.effects,
+            vec![AppEffect::Window(tela_contract::WindowCommand::Close)]
         );
+        ApplicationSession::rejected(&mut app, publication.token);
     }
 
     #[test]
@@ -484,6 +505,7 @@ mod tests {
         ensure_and_present(&mut app);
         let point = point_for_key(&app, "editor.nav.settings");
 
+        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
         assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
         assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
         assert_eq!(app.controller().route.get(), Route::Settings);
@@ -629,6 +651,33 @@ mod tests {
         assert!(app.on_animation_tick(5_200));
         assert!(app.ensure_frame());
         assert!(!app.animation_schedule().active);
+    }
+
+    #[test]
+    fn pointer_projection_redraws_only_when_hover_or_pressed_state_changes() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        let point = point_for_key(&app, "editor.nav.settings");
+
+        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
+        assert!(
+            !app.frame_is_current(),
+            "hover entry must invalidate the frame"
+        );
+        ensure_and_present(&mut app);
+
+        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
+        assert!(
+            app.frame_is_current(),
+            "raw moves inside the same hover target must not redraw"
+        );
+        assert!(!app.ensure_frame());
+
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        assert!(
+            !app.frame_is_current(),
+            "pressed projection must be visible without waiting for another state change"
+        );
     }
 
     fn tree_contains_text_font(

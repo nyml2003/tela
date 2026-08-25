@@ -609,23 +609,28 @@ impl ViewState {
     }
 
     fn dispatch_guest_without_text_reconcile(&mut self, event: AppEvent) -> Result<bool, String> {
-        let (changed, frame, frame_token) = {
+        let (outcome, publication) = {
             let runtime = self
                 .runtime
                 .as_mut()
                 .ok_or_else(|| "dispatch without a live guest runtime".to_owned())?;
-            let changed = runtime
+            let outcome = runtime
                 .dispatch(&event)
                 .map_err(|error| error.to_string())?;
-            let frame = runtime.frame().map_err(|error| error.to_string())?;
+            let publication = outcome
+                .publish_requested
+                .then(|| runtime.publish_latest().map_err(|error| error.to_string()))
+                .transpose()?;
             if let Some(dispatcher) = self.bridge.as_mut() {
                 process_bridge_requests(runtime, dispatcher)?;
             }
-            (changed, frame, runtime.status().frame_token)
+            (outcome, publication)
         };
-        self.frame = Some(frame);
-        self.frame_token = frame_token;
-        Ok(changed)
+        if let Some(publication) = publication {
+            self.frame_token = Some(publication.token);
+            self.frame = Some(publication.frame);
+        }
+        Ok(outcome.handled)
     }
 
     fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
@@ -807,6 +812,13 @@ impl ViewState {
             .ok_or_else(|| "render without a live GPU session".to_owned())?;
         match gpu.render(frame) {
             RenderOutcome::Presented { suboptimal } => {
+                if frame_token != self.presented_frame_token
+                    && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), frame_token)
+                {
+                    let _ = runtime
+                        .presented(token)
+                        .map_err(|error| error.to_string())?;
+                }
                 self.presented_frame_token = frame_token;
                 self.lifecycle.surface_presented();
                 self.cancel_surface_retry();

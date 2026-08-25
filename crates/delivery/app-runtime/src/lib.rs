@@ -1,16 +1,23 @@
-//! 静态壳的跨应用会话运行时。
+//! Platform-neutral in-process application session runtime.
 //!
-//! 壳的 `Win32StaticSession` 协议在这里为任意应用一次性实现：`Application<A, C>` 持有
+//! `Application<A, C>` 持有
 //! 帧协调器、视图状态仓库、输入派发与窗口命令队列等通用生命周期，应用只需实现
 //! [`AppController`] 提供域渲染与动作处理。本模块不触碰任何 Windows API，可在非
 //! Windows 宿主上编译，供多端静态壳复用。
 
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
 use std::{collections::BTreeSet, time::Instant};
 
+use tela_app_session::{
+    AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPublication,
+    AppStatus, ApplicationSession, CursorKind, SessionError,
+};
 use tela_contract::{
     FocusAppearance, FocusDirection, InputEvent, KernelInteraction, KeyboardIntent,
     KeyboardIntentEvent, Modifiers, PhysicalKey, Point, PointerEvent, SemanticKey, TextInputEvent,
-    TextInputSpec, TextSelection, UiFrame, UiLayoutError, UiResources, Viewport, WindowCommand,
+    TextInputSpec, TextSelection, UiFrame, UiLayoutError, UiResources, Viewport,
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
 use tela_ui_dsl::{
@@ -40,6 +47,33 @@ pub struct ApplicationConfig {
     pub focus_appearance: Option<FocusAppearance>,
 }
 
+/// 应用动作的一次性结果；effect 与由该动作产生的候选帧一起提交。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ControllerOutcome {
+    /// 动作是否改变应用投影。
+    pub changed: bool,
+    /// 仅在对应 publication 成功呈现后执行的 Host effect。
+    pub effects: Vec<AppEffect>,
+}
+
+impl ControllerOutcome {
+    /// 仅声明投影是否变化。
+    pub const fn changed(changed: bool) -> Self {
+        Self {
+            changed,
+            effects: Vec::new(),
+        }
+    }
+
+    /// 声明投影变化并附带一个事务性 Host effect。
+    pub fn with_effect(effect: AppEffect) -> Self {
+        Self {
+            changed: true,
+            effects: vec![effect],
+        }
+    }
+}
+
 impl Default for ApplicationConfig {
     fn default() -> Self {
         Self {
@@ -62,18 +96,8 @@ pub trait AppController<A: Clone + 'static> {
     fn render(&mut self, build: &mut ViewBuild<A>, ctx: &FrameContext)
     -> ViewResult<ViewOutput<A>>;
 
-    /// 处理一个 DSL 动作；返回是否引起界面变化（需要重新出帧）。
-    fn handle_action(&mut self, action: A) -> bool;
-
-    /// 自绘标题栏待执行窗口命令（`None` = 无待执行命令）。
-    fn take_window_command(&mut self) -> Option<WindowCommand> {
-        None
-    }
-
-    /// 自绘标题栏可拖动高度（逻辑像素；`0.0` = 关闭原生拖动）。
-    fn title_bar_drag_height(&self) -> f32 {
-        0.0
-    }
+    /// 处理一个 DSL 动作并返回投影变化与事务性 Host effect。
+    fn handle_action(&mut self, action: A) -> ControllerOutcome;
 
     /// Host 定时唤醒；应用可在此刷新外部快照或发送安全 heartbeat。
     fn on_tick(&mut self) -> bool {
@@ -90,7 +114,7 @@ pub trait AppController<A: Clone + 'static> {
 }
 
 fn session_trace_enabled() -> bool {
-    crate::trace_enabled()
+    std::env::var_os("TELA_APP_TRACE").is_some()
 }
 
 macro_rules! session_trace {
@@ -103,8 +127,8 @@ macro_rules! session_trace {
 
 /// 静态壳会话：帧生命周期 + 输入派发 + 文本通道 + 窗口命令队列。
 ///
-/// 通用逻辑全部在此，应用只提供 [`AppController`]。壳（如 Win32 消息循环）经
-/// `Win32StaticSession` 的 blanket impl 驱动本会话，不直接接触应用类型。跨应用可用：
+/// 通用逻辑全部在此，应用只提供 [`AppController`]。Target 经 [`ApplicationSession`]
+/// 驱动本会话，不直接接触应用类型。跨应用可用：
 /// 所有应用专属常量（初始视口、焦点外观等）都经 [`ApplicationConfig`] 注入，本类型
 /// 不含任何具体应用的语义。
 pub struct Application<A: Clone + 'static, C: AppController<A>> {
@@ -122,6 +146,11 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     last_layout_measures: usize,
     last_rebuild_log_at: Instant,
     animation_clock: AnimationClock,
+    next_publication_token: u64,
+    pending_publication_token: Option<AppFrameToken>,
+    pending_reuses_active: bool,
+    presented_publication_token: Option<AppFrameToken>,
+    pending_effects: Vec<AppEffect>,
 }
 
 struct PendingFrame<A> {
@@ -160,12 +189,17 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             last_layout_measures: 0,
             last_rebuild_log_at: Instant::now(),
             animation_clock: AnimationClock::default(),
+            next_publication_token: 0,
+            pending_publication_token: None,
+            pending_reuses_active: false,
+            presented_publication_token: None,
+            pending_effects: Vec::new(),
         }
     }
 
     /// 注入一个程序化应用动作（菜单、快捷键、测试等非 UI 派发入口）；返回是否引起界面变化。
     pub fn dispatch_action(&mut self, action: A) -> bool {
-        let changed = self.controller.handle_action(action);
+        let changed = self.apply_controller_action(action);
         if changed {
             self.invalidate_frame();
         }
@@ -401,11 +435,10 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         }
         let mut output_changed = false;
         for action in self.frames.take_component_outputs() {
-            output_changed |= self.controller.handle_action(action);
+            output_changed |= self.apply_controller_action(action);
         }
         if output_changed {
             self.invalidate_frame();
-            self.ensure_frame();
         }
         session_trace!(
             "session_frame_presented result=committed frame_viewport={committed_viewport:?} output_changed={output_changed}"
@@ -452,19 +485,17 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let active = self
+        let pressed_before = self.view_state.pressed_mouse_key().cloned();
+        let actions = self
             .frames
             .active()
-            .expect("accepted token requires an active frame");
-        let frame = active.frame().clone();
-        let tree = active.tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Pointer(event),
-        );
-        let changed = self.handle_framed_actions(token, &actions);
+            .expect("accepted token requires an active frame")
+            .input_plan()
+            .dispatch(&mut self.view_state, &InputEvent::Pointer(event));
+        let projected_pointer_state_changed =
+            pressed_before != self.view_state.pressed_mouse_key().cloned();
+        let framed_action_changed = self.handle_framed_actions(token, &actions);
+        let changed = projected_pointer_state_changed || framed_action_changed;
         if changed {
             self.invalidate_frame();
         }
@@ -490,7 +521,6 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 派发一个物理键事件；返回消费的动作数。
     pub fn handle_key(&mut self, physical_key: u16, modifier_bits: u8, repeat: bool) -> u32 {
-        self.ensure_frame();
         let Some(physical) = PhysicalKey::from_code(physical_key) else {
             return 0;
         };
@@ -522,18 +552,15 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let active = self
+        let actions = self
             .frames
             .active()
-            .expect("accepted token requires an active frame");
-        let frame = active.frame().clone();
-        let tree = active.tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Keyboard(KeyboardIntentEvent { intent, repeat }),
-        );
+            .expect("accepted token requires an active frame")
+            .input_plan()
+            .dispatch(
+                &mut self.view_state,
+                &InputEvent::Keyboard(KeyboardIntentEvent { intent, repeat }),
+            );
         let changed = self.handle_framed_actions(token, &actions);
         if changed {
             self.invalidate_frame();
@@ -700,27 +727,11 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     }
 
     /// 逻辑指针位置是否命中可悬停节点。
-    pub fn hit_test_interactive_at(&mut self, point: Point) -> bool {
-        self.ensure_frame();
+    pub fn hit_test_interactive_at(&self, point: Point) -> bool {
         let Some(active) = self.frames.active() else {
             return false;
         };
-        self.profile
-            .hit_test_interactive(active.tree(), active.frame(), point)
-    }
-
-    /// 自绘标题栏待执行窗口命令（壳每次输入 dispatch 后消费）。
-    pub fn take_window_command(&mut self) -> Option<WindowCommand> {
-        let command = self.controller.take_window_command();
-        if let Some(command) = command {
-            session_trace!("session_take_window_command command={command:?}");
-        }
-        command
-    }
-
-    /// 自绘标题栏可拖动高度（逻辑像素）。
-    pub fn title_bar_drag_height(&self) -> f32 {
-        self.controller.title_bar_drag_height()
+        active.input_plan().hit_test_interactive(point)
     }
 
     fn prepare_projection(&mut self) -> Result<tela_ui_dsl::PreparedFrame<A>, String> {
@@ -739,24 +750,17 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         self.frames.prepare(root).map_err(|error| error.to_string())
     }
 
-    fn current_frame_token(&mut self) -> Option<FrameToken> {
-        self.ensure_frame();
+    fn current_frame_token(&self) -> Option<FrameToken> {
         self.frames.active().map(|frame| frame.token())
     }
 
     fn dispatch_text_input(&mut self, token: FrameToken, event: TextInputEvent) -> bool {
-        let active = self
+        let actions = self
             .frames
             .active()
-            .expect("accepted token requires an active frame");
-        let frame = active.frame().clone();
-        let tree = active.tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Text(event),
-        );
+            .expect("accepted token requires an active frame")
+            .input_plan()
+            .dispatch(&mut self.view_state, &InputEvent::Text(event));
         let changed = self.handle_framed_actions(token, &actions);
         if changed {
             self.invalidate_frame();
@@ -772,7 +776,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 continue;
             }
             if let Some(action) = self.frames.dispatch_interaction(&framed) {
-                changed |= self.controller.handle_action(action);
+                changed |= self.apply_controller_action(action);
                 continue;
             }
             if self
@@ -796,6 +800,142 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     fn invalidate_frame(&mut self) {
         self.projection_invalidated = true;
+    }
+
+    fn apply_controller_action(&mut self, action: A) -> bool {
+        let outcome = self.controller.handle_action(action);
+        self.pending_effects.extend(outcome.effects);
+        outcome.changed
+    }
+}
+
+impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application<A, C> {
+    fn initialize(&mut self) -> Result<AppDispatchOutcome, SessionError> {
+        self.invalidate_frame();
+        Ok(AppDispatchOutcome {
+            handled: true,
+            publish_requested: true,
+        })
+    }
+
+    fn dispatch(&mut self, event: AppEvent) -> Result<AppDispatchOutcome, SessionError> {
+        let handled = match event {
+            AppEvent::Wake { .. } => self.on_tick(),
+            AppEvent::Tick { timestamp_ms } => self.on_animation_tick(timestamp_ms),
+            AppEvent::Viewport { width, height } => self.set_viewport(width, height, 1.0),
+            AppEvent::WindowState { maximized } => self.set_window_maximized(maximized),
+            AppEvent::ReplaceKeymapJson(_) => false,
+            AppEvent::FrameInput {
+                source_frame_token,
+                input,
+            } => {
+                if self.presented_publication_token != Some(source_frame_token) {
+                    return Ok(AppDispatchOutcome::IDLE);
+                }
+                match input {
+                    AppFrameInput::Pointer(event) => self.handle_pointer(event.into()) > 0,
+                    AppFrameInput::KeyDown {
+                        physical_key,
+                        modifier_bits,
+                        repeat,
+                    } => self.handle_key(physical_key, modifier_bits, repeat) > 0,
+                    AppFrameInput::SetInputValue(value) => self.set_input_value(value) > 0,
+                    AppFrameInput::InputFocus => self.input_focus() > 0,
+                    AppFrameInput::InputBlur => self.input_blur() > 0,
+                    AppFrameInput::InputEnter => self.input_enter() > 0,
+                    AppFrameInput::InputCancel => self.input_cancel() > 0,
+                    AppFrameInput::InputCompositionStart | AppFrameInput::InputCompositionEnd => {
+                        self.input_focused()
+                    }
+                }
+            }
+        };
+        Ok(AppDispatchOutcome {
+            handled,
+            publish_requested: !self.frame_is_current() || handled && self.pending_frame.is_none(),
+        })
+    }
+
+    fn publish(&mut self) -> Result<AppPublication, SessionError> {
+        self.ensure_frame();
+        let frame = self
+            .pending_frame
+            .as_ref()
+            .map(|pending| pending.resolved.frame())
+            .or_else(|| self.frames.active().map(|active| active.frame()))
+            .ok_or_else(|| SessionError::new("application did not produce a frame"))?
+            .clone();
+        let token = match self.pending_publication_token {
+            Some(token) => token,
+            None => {
+                self.next_publication_token = self
+                    .next_publication_token
+                    .checked_add(1)
+                    .ok_or_else(|| SessionError::new("application publication token exhausted"))?;
+                let token = AppFrameToken::new(self.next_publication_token)
+                    .expect("checked non-zero publication token");
+                self.pending_publication_token = Some(token);
+                token
+            }
+        };
+        self.pending_reuses_active = self.pending_frame.is_none();
+        let schedule = self.animation_schedule();
+        let cursor = if self.input_focused() {
+            CursorKind::Text
+        } else if self.hover_interactive() {
+            CursorKind::Pointer
+        } else {
+            CursorKind::Default
+        };
+        Ok(AppPublication {
+            token,
+            frame,
+            status: AppStatus {
+                frame_token: Some(token),
+                cursor,
+                input_focused: self.input_focused(),
+                input_value: self.input_value(),
+                animation_active: schedule.active,
+                next_deadline_ms: schedule.next_deadline_ms,
+            },
+            effects: self.pending_effects.clone(),
+        })
+    }
+
+    fn presented(&mut self, token: AppFrameToken) -> Result<AppDispatchOutcome, SessionError> {
+        if self.pending_publication_token != Some(token) {
+            return Err(SessionError::new(
+                "presented token is not the pending publication",
+            ));
+        }
+        let publish_requested = if self.pending_reuses_active {
+            false
+        } else {
+            self.frame_presented()
+        };
+        self.pending_publication_token = None;
+        self.pending_reuses_active = false;
+        self.presented_publication_token = Some(token);
+        self.pending_effects.clear();
+        Ok(AppDispatchOutcome {
+            handled: true,
+            publish_requested,
+        })
+    }
+
+    fn rejected(&mut self, token: AppFrameToken) {
+        if self.pending_publication_token != Some(token) {
+            return;
+        }
+        if !self.pending_reuses_active {
+            self.frame_rejected();
+        }
+        self.pending_publication_token = None;
+        self.pending_reuses_active = false;
+    }
+
+    fn close(&mut self) {
+        self.on_close();
     }
 }
 

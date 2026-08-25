@@ -4,6 +4,9 @@
 import type { TelaWebviewBindings, WebAppStatus } from './bindings';
 
 const MAX_PACKET_BYTES = 64 * 1024 * 1024;
+const OUTCOME_OK = 1 << 31;
+const OUTCOME_HANDLED = 1;
+const OUTCOME_PUBLISH_REQUESTED = 1 << 1;
 
 type GuestFunction = (...args: number[]) => number;
 
@@ -13,10 +16,11 @@ interface GuestExports {
   tela_app_init: GuestFunction;
   tela_app_input_begin: GuestFunction;
   tela_app_dispatch: GuestFunction;
-  tela_app_frame_ptr: GuestFunction;
-  tela_app_frame_len: GuestFunction;
-  tela_app_status_ptr: GuestFunction;
-  tela_app_status_len: GuestFunction;
+  tela_app_publish: GuestFunction;
+  tela_app_publication_ptr: GuestFunction;
+  tela_app_publication_len: GuestFunction;
+  tela_app_presented: GuestFunction;
+  tela_app_rejected: GuestFunction;
   tela_app_error_ptr: GuestFunction;
   tela_app_error_len: GuestFunction;
   tela_app_request_begin?: GuestFunction;
@@ -26,14 +30,19 @@ interface GuestExports {
 }
 
 export interface GuestPublication {
-  readonly changed: boolean;
   readonly framePacket: Uint8Array;
   readonly status: WebAppStatus;
+}
+
+export interface GuestDispatchResult {
+  readonly handled: boolean;
+  readonly published: boolean;
 }
 
 /** A bounded, browser-native instance of the portable Tela application guest. */
 export class TelaGuestRuntime {
   private latest: GuestPublication | undefined;
+  private pendingToken: bigint | undefined;
 
   private constructor(
     private readonly bindings: TelaWebviewBindings,
@@ -58,26 +67,49 @@ export class TelaGuestRuntime {
 
   /** Runs one guest initialization and reads its first frame/status publication. */
   initialize(): GuestPublication {
-    const initialized = this.exports.tela_app_init() >>> 0;
-    if (initialized === 0) {
-      throw new Error(this.guestError() || '应用 guest 初始化失败');
+    const initialized = this.requireOutcome(this.exports.tela_app_init(), '初始化');
+    if (!initialized.publishRequested) {
+      throw new Error('应用 guest 初始化后未请求首帧发布');
     }
-    return this.refresh(true);
+    return this.publish();
   }
 
-  /** Delivers one Rust-encoded event and atomically refreshes the public frame/status pair. */
-  dispatch(packet: Uint8Array): GuestPublication {
+  /** Delivers one Rust-encoded event and publishes only when the guest requests it. */
+  dispatch(packet: Uint8Array): GuestDispatchResult {
     if (packet.byteLength > MAX_PACKET_BYTES) {
       throw new Error(`应用事件包超过 ${MAX_PACKET_BYTES / 1024 / 1024} MiB 限制`);
     }
     const pointer = this.exports.tela_app_input_begin(packet.byteLength) >>> 0;
     this.copyIntoGuest(pointer, packet);
-    const changed = this.exports.tela_app_dispatch(packet.byteLength) !== 0;
-    if (!changed) {
-      const diagnostic = this.guestError();
-      if (diagnostic) throw new Error(diagnostic);
+    const outcome = this.requireOutcome(
+      this.exports.tela_app_dispatch(packet.byteLength),
+      '事件派发',
+    );
+    if (outcome.publishRequested) {
+      if (this.pendingToken !== undefined) {
+        this.rejectPublication(this.pendingToken);
+      }
+      this.publish();
     }
-    return this.refresh(changed);
+    return { handled: outcome.handled, published: outcome.publishRequested };
+  }
+
+  /** Acknowledges that the browser has actually presented the latest publication. */
+  acknowledgePresented(token: bigint): void {
+    if (this.pendingToken !== token) {
+      throw new Error(`应用呈现回执不是当前待确认发布: token=${token}`);
+    }
+    this.requireTokenOutcome(this.exports.tela_app_presented, token, '呈现回执');
+    this.pendingToken = undefined;
+  }
+
+  /** Rejects the latest publication when the host cannot retain or retry it. */
+  rejectPublication(token: bigint): void {
+    if (this.pendingToken !== token) {
+      throw new Error(`应用拒绝的不是当前待确认发布: token=${token}`);
+    }
+    this.requireTokenOutcome(this.exports.tela_app_rejected, token, '发布拒绝');
+    this.pendingToken = undefined;
   }
 
   /** Whether the guest exposes the full bridge ABI (all four exports present). */
@@ -132,21 +164,45 @@ export class TelaGuestRuntime {
     return this.publication().status;
   }
 
-  private refresh(changed: boolean): GuestPublication {
-    const framePacket = this.readGuestExport(
-      this.exports.tela_app_frame_ptr,
-      this.exports.tela_app_frame_len,
-      'frame',
+  private publish(): GuestPublication {
+    this.requireOutcome(this.exports.tela_app_publish(), '应用发布');
+    const packet = this.readGuestExport(
+      this.exports.tela_app_publication_ptr,
+      this.exports.tela_app_publication_len,
+      'publication',
     );
-    const statusPacket = this.readGuestExport(
-      this.exports.tela_app_status_ptr,
-      this.exports.tela_app_status_len,
-      'status',
-    );
-    const status = this.bindings.decode_app_status(statusPacket);
-    const publication = { changed, framePacket, status };
+    const decoded = this.bindings.decode_app_publication(packet);
+    const publication = {
+      framePacket: decoded.frame_packet(),
+      status: decoded.status(),
+    };
+    const token = publication.status.frame_token;
+    if (token === undefined) {
+      throw new Error('应用 publication 未携带 frame token');
+    }
+    this.pendingToken = token;
     this.latest = publication;
     return publication;
+  }
+
+  private requireOutcome(
+    rawOutcome: number,
+    operation: string,
+  ): { handled: boolean; publishRequested: boolean } {
+    const outcome = rawOutcome >>> 0;
+    if ((outcome & OUTCOME_OK) === 0) {
+      throw new Error(this.guestError() || `应用 guest ${operation}失败`);
+    }
+    return {
+      handled: (outcome & OUTCOME_HANDLED) !== 0,
+      publishRequested: (outcome & OUTCOME_PUBLISH_REQUESTED) !== 0,
+    };
+  }
+
+  private requireTokenOutcome(call: GuestFunction, token: bigint, operation: string): void {
+    const low = Number(token & 0xffff_ffffn);
+    const high = Number((token >> 32n) & 0xffff_ffffn);
+    this.requireOutcome(call(low, high), operation);
   }
 
   private guestError(): string {
@@ -206,10 +262,11 @@ function requireGuestExports(exports: WebAssembly.Exports): GuestExports {
     'tela_app_init',
     'tela_app_input_begin',
     'tela_app_dispatch',
-    'tela_app_frame_ptr',
-    'tela_app_frame_len',
-    'tela_app_status_ptr',
-    'tela_app_status_len',
+    'tela_app_publish',
+    'tela_app_publication_ptr',
+    'tela_app_publication_len',
+    'tela_app_presented',
+    'tela_app_rejected',
     'tela_app_error_ptr',
     'tela_app_error_len',
   ] as const;

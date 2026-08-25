@@ -1347,6 +1347,7 @@ mod tests {
                             h: 20.0,
                         },
                         clip: None,
+                        role: tela_contract::HitRole::Client,
                     }],
                     scroll_bounds: Vec::new(),
                 })

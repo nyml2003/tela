@@ -35,7 +35,9 @@ Win32 壳加载 C ABI DLL 在生产安装器、插件 ABI 或第三方语言嵌�
 
 | crate / 目录 | 拥有内容 | 不拥有内容 |
 | --- | --- | --- |
-| `tela-app-abi` | `AppEvent`、`AppStatus`、帧包编解码、ABI 版本 | 窗口、renderer、业务副作用 |
+| `tela-app-session` | 平台无关的 `ApplicationSession`、`AppPublication`、token 与 Effect 契约 | wire 编码、窗口、renderer |
+| `tela-app-abi` | ABI v6 事件与 atomic publication 编解码、WASM exports | 窗口、renderer、业务副作用 |
+| `tela-app-runtime` | 静态链接应用的 Composition、输入和候选帧事务，实现 `ApplicationSession` | HWND、消息循环、WGPU surface |
 | `tela-bundle` | `.tela` archive、内部清单、SHA-256、路径与条目验证 | HTTP、平台缓存、窗口 |
 | `tela-demo` / `tela-mobile-demo` 的 `app-wasm` feature | 可移植 guest exports、各自应用状态、DSL 与 presentation | DOM、native window、GPU API、彼此的业务 model |
 | `tela-guest-runtime` | Wasmtime guest、无窗口 verifier、严格 index/archive 校验 | GUI 生命周期、window/surface、IME、缓存、任何 Target SDK |
@@ -52,26 +54,42 @@ Win32 壳加载 C ABI DLL 在生产安装器、插件 ABI 或第三方语言嵌�
 
 ### 3.1 Win32 静态编辑器链路（无 bundle/WASM）
 
-除 WASM bundle 壳外，Win32 还有一条**静态链接**产品链路（`tela-win32-editor`，无 Wasmtime、无
-`.tela`），其壳协议不面向应用，而由跨应用会话运行时一次性实现：
+除 WASM bundle 壳外，Win32 还有静态链接产品链路（`tela-win32-editor`、`speed-gear`，无
+Wasmtime、无 `.tela`）。动态和静态链路共用一个 `tela-target-win32`；差异只在 target 收到的是
+Wasmtime-backed session 还是 in-process session：
 
 | crate | 角色 |
 | --- | --- |
-| `tela-target-win32-static` | 壳核心：消息循环/HWND/WGPU（`window.rs`）、跨应用会话运行时（`session.rs`）、两壳共用的 bridge providers（`providers.rs`，动态 host 复用） |
-| `tela-target-win32-static::Application` | 通用会话：帧生命周期、输入派发、文本通道、窗口命令队列；`Win32StaticSession` 由它对任意 `AppController` blanket 实现，产品不再手写适配器 |
+| `tela-target-win32` | 唯一 Win32 Target：动态 bundle 壳、native session 壳、公用 HWND/WGPU/provider 与公平消息泵 |
+| `tela-app-runtime::Application` | 通用 in-process 会话：组件/帧事务、输入派发、文本通道，实现 `ApplicationSession` |
 | `tela-win32-editor` | 域控制器（`EditorController`）：信号状态 + `render_root` + 动作处理 + 文本输入通道归属；不感知窗口/消息循环 |
-| `tela-product-win32-editor` | 装配：资源 + 桥 dispatcher + `ApplicationConfig`，然后 `run_static_window` |
+| `tela-product-win32-editor` | 装配：资源 + 桥 dispatcher + `ApplicationConfig`，然后 `run_native_window` |
 
 约束：
 
-- 应用只实现 `AppController<A>`（render / handle_action / handle_value_change / 文本通道 /
-  窗口命令 / 标题栏拖动高度），全部带默认实现；壳协议细节（u32 动作计数、WM_SETCURSOR 查询等）
-  不进入应用。
+- 应用只实现 `AppController<A>` 的 `render` 与返回 `ControllerOutcome` 的 `handle_action`；
+  壳协议细节、窗口命令执行和呈现 token 不进入应用。
 - `Application` 不含任何具体应用常量：初始视口、焦点高亮外观经 `ApplicationConfig` 注入；
-  `session.rs` 不触碰 Windows API，可在 Linux 编译供应用测试，未来多端静态壳可直接平移。
-- 标题栏原生拖动高度由应用经 `title_bar_drag_height()` 声明，壳不再硬编码 40px 魔法常量。
-- providers 以 `tela-target-win32-static::providers` 为单一来源，动态 host（`tela-target-win32`）
-  与静态壳共用，不维护两份拷贝。
+  `tela-app-runtime` 不触碰 Windows API，可在 Linux 编译供应用测试。
+- 标题栏拖动是 `ui!` 的 `window_drag_region` 命中角色；Win32 对已呈现帧的最上层 hit region
+  返回 `HTCAPTION`，按钮等普通 client region 可覆盖拖动区域。应用不得再声明固定拖动高度。
+- providers 以 `tela-target-win32::providers` 为单一来源，两种交付链路不维护副本。
+
+### 3.2 ApplicationSession 与 ABI v6
+
+所有可替换 guest 和 in-process 应用遵守同一个阶段协议：
+
+```text
+initialize -> dispatch(AppEvent) -> [publish_requested]
+           -> publish() = AppPublication { token, frame, status, effects }
+           -> Target present
+           -> presented(token) | rejected(token)
+```
+
+`dispatch` 不 resolve、编码或复制帧。frame/status/effects 不能分三个导出读取，WASM guest 只暴露
+一个 atomic publication packet。Target 可以重试同一 candidate；若用新 publication 替换尚未
+呈现的 candidate，必须先 `rejected`。只有成功 `presented` 的 token 能作为 `FrameInput` 来源，
+Effect 也只有此时可执行。
 
 ## 4. 开发包与启动协议
 
@@ -159,16 +177,18 @@ guest 通过线性内存导出下列 C ABI 形状的函数。它们是 WASM expo
 | export | 作用 |
 | --- | --- |
 | `tela_app_abi_version() -> u32` | 必须等于 host 的 ABI 版本 |
-| `tela_app_init() -> u32` | 重置应用并发布首帧 |
+| `tela_app_init() -> u32` | 重置应用并请求首个 publication |
 | `tela_app_input_begin(bytes) -> ptr` | 保留输入包线性内存 |
-| `tela_app_dispatch(bytes) -> u32` | 消费一个 `AppEvent` 并发布新帧/状态 |
-| `tela_app_frame_ptr/len` | 当前编码 `UiFrame` 的线性内存范围 |
-| `tela_app_status_ptr/len` | 当前 `AppStatus` 的线性内存范围 |
+| `tela_app_dispatch(bytes) -> u32` | 消费一个 `AppEvent`，只返回 handled / publish-requested outcome |
+| `tela_app_publish() -> u32` | 显式构造最新候选 publication |
+| `tela_app_publication_ptr/len` | 原子编码的候选 `frame + status + effects + token` 线性内存范围 |
+| `tela_app_presented(token_low, token_high) -> u32` | 确认候选已经成功呈现，提交该 token |
+| `tela_app_rejected(token_low, token_high) -> u32` | 放弃未能呈现或已被替换的候选 token |
 | `tela_app_error_ptr/len` | 最近失败的 UTF-8 诊断 |
 
-SDK 每次 dispatch 都重新读取完整帧和状态，避免 host 保留 guest 内存借用。包包含 magic 与 ABI 版本；超过 64 MiB 的输入或输出会被拒绝。wire frame 仅允许已有跨后端绘制原语，`DrawPayload::Custom` 不能跨此边界。
+SDK 不在 dispatch 热路径读取或构造帧。只有 outcome 请求 publication 时，Host 才显式调用 `publish` 并复制完整原子包；成功 present 后回传 token，失败或被新候选替换时回传 rejected。Host 只用已 presented token 路由 frame-owned input，避免候选帧、状态和窗口 effect 发生跨代混用。包包含 magic 与各自的线协议版本；超过 64 MiB 的输入或输出会被拒绝。wire frame 仅允许已有跨后端绘制原语，`DrawPayload::Custom` 不能跨此边界。
 
-当前 ABI 为 **v2**。v2 保持既有 packet header 与旧事件编码顺序，在尾部追加 `InputCompositionStart`、`InputCompositionEnd` 与 `ReplaceKeymapJson(String)`：composition 只标记 IME 交互生命周期，受控文本仍由 `SetInputValue` 传递；键位表替换由 guest 原子校验。壳始终传递物理键与 modifier bits，键盘意图只在应用层解析。
+当前 ABI 为 **v6**。v6 将 dispatch 与 publication 分离，引入原子 publication 和 presented/rejected acknowledgement，并把低频维护 `Wake` 与仅推进动画的 `Tick` 分开。`InputCompositionStart`、`InputCompositionEnd` 只标记 IME 交互生命周期，受控文本仍由 `SetInputValue` 传递；键位表替换由 guest 原子校验。壳始终传递物理键与 modifier bits，键盘意图只在应用层解析。
 
 ## 6. 输入、焦点与生命周期
 

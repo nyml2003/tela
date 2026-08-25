@@ -314,16 +314,19 @@ impl AndroidHost {
             // have no guest to target yet and must not turn a normal loading state into failure.
             return Ok(false);
         };
-        let changed = runtime
+        let outcome = runtime
             .dispatch(&event)
             .map_err(|error| error.to_string())?;
-        let frame = runtime.frame().map_err(|error| error.to_string())?;
-        let status = runtime.status().clone();
-        publish_guest_status(&status);
-        self.frame = Some(frame);
-        self.frame_token = status.frame_token;
-        self.request_redraw();
-        Ok(changed)
+        if outcome.publish_requested {
+            let publication = runtime
+                .publish_latest()
+                .map_err(|error| error.to_string())?;
+            publish_guest_status(&publication.status);
+            self.frame_token = Some(publication.token);
+            self.frame = Some(publication.frame);
+            self.request_redraw();
+        }
+        Ok(outcome.handled)
     }
 
     fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
@@ -412,6 +415,13 @@ impl AndroidHost {
         };
         match render_result {
             RenderOutcome::Presented { suboptimal } => {
+                if frame_token != self.presented_frame_token
+                    && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), frame_token)
+                    && let Err(error) = runtime.presented(token)
+                {
+                    self.fail(error.to_string());
+                    return;
+                }
                 self.presented_frame_token = frame_token;
                 if suboptimal {
                     if let Err(error) = self

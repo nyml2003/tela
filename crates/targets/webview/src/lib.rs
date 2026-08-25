@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use tela_app_abi::decode_frame;
 use tela_app_abi::{
     ABI_VERSION, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
-    AppPointerPhase, AppStatus, decode_status, encode_event,
+    AppPointerPhase, AppStatus, decode_publication, decode_status, encode_event, encode_frame,
 };
 use tela_bundle::{BundleArchive, DevelopmentManifest, read_archive, sha256_hex};
 use wasm_bindgen::prelude::*;
@@ -44,6 +44,13 @@ pub struct ValidatedBundle {
 /// Browser-visible non-drawing state decoded from an application ABI status packet.
 #[wasm_bindgen]
 pub struct WebAppStatus {
+    status: AppStatus,
+}
+
+/// One atomically decoded application publication for the browser host.
+#[wasm_bindgen]
+pub struct WebAppPublication {
+    frame_packet: Vec<u8>,
     status: AppStatus,
 }
 
@@ -151,6 +158,34 @@ impl WebAppStatus {
     pub fn next_deadline_ms(&self) -> Option<u64> {
         self.status.next_deadline_ms
     }
+}
+
+#[wasm_bindgen]
+impl WebAppPublication {
+    /// Returns the frame packet expected by the browser WGPU renderer.
+    pub fn frame_packet(&self) -> Vec<u8> {
+        self.frame_packet.clone()
+    }
+
+    /// Returns the non-drawing state from the same atomic publication.
+    pub fn status(&self) -> WebAppStatus {
+        WebAppStatus {
+            status: self.status.clone(),
+        }
+    }
+}
+
+/// Decodes one atomic frame/status/effect publication after it crossed WebAssembly memory.
+#[wasm_bindgen]
+pub fn decode_app_publication(bytes: &[u8]) -> Result<WebAppPublication, JsValue> {
+    let publication = decode_publication(bytes)
+        .map_err(|error| js_error(format!("invalid guest publication packet: {error}")))?;
+    let frame_packet = encode_frame(&publication.frame)
+        .map_err(|error| js_error(format!("invalid guest publication frame: {error}")))?;
+    Ok(WebAppPublication {
+        frame_packet,
+        status: publication.status,
+    })
 }
 
 /// Decodes guest status after its bytes crossed the ordinary WebAssembly boundary.

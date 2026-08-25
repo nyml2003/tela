@@ -21,10 +21,16 @@ export interface WebAppStatus {
   readonly next_deadline_ms: bigint | undefined;
 }
 
+export interface WebAppPublication {
+  frame_packet(): Uint8Array;
+  status(): WebAppStatus;
+}
+
 export interface TelaWebviewBindings {
   host_app_abi_version(): number;
   parse_development_index(bytes: Uint8Array): DevelopmentBundleIndex;
   validate_development_bundle(index: DevelopmentBundleIndex, bytes: Uint8Array): ValidatedBundle;
+  decode_app_publication(bytes: Uint8Array): WebAppPublication;
   decode_app_status(bytes: Uint8Array): WebAppStatus;
   event_viewport(width: number, height: number): Uint8Array;
   event_tick(timestampMs: bigint): Uint8Array;

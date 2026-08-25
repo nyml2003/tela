@@ -520,6 +520,8 @@ impl DrawOrder {
 /// `InteractConcern` 槽位：可点/可悬停/可聚焦/输入/模态/业务绑定/焦点序（见 008、012）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InteractConcern {
+    /// Host 对命中区域的解释角色；普通节点保持 `Client`。
+    pub hit_role: crate::HitRole,
     /// 可点击。
     pub clickable: bool,
     /// 可悬停。

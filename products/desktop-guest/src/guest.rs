@@ -72,13 +72,14 @@ fn apply_event(app: &mut App, event: AppEvent) -> bool {
         bridge.borrow_mut().take_request_queue();
     });
     match event {
+        AppEvent::Wake { .. } => false,
         AppEvent::Tick { timestamp_ms } => app.animation_tick(timestamp_ms),
         AppEvent::Viewport { width, height } => app.set_viewport(width, height),
+        AppEvent::WindowState { .. } => false,
         AppEvent::FrameInput {
             source_frame_token,
             input,
         } => {
-            ensure_frame(app);
             if active_frame_token() != Some(source_frame_token) {
                 return false;
             }

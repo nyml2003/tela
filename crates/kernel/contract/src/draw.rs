@@ -331,6 +331,18 @@ pub struct HitRegion {
     pub rect: Rect,
     /// 与绘制命令相同的预合并 clip，命中测试做点-in-rect 即可。
     pub clip: Option<ClipRect>,
+    /// Host 解释该区域时使用的平台命中角色。
+    pub role: HitRole,
+}
+
+/// Host 可从已发布帧读取的平台命中角色。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HitRole {
+    /// 普通 client 区域，输入继续交给 Tela Kernel。
+    #[default]
+    Client,
+    /// 原生窗口拖动区域，例如 Win32 的 `HTCAPTION`。
+    WindowDrag,
 }
 
 /// 预合并裁剪区域（见 007-绘制与渲染后端 2）。

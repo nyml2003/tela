@@ -52,6 +52,7 @@ impl TitleBar {
                 fill={Fill::Solid(BAR_BACKGROUND)}
                 border_width={1.0}
                 border_color={BAR_BORDER}
+                window_drag_region={true}
             >
                 { build.fragment(children, tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))? }
             </Row>

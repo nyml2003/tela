@@ -4,7 +4,7 @@
 //! [`DslComponent`]，标签可见性由 Rust `use` 决定，宏只做属性搬运工。
 
 use tela_contract::{
-    BorderRadius, Color, ContentConcern, CrossAlign, Fill, Insets, InteractConcern,
+    BorderRadius, Color, ContentConcern, CrossAlign, Fill, HitRole, Insets, InteractConcern,
     KeyboardInputSpec, KeymapScopeId, LayoutConcern, NodeKind, Overflow, OverlaySpec, PixelOffset,
     ShadowSpec, ShortcutScopeSpec, Size, StackAlign, TextContent, TextInputSpec, TextStyleRef,
     UiNode, UpdateMode, VisualConcern,
@@ -150,6 +150,9 @@ macro_rules! apply_primitive_fields {
         if let Some(value) = $props.focusable {
             __interact.focusable = value;
         }
+        if $props.window_drag_region.unwrap_or(false) {
+            __interact.hit_role = HitRole::WindowDrag;
+        }
         if let Some(value) = $props.input {
             __interact.input = Some(value);
         }
@@ -217,6 +220,7 @@ macro_rules! primitive_component {
             pub clickable: Option<bool>,
             pub hoverable: Option<bool>,
             pub focusable: Option<bool>,
+            pub window_drag_region: Option<bool>,
             pub input: Option<TextInputSpec>,
             pub keyboard: Option<KeyboardInputSpec>,
         }
@@ -383,6 +387,7 @@ macro_rules! text_component {
             pub clickable: Option<bool>,
             pub hoverable: Option<bool>,
             pub focusable: Option<bool>,
+            pub window_drag_region: Option<bool>,
             pub input: Option<TextInputSpec>,
             pub keyboard: Option<KeyboardInputSpec>,
             pub value: Option<String>,
@@ -474,6 +479,7 @@ pub struct Image {
     pub clickable: Option<bool>,
     pub hoverable: Option<bool>,
     pub focusable: Option<bool>,
+    pub window_drag_region: Option<bool>,
     pub input: Option<TextInputSpec>,
     pub keyboard: Option<KeyboardInputSpec>,
     pub texture: Option<String>,

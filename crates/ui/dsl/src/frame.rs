@@ -7,7 +7,7 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use tela_contract::{KernelInteraction, NodeId, UiBuildError, UiFrame};
-use tela_core::{IdentityAllocator, UiTree};
+use tela_core::{IdentityAllocator, KernelInputPlan, UiTree};
 
 use crate::view::ResolvedPlans;
 use crate::{
@@ -98,9 +98,11 @@ impl<A> PreparedFrame<A> {
         resolver: impl FnOnce(&UiTree) -> Result<UiFrame, E>,
     ) -> Result<ResolvedFrame<A>, E> {
         let frame = resolver(&self.tree)?;
+        let input_plan = KernelInputPlan::new(&self.tree, &frame);
         Ok(ResolvedFrame {
             prepared: self,
             frame,
+            input_plan,
         })
     }
 }
@@ -109,6 +111,7 @@ impl<A> PreparedFrame<A> {
 pub struct ResolvedFrame<A> {
     prepared: PreparedFrame<A>,
     frame: UiFrame,
+    input_plan: KernelInputPlan,
 }
 
 impl<A> ResolvedFrame<A> {
@@ -118,6 +121,11 @@ impl<A> ResolvedFrame<A> {
     /// 内容连同组件 State 和 Output 一起发布为 active frame。
     pub fn frame(&self) -> &UiFrame {
         &self.frame
+    }
+
+    /// Reusable input indexes derived from this exact tree/frame pair.
+    pub fn input_plan(&self) -> &KernelInputPlan {
+        &self.input_plan
     }
 
     /// 候选帧的动画调度请求；只有 present 成功后才应成为宿主 active 调度状态。
@@ -131,6 +139,7 @@ pub struct ActiveFrame<A> {
     token: FrameToken,
     tree: UiTree,
     frame: UiFrame,
+    input_plan: KernelInputPlan,
     actions: ActionFrame<A>,
     component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
     interaction_index: InteractionIndex,
@@ -151,6 +160,11 @@ impl<A: 'static> ActiveFrame<A> {
     /// 与 [`Self::tree`] 同一次候选 resolve 产生的绘制 / 命中帧。
     pub fn frame(&self) -> &UiFrame {
         &self.frame
+    }
+
+    /// Reusable input indexes for the currently active logical frame.
+    pub fn input_plan(&self) -> &KernelInputPlan {
+        &self.input_plan
     }
 
     /// 当前 DSL 动作快照的单调 generation。
@@ -294,7 +308,11 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         resolved: ResolvedFrame<A>,
         commit_host: impl FnOnce(FrameToken),
     ) -> &ActiveFrame<A> {
-        let ResolvedFrame { prepared, frame } = resolved;
+        let ResolvedFrame {
+            prepared,
+            frame,
+            input_plan,
+        } = resolved;
         let PreparedFrame {
             tree,
             allocator,
@@ -331,6 +349,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             token,
             tree,
             frame,
+            input_plan,
             actions,
             component_actions,
             interaction_index,

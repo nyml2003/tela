@@ -34,7 +34,7 @@ mod window;
 
 pub use draw::{
     BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DrawCommand, DrawPayload, FrameSink,
-    HitRegion, ScrollBounds, UiFrame,
+    HitRegion, HitRole, ScrollBounds, UiFrame,
 };
 pub use error::{UiBuildError, UiLayoutError};
 pub use geometry::{BorderRadius, Color, Insets, PixelOffset, Point, Rect, snap};

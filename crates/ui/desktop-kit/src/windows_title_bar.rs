@@ -1,7 +1,7 @@
 //! Windows 静态壳使用的公共自绘标题栏。
 
 use tela_contract::{
-    Color, CrossAlign, Fill, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern,
+    Color, CrossAlign, Fill, HitRole, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern,
     SemanticKey, Size, UiNode, UpdateMode, VisualConcern,
 };
 use tela_core::LayoutContainer;
@@ -73,7 +73,7 @@ impl WindowsTitleBar {
             cross_align: CrossAlign::Center,
             ..LayoutConcern::default()
         });
-        LayoutContainer::row([
+        let mut root: UiNode = LayoutContainer::row([
             title,
             LayoutContainer::spacer().into(),
             subtitle,
@@ -95,7 +95,12 @@ impl WindowsTitleBar {
             cross_align: CrossAlign::Center,
             ..LayoutConcern::default()
         })
-        .into()
+        .into();
+        root.interact = Some(InteractConcern {
+            hit_role: HitRole::WindowDrag,
+            ..InteractConcern::default()
+        });
+        root
     }
 }
 

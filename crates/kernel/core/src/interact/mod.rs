@@ -8,7 +8,7 @@
 pub(crate) mod focus;
 
 use tela_contract::{
-    FocusDirection, GestureAxis, GestureEvent, GestureKind, GesturePhase, InputEvent,
+    FocusDirection, GestureAxis, GestureEvent, GestureKind, GesturePhase, HitRole, InputEvent,
     KernelInteraction, KeyboardIntent, KeyboardIntentEvent, NodeId, NodeKind, Point, PointerEvent,
     PointerId, PointerKind, PointerPhase, SemanticKey, TextInputEvent, UiFrame, UiNode,
 };
@@ -20,6 +20,68 @@ use focus::{
     next_tab, resolve_port,
 };
 
+/// Immutable interaction data derived from one resolved frame.
+///
+/// Building this plan performs the tree flattening and focus-graph construction that used to
+/// happen for every input event. A published frame can reuse the plan until it is replaced.
+pub struct KernelInputPlan {
+    nodes: Vec<UiNode>,
+    ids: Vec<NodeId>,
+    keys: Vec<SemanticKey>,
+    focus: FocusContext,
+    hit_regions: Vec<tela_contract::HitRegion>,
+}
+
+impl KernelInputPlan {
+    /// Builds the reusable interaction plan for a resolved tree/frame pair.
+    pub fn new(tree: &UiTree, frame: &UiFrame) -> Self {
+        let (nodes, ids, keys) = tree.node_table();
+        let focus = build_focus_context(&nodes, &ids, &keys);
+        Self {
+            nodes: nodes.into_iter().cloned().collect(),
+            ids,
+            keys,
+            focus,
+            hit_regions: frame.hit_regions.clone(),
+        }
+    }
+
+    /// Dispatches one input event without rebuilding per-frame indexes.
+    pub fn dispatch(
+        &self,
+        state: &mut ViewStateStore,
+        event: &InputEvent,
+    ) -> Vec<KernelInteraction> {
+        let mut session = Session::new(self, state);
+        match event {
+            InputEvent::Pointer(pointer) => session.handle_pointer(*pointer),
+            InputEvent::Keyboard(intent) => session.handle_keyboard_intent(intent),
+            InputEvent::Text(event) => session.handle_text_input(event),
+        }
+    }
+
+    /// Returns whether `position` hits a hoverable node in this frame.
+    pub fn hit_test_interactive(&self, position: Point) -> bool {
+        self.hit_regions.iter().rev().any(|region| {
+            hit_contains(&region.rect, &region.clip, &position)
+                && self
+                    .nodes
+                    .get(region.node_id.0 as usize)
+                    .and_then(|node| node.interact.as_ref())
+                    .is_some_and(|interact| interact.hoverable)
+        })
+    }
+
+    /// Returns the topmost host hit role at `position`.
+    pub fn hit_role_at(&self, position: Point) -> HitRole {
+        self.hit_regions
+            .iter()
+            .rev()
+            .find(|region| hit_contains(&region.rect, &region.clip, &position))
+            .map_or(HitRole::Client, |region| region.role)
+    }
+}
+
 /// 交互会话：处理一个输入事件，产出类型化动作（见 008-4）。
 ///
 /// `frame` 为本帧 `resolve` 输出（命中区域）；`state` 为跨帧视图状态仓库。
@@ -29,14 +91,7 @@ pub fn handle_kernel_input(
     state: &mut ViewStateStore,
     event: &InputEvent,
 ) -> Vec<KernelInteraction> {
-    let mut session = Session::new(tree, frame, state);
-    let actions = match event {
-        InputEvent::Pointer(pointer) => session.handle_pointer(*pointer),
-        InputEvent::Keyboard(intent) => session.handle_keyboard_intent(intent),
-        InputEvent::Text(event) => session.handle_text_input(event),
-    };
-    session.commit();
-    actions
+    KernelInputPlan::new(tree, frame).dispatch(state, event)
 }
 
 /// Returns whether the current frame contains a hoverable node at `position`.
@@ -45,14 +100,7 @@ pub fn handle_kernel_input(
 /// pointer position rather than the previously committed hover state, otherwise a custom title
 /// bar can classify the first pointer entry as non-client and never deliver `WM_MOUSEMOVE`.
 pub(crate) fn hit_test_interactive(tree: &UiTree, frame: &UiFrame, position: Point) -> bool {
-    let (nodes, _, _) = tree.node_table();
-    frame.hit_regions.iter().rev().any(|region| {
-        hit_contains(&region.rect, &region.clip, &position)
-            && nodes
-                .get(region.node_id.0 as usize)
-                .and_then(|node| node.interact.as_ref())
-                .is_some_and(|interact| interact.hoverable)
-    })
+    KernelInputPlan::new(tree, frame).hit_test_interactive(position)
 }
 
 /// 显式保存当前焦点入视图状态仓库（见 008-2.10 Save/Restore）。
@@ -143,27 +191,17 @@ pub fn ensure_modal_focus(tree: &UiTree, state: &mut ViewStateStore) -> Vec<Kern
 
 /// 单次事件处理会话（收集动作，结束时提交焦点状态）。
 struct Session<'a> {
-    frame: &'a UiFrame,
+    plan: &'a KernelInputPlan,
     state: &'a mut ViewStateStore,
     actions: Vec<KernelInteraction>,
-    nodes: Vec<&'a UiNode>,
-    ids: Vec<NodeId>,
-    keys: Vec<SemanticKey>,
-    focus: Option<FocusContext>,
 }
 
 impl<'a> Session<'a> {
-    fn new(tree: &'a UiTree, frame: &'a UiFrame, state: &'a mut ViewStateStore) -> Self {
-        let (nodes, ids, keys) = tree.node_table();
-        let focus = build_focus_context(&nodes, &ids, &keys);
+    fn new(plan: &'a KernelInputPlan, state: &'a mut ViewStateStore) -> Self {
         Session {
-            frame,
+            plan,
             state,
             actions: Vec::new(),
-            nodes,
-            ids,
-            keys,
-            focus: Some(focus),
         }
     }
 
@@ -171,12 +209,8 @@ impl<'a> Session<'a> {
     fn current_focus_id(&self) -> Option<NodeId> {
         self.state
             .current_focus_key()
-            .and_then(|key| self.keys.iter().position(|k| k == key))
-            .map(|idx| self.ids[idx])
-    }
-
-    fn commit(&mut self) {
-        // 焦点状态更新在 handle_* 内完成（FocusChanged 时同步 state）。
+            .and_then(|key| self.plan.keys.iter().position(|k| k == key))
+            .map(|idx| self.plan.ids[idx])
     }
 
     // ---------- 文本输入 ----------
@@ -186,6 +220,7 @@ impl<'a> Session<'a> {
             return Vec::new();
         };
         let Some(interact) = self
+            .plan
             .nodes
             .get(node_id.0 as usize)
             .and_then(|node| node.interact.as_ref())
@@ -368,6 +403,7 @@ impl<'a> Session<'a> {
                 (session.target_key.as_ref(), self.hit_test(event.position))
                 && self.key_for_node_id(hit_id) == *target_key
                 && self
+                    .plan
                     .nodes
                     .get(hit_id.0 as usize)
                     .and_then(|node| node.interact.as_ref())
@@ -401,23 +437,23 @@ impl<'a> Session<'a> {
     }
 
     fn key_for_node_id(&self, node_id: NodeId) -> SemanticKey {
-        self.keys
+        self.plan
+            .keys
             .get(node_id.0 as usize)
             .cloned()
             .expect("命中区 node id 必须和当前 key 表对齐")
     }
 
     fn node_id_for_key(&self, key: &SemanticKey) -> Option<NodeId> {
-        self.keys
+        self.plan
+            .keys
             .iter()
             .position(|candidate| candidate == key)
-            .and_then(|index| self.ids.get(index).copied())
+            .and_then(|index| self.plan.ids.get(index).copied())
     }
 
     fn gesture_candidates(&self, node_id: NodeId) -> Vec<GestureCandidate> {
-        let Some(focus) = self.focus.as_ref() else {
-            return Vec::new();
-        };
+        let focus = &self.plan.focus;
         let mut path = Vec::new();
         let mut index = node_id.0 as usize;
         loop {
@@ -433,10 +469,10 @@ impl<'a> Session<'a> {
         path.reverse();
         let mut candidates = Vec::new();
         for (depth, index) in path.into_iter().enumerate() {
-            let Some(node) = self.nodes.get(index) else {
+            let Some(node) = self.plan.nodes.get(index) else {
                 continue;
             };
-            let key = self.keys[index].clone();
+            let key = self.plan.keys[index].clone();
             let config = node
                 .interact
                 .as_ref()
@@ -763,14 +799,14 @@ impl<'a> Session<'a> {
                 .is_some_and(|interact| interact.hoverable)
                 .then_some(node_id)
         });
-        let new_key = new_hover.and_then(|id| self.keys.get(id.0 as usize).cloned());
+        let new_key = new_hover.and_then(|id| self.plan.keys.get(id.0 as usize).cloned());
         let old_key = self.state.hover_key().cloned();
         if old_key != new_key {
             if let Some(old_key) = old_key
-                && let Some(idx) = self.keys.iter().position(|key| *key == old_key)
+                && let Some(idx) = self.plan.keys.iter().position(|key| *key == old_key)
             {
                 self.actions.push(KernelInteraction::Hover {
-                    node_id: self.ids[idx],
+                    node_id: self.plan.ids[idx],
                     entered: false,
                 });
             }
@@ -787,17 +823,17 @@ impl<'a> Session<'a> {
     /// 命中测试：反向遍历命中区域（后绘制在上），模态栈拦截下层（见 008-3）。
     fn hit_test(&self, position: Point) -> Option<(NodeId, &'a UiNode)> {
         let top_modal = self.top_modal_node_id();
-        let parents = self.focus.as_ref().map(|f| &f.parents);
-        for region in self.frame.hit_regions.iter().rev() {
+        let parents = Some(&self.plan.focus.parents);
+        for region in self.plan.hit_regions.iter().rev() {
             if !hit_contains(&region.rect, &region.clip, &position) {
                 continue;
             }
             // 结构 id = DFS 索引（id.0 == index，见 focus.rs 约定）。
             let idx = region.node_id.0 as usize;
-            if idx >= self.nodes.len() {
+            if idx >= self.plan.nodes.len() {
                 continue;
             }
-            let node = self.nodes[idx];
+            let node = &self.plan.nodes[idx];
             // 模态拦截：栈顶模态存在时，只允许命中栈顶模态子树内的节点。
             if let Some(modal) = top_modal
                 && let Some(parents) = parents
@@ -812,17 +848,17 @@ impl<'a> Session<'a> {
 
     /// 滚轮从命中叶子向上归属到最近的滚动容器，使表格内按钮不会截断表体滚动。
     fn nearest_scroll_target(&self, node_id: NodeId) -> Option<NodeId> {
-        let parents = self.focus.as_ref()?.parents.as_slice();
+        let parents = self.plan.focus.parents.as_slice();
         let mut index = node_id.0 as usize;
         loop {
             if matches!(
-                self.nodes.get(index).map(|node| &node.kind),
+                self.plan.nodes.get(index).map(|node| &node.kind),
                 Some(
                     tela_contract::NodeKind::ScrollView
                         | tela_contract::NodeKind::VirtualListView(_)
                 )
             ) {
-                return self.ids.get(index).copied();
+                return self.plan.ids.get(index).copied();
             }
             if index == 0 {
                 return None;
@@ -834,6 +870,7 @@ impl<'a> Session<'a> {
     /// 命中点是否落在任意 Teleport 子树外：是则返回首个 Teleport 节点 id（portal 点击外部，见 008-3）。
     fn teleport_hit_outside(&self, hit: &Option<(NodeId, &'a UiNode)>) -> Option<NodeId> {
         let teleports: Vec<usize> = self
+            .plan
             .nodes
             .iter()
             .enumerate()
@@ -846,7 +883,7 @@ impl<'a> Session<'a> {
         // 命中节点在任一 Teleport 子树内 → 不算外部。
         if let Some((hit_id, _)) = hit {
             let hit_idx = hit_id.0 as usize;
-            let parents = self.focus.as_ref().map(|f| &f.parents);
+            let parents = Some(&self.plan.focus.parents);
             if let Some(parents) = parents {
                 for &tp in &teleports {
                     if is_descendant_of(hit_idx, tp, parents) {
@@ -861,10 +898,11 @@ impl<'a> Session<'a> {
     /// 栈顶模态节点 id（视图状态仓库中的模态栈，见 008-3）。
     fn top_modal_node_id(&self) -> Option<NodeId> {
         let modal_key = self.state.modal_stack().last().cloned()?;
-        self.keys
+        self.plan
+            .keys
             .iter()
             .position(|k| *k == modal_key)
-            .map(|idx| self.ids[idx])
+            .map(|idx| self.plan.ids[idx])
     }
 
     // ---------- 键盘 ----------
@@ -882,6 +920,7 @@ impl<'a> Session<'a> {
         }
         if let Some(node_id) = self.current_focus_id()
             && self
+                .plan
                 .nodes
                 .get(node_id.0 as usize)
                 .and_then(|node| node.interact.as_ref())
@@ -914,7 +953,7 @@ impl<'a> Session<'a> {
 
     /// 导航转移：Tab/方向键/确认/取消（纯函数转移 + 状态提交）。
     fn handle_nav(&mut self, nav: NavInput) {
-        let focus = self.focus.as_ref().expect("焦点图已构建");
+        let focus = &self.plan.focus;
         let active_modal = self.top_modal_node_id();
         let current = self.current_focus_id();
         if let Some(modal) = active_modal
@@ -986,13 +1025,15 @@ impl<'a> Session<'a> {
     }
 
     fn is_in_modal(&self, node_id: NodeId, modal: NodeId) -> bool {
-        self.focus.as_ref().is_some_and(|focus| {
-            is_descendant_of(node_id.0 as usize, modal.0 as usize, &focus.parents)
-        })
+        is_descendant_of(
+            node_id.0 as usize,
+            modal.0 as usize,
+            &self.plan.focus.parents,
+        )
     }
 
     fn modal_focus_target(&self, modal: NodeId, reverse: bool) -> Option<NodeId> {
-        let focus = self.focus.as_ref()?;
+        let focus = &self.plan.focus;
         let mut candidates = focus.focusables.iter().copied().filter(|node_id| {
             is_descendant_of(node_id.0 as usize, modal.0 as usize, &focus.parents)
         });
@@ -1005,7 +1046,7 @@ impl<'a> Session<'a> {
 
     /// Tab 转移：scope 内循环（trap）→ 逃逸（exit 端口）→ 父作用域树序。
     fn nav_tab(&self, current: NodeId, scope_index: usize, reverse: bool) -> Option<NodeId> {
-        let focus = self.focus.as_ref().unwrap();
+        let focus = &self.plan.focus;
         if let Some(next) = next_tab(focus, current, reverse, scope_index) {
             return Some(next);
         }
@@ -1033,7 +1074,7 @@ impl<'a> Session<'a> {
         scope_index: usize,
         dir: focus::Direction,
     ) -> Option<NodeId> {
-        let focus = self.focus.as_ref().unwrap();
+        let focus = &self.plan.focus;
         if let Some(next) = next_direction(focus, current, dir, scope_index) {
             return Some(next);
         }
@@ -1050,16 +1091,16 @@ impl<'a> Session<'a> {
 
     /// 边界默认回退：沿全局树序（方向 = 树序前后）找下一个可聚焦或子 scope 入口落点。
     fn default_fallback(&self, current: NodeId, dir: focus::Direction) -> Option<NodeId> {
-        let focus = self.focus.as_ref().unwrap();
+        let focus = &self.plan.focus;
         let current_idx = current.0 as usize;
         let step: i32 = match dir {
             focus::Direction::Up | focus::Direction::Left => -1,
             focus::Direction::Down | focus::Direction::Right => 1,
         };
         let mut i = current_idx as i32 + step;
-        while i >= 0 && (i as usize) < self.nodes.len() {
+        while i >= 0 && (i as usize) < self.plan.nodes.len() {
             let idx = i as usize;
-            let node = self.nodes[idx];
+            let node = &self.plan.nodes[idx];
             if node.interact.as_ref().is_some_and(|n| n.focusable) {
                 return Some(NodeId(idx as u32));
             }
@@ -1077,7 +1118,7 @@ impl<'a> Session<'a> {
     /// 取消键：焦点在模态子树内 → 先关当前模态；否则沿树回退到最近焦点组出口（见 008-2.3）。
     fn handle_cancel(&mut self, current: NodeId) {
         if let Some(modal) = self.top_modal_node_id() {
-            let parents = self.focus.as_ref().map(|f| &f.parents);
+            let parents = Some(&self.plan.focus.parents);
             let idx = current.0 as usize;
             let inside = parents.is_some_and(|p| is_descendant_of(idx, modal.0 as usize, p));
             if inside {
@@ -1094,8 +1135,8 @@ impl<'a> Session<'a> {
     fn request_focus(&mut self, node_id: NodeId) {
         let from = self.current_focus_id();
         let idx = node_id.0 as usize;
-        if idx < self.keys.len() {
-            let key = self.keys[idx].clone();
+        if idx < self.plan.keys.len() {
+            let key = self.plan.keys[idx].clone();
             let slot = FocusSlot {
                 node_id: Some(node_id),
                 key: Some(key.clone()),

@@ -43,7 +43,7 @@ index.html / web/src/main.ts
 所有权规则：
 
 - `tela-demo` 拥有业务状态、DSL、布局、焦点和键盘意图，不接触 DOM/GPU。
-- `tela-app-abi` 拥有跨壳的 `AppEvent`/`AppStatus`/帧 packet；ABI v2 增加 IME composition 与运行时键位表替换事件。
+- `tela-app-abi` 拥有跨壳的事件与 atomic publication packet；IME composition 与运行时键位表替换由 v2 引入，当前由 ABI v6 承载。
 - `tela-webview-sdk` Rust 部分拥有可信边界：索引/archive 校验、哈希、ABI、packet 编解码、frame 解码和 WGPU。
 - JavaScript 半边只拥有浏览器事实：fetch、DOM 输入、原生 WebAssembly 实例化、布局视口/DPR、资源释放。
 - `web/src/main.ts` 只选择 canvas 与默认 bundle URL；它不是第二个业务 runtime。
@@ -81,7 +81,7 @@ WebView 不使用 Wasmtime。原生壳的 fuel 和最后有效 archive 缓存仍
 
 DOM `KeyboardEvent.code` 映射到 USB-HID physical key，Shift/Ctrl/Alt/Meta 保持 modifier bit mask。SDK 不解释快捷键含义；guest 根据自身 `KeymapSnapshot` 将物理键解析为 `KeyboardIntent`，再由 core 的焦点图规约。因此同一键位表可由浏览器、Win32 和 macOS 使用。
 
-`TelaWebviewSession.replaceKeymap(snapshot)` 会把 JSON 快照包装成 ABI v2 `ReplaceKeymapJson`。guest 对 snapshot 校验成功后原子替换；失败不改变旧表。页面还暴露受控的开发控制台入口：
+`TelaWebviewSession.replaceKeymap(snapshot)` 会把 JSON 快照包装成 ABI v6 `ReplaceKeymapJson`。guest 对 snapshot 校验成功后原子替换；失败不改变旧表。页面还暴露受控的开发控制台入口：
 
 ```ts
 window.telaReplaceKeymap?.({ /* 完整 keymap snapshot */ });
@@ -91,7 +91,7 @@ window.telaReplaceKeymap?.({ /* 完整 keymap snapshot */ });
 
 ### 5.2 文本与 IME
 
-每个 session 创建一个隐藏受控 `<textarea>`。guest 的 `AppStatus.input_focused` 决定它是否持有 DOM 焦点；`AppStatus.cursor` 决定 canvas cursor。textarea 的 `input` 生成 `SetInputValue`，focus/blur 生成边沿事件，`compositionstart`/`compositionend` 生成 ABI v2 标记。composition 本身不提交业务数据，最终可见文本仍走受控值，因此候选词、Tab 焦点和取消语义不会混为一谈。
+每个 session 创建一个隐藏受控 `<textarea>`。guest 的 `AppStatus.input_focused` 决定它是否持有 DOM 焦点；`AppStatus.cursor` 决定 canvas cursor。textarea 的 `input` 生成 `SetInputValue`，focus/blur 生成边沿事件，`compositionstart`/`compositionend` 生成 ABI v6 标记。composition 本身不提交业务数据，最终可见文本仍走受控值，因此候选词、Tab 焦点和取消语义不会混为一谈。
 
 canvas 在非文本模式接收物理键；pointer down 会根据 guest 最新状态在 canvas/textarea 之间同步焦点。关闭、失焦与状态变更都通过同一个同步点收敛，避免“进入新建按钮更新底部提示，移出却未恢复”一类宿主生命周期残留。
 

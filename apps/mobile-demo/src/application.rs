@@ -258,18 +258,12 @@ impl App {
         let Some(token) = self.accept_frame_token(frame_token) else {
             return 0;
         };
-        let frame = self.frame().clone();
-        let tree = self
+        let actions = self
             .frames
             .active()
             .expect("accepted token requires an active frame")
-            .tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Pointer(event),
-        );
+            .input_plan()
+            .dispatch(&mut self.view_state, &InputEvent::Pointer(event));
         let changed = self.handle_framed_interactions(token, &actions);
         if changed {
             self.invalidate_frame();
@@ -577,18 +571,12 @@ impl App {
     }
 
     fn dispatch_text_input(&mut self, token: FrameToken, event: TextInputEvent) -> bool {
-        let frame = self.frame().clone();
-        let tree = self
+        let actions = self
             .frames
             .active()
             .expect("accepted token requires an active frame")
-            .tree();
-        let actions = self.profile.dispatch_kernel_input(
-            tree,
-            &frame,
-            &mut self.view_state,
-            &InputEvent::Text(event),
-        );
+            .input_plan()
+            .dispatch(&mut self.view_state, &InputEvent::Text(event));
         let changed = self.handle_framed_interactions(token, &actions);
         if changed {
             self.invalidate_frame();
