@@ -8,7 +8,7 @@ import { ANDROID_NDK_ABI, ANDROID_RUST_TARGET } from './android.ts';
 export type BuildProfile = 'dev' | 'release';
 
 /** 独立发布的动态 guest 通道；通道不意味着共享业务视图。 */
-export type BundleChannel = 'desktop' | 'mobile';
+export type BundleChannel = 'desktop' | 'mobile' | 'cc';
 
 /** 六个显式产品闭包。`core` 是纯 Rust library 闭包，不是虚构的 GUI Target。 */
 export type ProductId = 'core' | 'webview' | 'android' | 'ios' | 'win32' | 'win32-editor' | 'speed-gear' | 'macos';
@@ -91,6 +91,13 @@ export interface WorkspacePaths {
   androidDebugApkPath(): string;
   androidDistDir(): string;
   androidDistPath(): string;
+  ccAndroidDistPath(): string;
+  ccRelayDistDir(): string;
+  ccRelayDistPath(): string;
+  ccRelayArtifactPath(profile: BuildProfile): string;
+  ccAgentDistDir(): string;
+  ccAgentDistPath(): string;
+  ccAgentArtifactPath(profile: BuildProfile): string;
   iosProjectDir(): string;
   iosXcodeProjectPath(): string;
   iosStaticLibraryDir(): string;
@@ -114,6 +121,9 @@ export const WIN32_TARGET_CRATE = 'tela-target-win32';
 export const WIN32_EDITOR_CRATE = 'tela-product-win32-editor';
 export const SPEED_GEAR_CRATE = 'tela-product-speed-gear';
 export const SPEED_GEAR_HOOK_CRATE = 'tela-speed-gear-hook';
+export const CC_GUEST_CRATE = 'tela-product-cc-guest';
+export const CC_RELAY_CRATE = 'tela-cc-relay';
+export const CC_AGENT_CRATE = 'tela-cc-agent';
 export const MACOS_TARGET_CRATE = 'tela-target-macos';
 
 /** 根据仓库根构造路径和产品闭包模型。 */
@@ -195,14 +205,17 @@ export function resolveWorkspace(root: string): WorkspacePaths {
   };
 
   const bundle = (channel: BundleChannel): BundlePaths => {
-    const mobile = channel === 'mobile';
-    const directory = mobile ? `${distDir}/tela-mobile` : `${distDir}/tela-dev`;
-    const archiveName = mobile ? 'tela-mobile-guest.tela' : 'tela-desktop-guest.tela';
-    const guestName = mobile ? 'tela_product_mobile_guest' : 'tela_product_desktop_guest';
+    const layout = channel === 'mobile'
+      ? { dirName: 'tela-mobile', archiveName: 'tela-mobile-guest.tela', guest: MOBILE_GUEST_CRATE, guestName: 'tela_product_mobile_guest', label: 'Android mobile product guest', assets: `${root}/assets/mobile` }
+      : channel === 'cc'
+        ? { dirName: 'tela-cc', archiveName: 'cc-remote-guest.tela', guest: CC_GUEST_CRATE, guestName: 'tela_product_cc_guest', label: 'CC Remote phone product guest', assets: `${root}/assets/mobile` }
+        : { dirName: 'tela-dev', archiveName: 'tela-desktop-guest.tela', guest: DESKTOP_GUEST_CRATE, guestName: 'tela_product_desktop_guest', label: 'desktop product guest', assets: `${root}/assets` };
+    const { dirName, archiveName, guest, guestName, label, assets } = layout;
+    const directory = `${distDir}/${dirName}`;
     return {
       channel,
-      label: mobile ? 'Android mobile product guest' : 'desktop product guest',
-      guestCrate: mobile ? MOBILE_GUEST_CRATE : DESKTOP_GUEST_CRATE,
+      label,
+      guestCrate: guest,
       guestFeatures: [],
       guestWasmArtifactPath(profile) {
         const profileDir = profile === 'release' ? 'release' : 'debug';
@@ -223,9 +236,9 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       indexTempPath() {
         return `${directory}/latest.json.tmp`;
       },
-      archiveUrl: `/${mobile ? 'tela-mobile' : 'tela-dev'}/${archiveName}`,
+      archiveUrl: `/${dirName}/${archiveName}`,
       assetsDir() {
-        return mobile ? `${root}/assets/mobile` : `${root}/assets`;
+        return assets;
       },
     };
   };
@@ -332,6 +345,29 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     },
     androidDistPath() {
       return `${distDir}/android/tela-mobile-debug.apk`;
+    },
+    ccAndroidDistPath() {
+      return `${distDir}/android/tela-cc-debug.apk`;
+    },
+    ccRelayDistDir() {
+      return `${distDir}/cc-relay`;
+    },
+    ccRelayDistPath() {
+      return `${distDir}/cc-relay/tela-cc-relay`;
+    },
+    ccRelayArtifactPath(profile: BuildProfile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/${dir}/tela-cc-relay`;
+    },
+    ccAgentDistDir() {
+      return `${distDir}/cc-agent`;
+    },
+    ccAgentDistPath() {
+      return `${distDir}/cc-agent/tela-cc-agent`;
+    },
+    ccAgentArtifactPath(profile: BuildProfile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/${dir}/tela-cc-agent`;
     },
     iosProjectDir() {
       return productRoot('ios');

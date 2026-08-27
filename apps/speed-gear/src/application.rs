@@ -426,6 +426,7 @@ mod tests {
                     height: 680.0,
                 },
                 focus_appearance: Some(crate::FOCUS_APPEARANCE),
+                ..ApplicationConfig::default()
             },
         );
         assert!(application.ensure_frame());
@@ -475,6 +476,7 @@ mod tests {
                     height: 680.0,
                 },
                 focus_appearance: Some(crate::FOCUS_APPEARANCE),
+                ..ApplicationConfig::default()
             },
         );
         assert!(application.ensure_frame());

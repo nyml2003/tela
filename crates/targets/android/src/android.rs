@@ -13,6 +13,7 @@ use jni::{
     sys::{jboolean, jint, jstring},
 };
 use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppStatus};
+use tela_bridge::BridgeResult;
 use tela_contract::{
     Color, DrawCommand, DrawPayload, Rect, TextContent, TextStyleRef, UiFrame, Viewport,
 };
@@ -28,6 +29,7 @@ use winit::{
 };
 
 use crate::{
+    bridge,
     ime::{ControlledTextSync, TextInputState},
     touch::{TouchAdapter, TouchPhase, logical_coordinate},
 };
@@ -35,7 +37,7 @@ use crate::{
 const BACK_BLURRED_TEXT_INPUT: jint = 1;
 const BACK_DISPATCHED_TO_GUEST: jint = 2;
 
-enum HostEvent {
+pub(crate) enum HostEvent {
     ConfigureBundleIndex(String),
     Startup(Result<GuestRuntime, String>),
     SetInputValue(String),
@@ -46,6 +48,15 @@ enum HostEvent {
     CompositionEnd,
     SystemBack,
     AnimationFrame(u64),
+    /// Kotlin 注入的中继配置（base_url、token）。
+    ConfigureRelay(String, String),
+    /// 网络线程完成一条 net 作业；回投 guest 后需补一次 Wake。
+    BridgeResponse {
+        request_id: u64,
+        result: BridgeResult,
+    },
+    /// 轮询心跳：让 guest 排下一轮 sync 请求。
+    PollTick(u64),
 }
 
 #[derive(Default)]
@@ -53,6 +64,7 @@ struct NativeBridge {
     proxy: Option<EventLoopProxy<HostEvent>>,
     text: ControlledTextSync,
     bundle_index: Option<String>,
+    relay: Option<(String, String)>,
     finish_requested: bool,
     animation_frame_pending: bool,
 }
@@ -81,11 +93,12 @@ fn clear_bridge() {
     let mut bridge = bridge_lock();
     bridge.proxy = None;
     bridge.text = ControlledTextSync::default();
+    bridge.relay = None;
     bridge.finish_requested = false;
     bridge.animation_frame_pending = false;
 }
 
-fn monotonic_ms() -> u64 {
+pub(crate) fn monotonic_ms() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -152,6 +165,21 @@ fn configure_bundle_index(index: String) {
     }
 }
 
+fn configured_relay() -> Option<(String, String)> {
+    bridge_lock().relay.clone()
+}
+
+fn configure_relay(url: String, token: String) {
+    let proxy = {
+        let mut bridge = bridge_lock();
+        bridge.relay = Some((url.clone(), token.clone()));
+        bridge.proxy.clone()
+    };
+    if let Some(proxy) = proxy {
+        let _ = proxy.send_event(HostEvent::ConfigureRelay(url, token));
+    }
+}
+
 fn send_host_event(event: HostEvent) -> bool {
     let proxy = bridge_lock().proxy.clone();
     proxy.is_some_and(|proxy| proxy.send_event(event).is_ok())
@@ -192,8 +220,13 @@ pub fn android_main(app: AndroidApp) {
     };
     let proxy = event_loop.create_proxy();
     install_bridge(proxy.clone());
-    let mut host = AndroidHost::new(configured_bundle_index().unwrap_or_default(), proxy);
+    let mut host = AndroidHost::new(
+        configured_bundle_index().unwrap_or_default(),
+        configured_relay(),
+        proxy,
+    );
     host.start_loading();
+    host.start_bridge();
     if let Err(error) = event_loop.run_app(&mut host) {
         eprintln!("tela-target-android: event loop stopped: {error}");
     }
@@ -202,6 +235,7 @@ pub fn android_main(app: AndroidApp) {
 
 struct AndroidHost {
     bundle_index: String,
+    relay: Option<bridge::RelayConfig>,
     startup_started: bool,
     proxy: EventLoopProxy<HostEvent>,
     window: Option<Arc<Window>>,
@@ -212,12 +246,23 @@ struct AndroidHost {
     presented_frame_token: Option<AppFrameToken>,
     touch: TouchAdapter,
     failure: Option<String>,
+    /// 桥注册表；net 能力的 Pending 请求由网络线程异步 complete。
+    bridge: Option<tela_bridge::BridgeDispatcher>,
+    /// net 作业的网络线程句柄。
+    net: Option<bridge::RelayNetWorker>,
+    /// 轮询心跳线程的停止开关。
+    poll_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl AndroidHost {
-    fn new(bundle_index: String, proxy: EventLoopProxy<HostEvent>) -> Self {
+    fn new(
+        bundle_index: String,
+        relay: Option<(String, String)>,
+        proxy: EventLoopProxy<HostEvent>,
+    ) -> Self {
         Self {
             bundle_index,
+            relay: relay.map(|(base_url, token)| bridge::RelayConfig { base_url, token }),
             startup_started: false,
             proxy,
             window: None,
@@ -228,6 +273,9 @@ impl AndroidHost {
             presented_frame_token: None,
             touch: TouchAdapter::new(),
             failure: None,
+            bridge: None,
+            net: None,
+            poll_stop: None,
         }
     }
 
@@ -251,6 +299,31 @@ impl AndroidHost {
         self.bundle_index = index;
         self.start_loading();
         self.request_redraw();
+    }
+
+    /// 建立 net 桥与轮询心跳（配置就绪时）。幂等：重复调用只补建缺失的部分。
+    fn start_bridge(&mut self) {
+        let Some(config) = self.relay.clone() else {
+            return;
+        };
+        if self.net.is_none() {
+            self.net = Some(bridge::RelayNetWorker::start(config, self.proxy.clone()));
+        }
+        if self.bridge.is_none() {
+            self.bridge = Some(bridge::build_dispatcher());
+        }
+        if self.poll_stop.is_none() {
+            self.poll_stop = Some(bridge::start_poll_thread(self.proxy.clone()));
+        }
+    }
+
+    /// Kotlin 注入的中继配置（可能在运行中到达）。
+    fn configure_relay(&mut self, url: String, token: String) {
+        self.relay = Some(bridge::RelayConfig {
+            base_url: url,
+            token,
+        });
+        self.start_bridge();
     }
 
     fn ensure_window_and_gpu(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
@@ -326,7 +399,60 @@ impl AndroidHost {
             self.frame = Some(publication.frame);
             self.request_redraw();
         }
+        // 泵一轮桥：带走 guest 本次 dispatch 排队的请求。就地回投的响应已触发回调（回调
+        // 只改状态、不能自发帧），补一次 Wake 让 guest 消费并发布新帧；Wake 路径内的泵
+        // 只会再见到 Pending（net 作业没有就地事件），递归一层即停。
+        if self.pump_bridge_requests()? > 0 {
+            return self.dispatch_guest(AppEvent::Wake {
+                timestamp_ms: monotonic_ms(),
+            });
+        }
         Ok(outcome.handled)
+    }
+
+    /// 泵一轮桥请求；返回就地回投的事件数（无桥或无 guest 时为 0）。
+    fn pump_bridge_requests(&mut self) -> Result<u32, String> {
+        let (Some(runtime), Some(dispatcher), Some(net)) = (
+            self.runtime.as_mut(),
+            self.bridge.as_mut(),
+            self.net.as_ref(),
+        ) else {
+            return Ok(0);
+        };
+        bridge::pump_bridge(runtime, dispatcher, net)
+    }
+
+    /// 网络线程结果回投：complete 产生响应事件 → 投给 guest → 补 Wake → 请求重绘。
+    fn deliver_bridge_response(&mut self, request_id: u64, result: BridgeResult) {
+        let mut delivered = false;
+        let outcome = (|| {
+            if let (Some(runtime), Some(dispatcher)) = (self.runtime.as_mut(), self.bridge.as_mut())
+                && let Some(event) = dispatcher.complete(request_id, result)
+            {
+                let packet =
+                    tela_bridge::encode_event(&event).map_err(|error| error.to_string())?;
+                runtime
+                    .bridge_deliver(&packet)
+                    .map_err(|error| error.to_string())?;
+                delivered = true;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = outcome {
+            self.fail(error);
+            return;
+        }
+        if !delivered {
+            return;
+        }
+        // 桥回调是 void ABI，不能自发帧：补一次 Wake 让 guest 消费回调结果并发布新帧。
+        if let Err(error) = self.dispatch_guest(AppEvent::Wake {
+            timestamp_ms: monotonic_ms(),
+        }) {
+            self.fail(error);
+            return;
+        }
+        self.request_redraw();
     }
 
     fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
@@ -660,6 +786,19 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
                     self.fail(error);
                 }
             }
+            HostEvent::ConfigureRelay(url, token) => self.configure_relay(url, token),
+            HostEvent::BridgeResponse { request_id, result } => {
+                self.deliver_bridge_response(request_id, result);
+            }
+            HostEvent::PollTick(timestamp_ms) => {
+                // 窗口在（未 suspended）时驱动一轮 Wake：guest 借此排下一轮 sync 请求，
+                // 同一 dispatch 尾部的泵会把它们带走。无窗口时的 tick 直接丢弃。
+                if self.window.is_some()
+                    && let Err(error) = self.dispatch_guest(AppEvent::Wake { timestamp_ms })
+                {
+                    self.fail(error);
+                }
+            }
         }
     }
 
@@ -700,6 +839,9 @@ impl ApplicationHandler<HostEvent> for AndroidHost {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(stop) = self.poll_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.gpu = None;
         self.window = None;
         self.presented_frame_token = None;
@@ -893,6 +1035,23 @@ pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeConfigureBundleIn
 ) {
     env.with_env(|env| -> jni::errors::Result<()> {
         configure_bundle_index(java_string(env, &value)?);
+        Ok(())
+    })
+    .resolve::<LogErrorAndDefault>();
+}
+
+/// Receives the Gradle-injected relay URL and token before GameActivity's native main loop.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_tela_mobile_TelaActivity_nativeConfigureRelay(
+    mut env: EnvUnowned<'_>,
+    _activity: JObject<'_>,
+    url: JString<'_>,
+    token: JString<'_>,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let url = java_string(env, &url)?;
+        let token = java_string(env, &token)?;
+        configure_relay(url, token);
         Ok(())
     })
     .resolve::<LogErrorAndDefault>();

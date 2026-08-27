@@ -10,10 +10,6 @@ use std::env;
 
 use tela_desktop_runtime::{LaunchMode, PlatformLaunchOptions, launch_mode, usage, verify_bundle};
 
-#[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
-mod win32;
-
 fn main() {
     let result = match launch_mode(env::args().skip(1)) {
         Ok(LaunchMode::VerifyBundle(path)) => verify_bundle(&path).map(|verification| {
@@ -34,7 +30,7 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn run_platform(options: PlatformLaunchOptions) -> Result<(), String> {
-    win32::run(options)
+    tela_target_win32::run_sdk_window(options)
 }
 
 #[cfg(not(target_os = "windows"))]

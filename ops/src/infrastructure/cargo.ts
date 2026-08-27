@@ -64,6 +64,13 @@ export class CargoPort {
     return this.gate('build', args);
   }
 
+  /** 构建本机 host 服务二进制（中继/agent 等服务端产物，部署到 Linux 服务器）。 */
+  async buildHost(crate: string, profile: BuildProfile): Promise<GateResult> {
+    const args = ['build', '-p', crate];
+    if (profile === 'release') args.push('--release');
+    return this.gate('build', args);
+  }
+
   /** 构建 Win32 GNU 开发壳（交叉 target 由项目 flake 与 .cargo/config.toml 提供）。 */
   async buildWin32(crate: string, profile: BuildProfile): Promise<GateResult> {
     const args = ['build', '--target', 'x86_64-pc-windows-gnu', '-p', crate];

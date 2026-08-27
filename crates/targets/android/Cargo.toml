@@ -17,10 +17,13 @@ jni = "0.22.4"
 libc = "0.2"
 ndk-sys = "0.6"
 pollster = "0.4"
+tela-bridge = { path = "../../delivery/bridge", features = ["host"] }
+tela-cc-protocol = { path = "../../../services/cc-protocol" }
 tela-contract = { path = "../../kernel/contract" }
 tela-guest-runtime = { path = "../../delivery/guest-runtime" }
 tela-log = { path = "../../support/log" }
 tela-render-wgpu = { path = "../../presentation/renderers/wgpu" }
+tela-utils = { path = "../../support/utils" }
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 wgpu = "30"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "android-game-activity"] }

@@ -1,41 +1,36 @@
-//! Thin Win32 shell for the portable tela application bundle.
+//! 统一 Win32 壳：一个消息循环 + 三个轴（Session 来源 / 启动 / chrome）。
 //!
-//! This is the SDK's only unsafe boundary. Win32 stores a raw `WindowState` pointer in
-//! `GWLP_USERDATA`, and WGPU receives an HWND-derived raw window handle. The pointer remains
-//! owned by `run_window`; GPU resources are dropped from `WM_DESTROY`, while the HWND is valid.
+//! 这是本 crate 在 Windows 上的唯一 unsafe 边界：`GWLP_USERDATA` 持有 `Box<WindowState>`
+//! 指针（经 `WM_NCCREATE`/`lpCreateParams` 安装），WGPU 持有 HWND 派生的原始句柄。
 
+#![allow(unsafe_code)]
 use std::{
     cell::RefCell,
-    env,
     ffi::c_void,
-    num::NonZeroIsize,
-    path::PathBuf,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, TryRecvError},
+        mpsc::{self, Receiver},
     },
-    thread,
     time::Instant,
 };
 
-use raw_window_handle::{
-    DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
-    Win32WindowHandle, WindowsDisplayHandle,
-};
+use crate::chrome::{WindowChrome, hit_test};
+use crate::driver::SessionDriver;
+use crate::gpu::{GpuSession, RenderOutcome};
+use crate::input;
+use crate::providers::{WindowMetrics, build_dispatcher};
+use crate::startup::{self, WM_TELA_DEVICE_LOST, WM_TELA_STARTUP_READY};
 use tela_app_abi::{
-    AppDispatchOutcome, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
-    AppPointerPhase, CursorKind,
+    AppDispatchOutcome, AppEvent, AppFrameInput, AppPointerEvent, AppPointerKind, AppPointerPhase,
+    ApplicationSession, CursorKind,
 };
-use tela_bridge::BridgeDispatcher;
-use tela_contract::{Color, UiFrame};
-use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
-use tela_render_wgpu::WgpuRenderer;
-use tela_target_win32::{WindowMetrics, build_dispatcher};
+use tela_desktop_runtime::bridge::common::BuildConstants;
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Dwm::DwmFlush,
         Graphics::Gdi::{
             BeginPaint, COLOR_WINDOW, DT_LEFT, DT_TOP, DT_WORDBREAK, DrawTextW, EndPaint, FillRect,
             GetSysColorBrush, InvalidateRect, PAINTSTRUCT, ScreenToClient, UpdateWindow,
@@ -48,21 +43,20 @@ use windows::{
             },
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
-                TrackMouseEvent, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
-                VK_HOME, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT,
-                VK_RWIN, VK_SHIFT, VK_TAB, VK_UP,
+                TrackMouseEvent, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN,
+                VK_SHIFT, VK_TAB,
             },
             WindowsAndMessaging::{
                 CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
                 DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW,
-                IDC_ARROW, IDC_HAND, IDC_IBEAM, KillTimer, LoadCursorW, MSG, MWMO_INPUTAVAILABLE,
-                MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostMessageW,
-                PostQuitMessage, QS_ALLINPUT, RegisterClassW, SIZE_MINIMIZED, SW_SHOW, SetCursor,
-                SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WM_APP, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-                WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT,
-                WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+                HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IsZoomed, KillTimer, LoadCursorW, MSG,
+                MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW,
+                PostMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassW, SIZE_MINIMIZED,
+                SW_SHOW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WINDOW_EX_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR,
+                WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+                WM_QUIT, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW,
             },
         },
     },
@@ -70,96 +64,111 @@ use windows::{
 };
 
 use tela_desktop_runtime::{
-    BundleLoader, BundleSource, DeviceLossAction, GuestRuntime, PlatformLaunchOptions,
-    ShellLifecycle, ShellPhase, TextChannelAction,
+    DeviceLossAction, GuestRuntime, GuestSession, PlatformLaunchOptions, ShellLifecycle,
+    ShellPhase, TextChannelAction,
 };
 
-const WINDOW_CLASS: &str = "TelaWin32DevelopmentShell";
+const WINDOW_CLASS: &str = "TelaWin32Shell";
 const WINDOW_TITLE: &str = "TELA Files";
-const WM_TELA_STARTUP_READY: u32 = WM_APP + 1;
-const WM_TELA_DEVICE_LOST: u32 = WM_APP + 2;
-const SURFACE_RETRY_TIMER: usize = 1;
-// `windows` exposes this ordinary client-area message through its Controls namespace. The shell
-// does not otherwise need common-control APIs, so retain the SDK-defined message value locally.
-const WM_MOUSELEAVE: u32 = 0x02a3;
+const TIMER_WAKE: usize = 1;
+const TIMER_ANIMATION: usize = 2;
+const TIMER_SURFACE_RETRY: usize = 3;
 
-/// Owns the Windows marker display handle in the Send + Sync form required by wgpu 30.
-#[derive(Debug)]
-struct Win32Display;
+/// 会话来源轴。
+pub enum SessionSource {
+    /// 进程内应用会话：建窗前同步 initialize + 首帧发布（编辑器/变速齿轮）。
+    Immediate(Box<dyn ApplicationSession>),
+    /// 后台加载 bundle → WASM guest（SDK 开发壳）。
+    Background(PlatformLaunchOptions),
+}
 
-impl HasDisplayHandle for Win32Display {
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-        Ok(DisplayHandle::windows())
+/// 统一壳配置。
+pub struct ShellOptions {
+    /// 窗口标题。
+    pub title: String,
+    /// 初始窗口宽度（物理像素）。
+    pub width: i32,
+    /// 初始窗口高度（物理像素）。
+    pub height: i32,
+    /// chrome 形态。
+    pub chrome: WindowChrome,
+    /// 会话来源。
+    pub source: SessionSource,
+}
+
+/// 静态产品的窗口选项（`run_native_window` 入参）。
+#[derive(Clone, Debug)]
+pub struct NativeWindowOptions {
+    /// 窗口标题。
+    pub title: String,
+    /// 初始宽度（物理像素）。
+    pub width: i32,
+    /// 初始高度（物理像素）。
+    pub height: i32,
+    /// chrome 形态；静态产品默认自绘标题栏。
+    pub chrome: WindowChrome,
+}
+
+impl NativeWindowOptions {
+    /// 用标题创建默认（自绘 chrome）选项。
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            width: 960,
+            height: 640,
+            chrome: WindowChrome::CustomTitleBar,
+        }
+    }
+
+    /// 设置初始窗口尺寸（物理像素）。
+    pub fn size(mut self, width: i32, height: i32) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    /// 切换为系统外框 chrome。
+    pub fn system_chrome(mut self) -> Self {
+        self.chrome = WindowChrome::SystemOverlapped;
+        self
     }
 }
 
-/// Starts one native shell instance and performs exactly one background startup bundle request.
-pub fn run(options: PlatformLaunchOptions) -> Result<(), String> {
-    let cache_path = cache_path()?;
+/// 以进程内会话启动一个自绘 chrome 窗口（静态产品入口；阻塞至窗口关闭）。
+pub fn run_native_window(
+    app: Box<dyn ApplicationSession>,
+    options: NativeWindowOptions,
+) -> Result<(), String> {
+    run_window(ShellOptions {
+        title: options.title,
+        width: options.width,
+        height: options.height,
+        chrome: options.chrome,
+        source: SessionSource::Immediate(app),
+    })
+}
+
+/// SDK 开发壳入口：后台加载 bundle 并以 WASM guest 运行（阻塞至窗口关闭）。
+pub fn run_sdk_window(options: PlatformLaunchOptions) -> Result<(), String> {
     if options.verbose {
         eprintln!(
             "tela-win32-host: startup index={} cache={}",
             options.bundle_index_url,
-            cache_path.display()
+            startup::cache_path()?.display()
         );
     }
-    run_window(options, cache_path)
+    run_window(ShellOptions {
+        title: WINDOW_TITLE.to_owned(),
+        width: 1280,
+        height: 840,
+        chrome: WindowChrome::SystemOverlapped,
+        source: SessionSource::Background(options),
+    })
+    .map_err(|error| format!("tela-win32-host: {error}"))
 }
-
-fn cache_path() -> Result<PathBuf, String> {
-    let root = env::var_os("LOCALAPPDATA")
-        .or_else(|| env::var_os("TEMP"))
-        .ok_or_else(|| {
-            "LOCALAPPDATA or TEMP is required for development bundle cache".to_owned()
-        })?;
-    Ok(PathBuf::from(root)
-        .join("tela")
-        .join("development")
-        .join("last-valid.tela"))
-}
-
-fn fetch_http(url: &str) -> Result<Vec<u8>, String> {
-    let response = ureq::get(url)
-        .call()
-        .map_err(|error| format!("GET {url}: {error}"))?;
-    response
-        .into_body()
-        .into_with_config()
-        .limit(64 * 1024 * 1024)
-        .read_to_vec()
-        .map_err(|error| format!("read {url}: {error}"))
-}
-
-fn load_guest(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<GuestRuntime, String> {
-    let loader = BundleLoader::new(cache_path);
-    let bundle = loader
-        .load_with(&options.bundle_index_url, fetch_http)
-        .map_err(|error| error.to_string())?;
-    let source = match bundle.source {
-        BundleSource::Network => "network",
-        BundleSource::Cache => "cache fallback",
-    };
-    if options.verbose {
-        eprintln!(
-            "tela-win32-host: bundle={source} archive={}KB download={}ms; initializing guest",
-            bundle.metrics.archive_bytes / 1024,
-            bundle.metrics.download.as_millis(),
-        );
-        if let Some(warning) = bundle.cache_warning.as_deref() {
-            eprintln!("tela-win32-host: bundle cache warning: {warning}");
-        }
-    }
-    let runtime = GuestRuntime::new(&bundle.archive.app_wasm).map_err(|error| error.to_string())?;
-    if options.verbose {
-        eprintln!(
-            "tela-win32-host: guest initialized compile={}ms init={}ms init_fuel={}",
-            runtime.metrics().module_compile.as_millis(),
-            runtime.metrics().initialize.as_millis(),
-            runtime.metrics().initialize_fuel_consumed,
-        );
-    }
-    Ok(runtime)
-}
+// `windows` exposes this ordinary client-area message through its Controls namespace. The shell
+// does not otherwise need common-control APIs, so retain the SDK-defined message value locally.
+const WM_MOUSELEAVE: u32 = 0x02a3;
 
 #[derive(Clone, Copy)]
 struct ClientMetrics {
@@ -168,98 +177,60 @@ struct ClientMetrics {
     dpi_scale: f32,
 }
 
-struct GpuSession {
-    // Field order guarantees renderer and surface release before the instance-owned display handle.
-    renderer: WgpuRenderer,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    instance: wgpu::Instance,
-}
-
-enum RenderOutcome {
-    Presented { suboptimal: bool },
-    Outdated,
-    Lost,
-    Timeout,
-    Occluded,
-    Validation,
-}
-
-#[derive(Debug)]
-struct DeviceLossReport {
-    generation: u64,
-    detail: String,
-}
-
 struct WindowState {
     hwnd: HWND,
     lifecycle: ShellLifecycle,
-    runtime: Option<GuestRuntime>,
-    frame: Option<UiFrame>,
-    frame_token: Option<AppFrameToken>,
-    presented_frame_token: Option<AppFrameToken>,
+    chrome: WindowChrome,
+    /// 会话驱动器：GuestSession(WASM) 经统一握手驱动；安装前为 `None`。
+    session: Option<SessionDriver>,
     gpu: Option<GpuSession>,
     dpi_scale: f32,
     startup_rx: Option<Receiver<Result<GuestRuntime, String>>>,
     startup_cancel: Arc<AtomicBool>,
-    device_loss: Arc<Mutex<Option<DeviceLossReport>>>,
-    gpu_generation: u64,
     input_epoch: Instant,
     mouse_leave_tracking: bool,
     pointer_captured: bool,
     startup_error: Option<String>,
     terminal_error: Option<String>,
-    bridge: Option<BridgeDispatcher>,
     bridge_metrics: Rc<RefCell<WindowMetrics>>,
 }
 
 impl WindowState {
     fn new(
-        startup_rx: Receiver<Result<GuestRuntime, String>>,
+        chrome: WindowChrome,
+        startup_rx: Option<Receiver<Result<GuestRuntime, String>>>,
         startup_cancel: Arc<AtomicBool>,
     ) -> Self {
         Self {
             hwnd: HWND::default(),
             lifecycle: ShellLifecycle::new(),
-            runtime: None,
-            frame: None,
-            frame_token: None,
-            presented_frame_token: None,
+            chrome,
+            session: None,
             gpu: None,
             dpi_scale: 1.0,
-            startup_rx: Some(startup_rx),
+            startup_rx,
             startup_cancel,
-            device_loss: Arc::new(Mutex::new(None)),
-            gpu_generation: 0,
             input_epoch: Instant::now(),
             mouse_leave_tracking: false,
             pointer_captured: false,
             startup_error: None,
             terminal_error: None,
             bridge_metrics: Rc::new(RefCell::new(WindowMetrics::default())),
-            bridge: None,
         }
     }
 
     fn receive_startup_result(&mut self) {
-        let result = match self.startup_rx.as_ref() {
-            None => return,
-            Some(receiver) => match receiver.try_recv() {
-                Ok(result) => result,
-                Err(TryRecvError::Empty) => return,
-                Err(TryRecvError::Disconnected) => {
-                    self.startup_rx = None;
-                    self.fail_startup(
-                        "startup worker disconnected before returning a result".to_owned(),
-                    );
-                    return;
-                }
+        match startup::poll_startup(&mut self.startup_rx) {
+            startup::StartupPoll::Pending => return,
+            startup::StartupPoll::Ready(result) => match result {
+                Ok(runtime) => self.install_runtime(runtime),
+                Err(error) => self.fail_startup(error),
             },
-        };
-        self.startup_rx = None;
-        match result {
-            Ok(runtime) => self.install_runtime(runtime),
-            Err(error) => self.fail_startup(error),
+            startup::StartupPoll::Disconnected => {
+                self.fail_startup(
+                    "startup worker disconnected before returning a result".to_owned(),
+                );
+            }
         }
     }
 
@@ -267,20 +238,36 @@ impl WindowState {
         if self.lifecycle.phase() != ShellPhase::Loading {
             return;
         }
-        if self.bridge.is_none() {
-            self.bridge = Some(build_dispatcher(
-                Rc::clone(&self.bridge_metrics),
-                &BuildConstants::default(),
-                vec![],
-            ));
+        // 桥由壳统一装配；GuestSession 的每次派发都会排空 guest 请求并投递响应。
+        let dispatcher = build_dispatcher(
+            Rc::clone(&self.bridge_metrics),
+            &BuildConstants::default(),
+            vec![],
+        );
+        let installation: Result<(), String> = (|| {
+            let guest = GuestSession::new(runtime, Some(dispatcher))?;
+            let session = SessionDriver::new(Box::new(guest))?;
+            self.session = Some(session);
+            Ok(())
+        })();
+        match installation {
+            Ok(()) => self.finish_startup(),
+            Err(error) => self.fail_startup(format!("initialize guest session: {error}")),
         }
+    }
+
+    /// Immediate 轴：安装建窗前已就绪的会话（首帧已发布）并完成启动收尾。
+    fn install_immediate(&mut self, session: SessionDriver) {
+        if self.lifecycle.phase() != ShellPhase::Loading {
+            return;
+        }
+        self.session = Some(session);
+        self.finish_startup();
+    }
+
+    /// 会话就绪后的启动收尾：GPU、相位推进、首视口与最大化同步。
+    fn finish_startup(&mut self) {
         let activation: Result<(), String> = (|| {
-            let frame = runtime.frame().map_err(|error| error.to_string())?;
-            let frame_token = runtime.status().frame_token;
-            self.frame = Some(frame);
-            self.frame_token = frame_token;
-            self.presented_frame_token = None;
-            self.runtime = Some(runtime);
             let Some(metrics) = self.client_metrics()? else {
                 self.lifecycle.startup_succeeded(false);
                 return Ok(());
@@ -288,12 +275,14 @@ impl WindowState {
             self.initialize_gpu(metrics)?;
             self.lifecycle.startup_succeeded(true);
             self.dispatch_viewport(metrics)?;
-            self.request_redraw();
+            self.sync_window_maximized();
             Ok(())
         })();
         if let Err(error) = activation {
             self.fail_startup(format!("initialize native renderer: {error}"));
+            return;
         }
+        self.request_redraw();
     }
 
     fn fail_startup(&mut self, error: String) {
@@ -301,10 +290,7 @@ impl WindowState {
             return;
         }
         eprintln!("tela-win32-host: startup failed: {error}");
-        self.runtime = None;
-        self.frame = None;
-        self.frame_token = None;
-        self.presented_frame_token = None;
+        self.session = None;
         self.gpu = None;
         self.startup_error = Some(error);
         self.lifecycle.startup_failed();
@@ -332,80 +318,23 @@ impl WindowState {
     }
 
     fn initialize_gpu(&mut self, metrics: ClientMetrics) -> Result<(), String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::default(),
-            memory_budget_thresholds: Default::default(),
-            backend_options: Default::default(),
-            // wgpu 30 requires an explicit display owner for native presentation. Windows has an
-            // empty marker handle, but it must agree with the surface target below.
-            display: Some(Box::new(Win32Display)),
-        });
-        let surface = create_surface(&instance, self.hwnd)?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .map_err(|error| format!("request WGPU adapter: {error}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("tela Win32 device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            experimental_features: Default::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::Off,
-        }))
-        .map_err(|error| format!("create WGPU device: {error}"))?;
-        let config = surface
-            .get_default_config(&adapter, metrics.width, metrics.height)
-            .ok_or_else(|| "WGPU surface has no default configuration".to_owned())?;
-        let format = config.format;
-        surface.configure(&device, &config);
-
-        let device_loss = Arc::clone(&self.device_loss);
-        let generation = self.gpu_generation.wrapping_add(1);
-        let hwnd_bits = self.hwnd.0 as isize;
-        device.set_device_lost_callback(move |reason, message| {
-            if let Ok(mut report) = device_loss.lock() {
-                let replace = report
-                    .as_ref()
-                    .is_none_or(|current| current.generation <= generation);
-                if replace {
-                    *report = Some(DeviceLossReport {
-                        generation,
-                        detail: format!("{reason:?}: {message}"),
-                    });
-                }
-            }
-            // SAFETY: PostMessageW copies only scalar values and is safe across threads. No raw
-            // WindowState pointer is captured; the UI thread owns both resource recovery and state.
-            let hwnd = HWND(hwnd_bits as *mut c_void);
-            let _ = unsafe {
-                PostMessageW(
-                    Some(hwnd),
-                    WM_TELA_DEVICE_LOST,
-                    WPARAM::default(),
-                    LPARAM::default(),
-                )
-            };
-        });
-
+        let gpu = GpuSession::new(
+            self.hwnd,
+            metrics.width,
+            metrics.height,
+            metrics.dpi_scale,
+            WM_TELA_DEVICE_LOST,
+        )?;
         self.dpi_scale = metrics.dpi_scale;
-        self.gpu = Some(GpuSession {
-            renderer: WgpuRenderer::new(device, queue, format, Color::rgba(1.0, 1.0, 1.0, 1.0)),
-            surface,
-            config,
-            instance,
-        });
-        self.gpu_generation = generation;
+        self.gpu = Some(gpu);
         Ok(())
     }
 
     fn dispatch_viewport(&mut self, metrics: ClientMetrics) -> Result<(), String> {
         // A frame from the previous client geometry must not route input after this point.
-        self.presented_frame_token = None;
+        if let Some(session) = self.session.as_mut() {
+            session.invalidate_presented();
+        }
         self.bridge_metrics.replace(WindowMetrics {
             width: (metrics.width as f32 / metrics.dpi_scale) as u32,
             height: (metrics.height as f32 / metrics.dpi_scale) as u32,
@@ -424,7 +353,7 @@ impl WindowState {
         } else {
             self.client_metrics()?
         };
-        if self.runtime.is_none() {
+        if self.session.is_none() {
             return Ok(());
         }
         let Some(metrics) = metrics else {
@@ -438,12 +367,11 @@ impl WindowState {
         } else if let Some(gpu) = self.gpu.as_mut()
             && (gpu.config.width != metrics.width || gpu.config.height != metrics.height)
         {
-            gpu.config.width = metrics.width;
-            gpu.config.height = metrics.height;
-            gpu.surface.configure(gpu.renderer.device(), &gpu.config);
+            gpu.reconfigure(metrics.width, metrics.height);
         }
         self.lifecycle.client_area_changed(true);
         self.dispatch_viewport(metrics)?;
+        self.sync_window_maximized();
         self.request_redraw();
         Ok(())
     }
@@ -458,71 +386,38 @@ impl WindowState {
         &mut self,
         event: AppEvent,
     ) -> Result<AppDispatchOutcome, String> {
-        let (outcome, publication) = {
-            let runtime = self
-                .runtime
-                .as_mut()
-                .ok_or_else(|| "dispatch without a live guest runtime".to_owned())?;
-            let outcome = runtime
-                .dispatch(&event)
-                .map_err(|error| error.to_string())?;
-            let publication = if outcome.publish_requested {
-                if self.frame_token != self.presented_frame_token
-                    && let Some(token) = self.frame_token
-                {
-                    runtime.rejected(token).map_err(|error| error.to_string())?;
-                }
-                Some(
-                    runtime
-                        .publish_latest()
-                        .map_err(|error| error.to_string())?,
-                )
-            } else {
-                None
-            };
-            if let Some(dispatcher) = self.bridge.as_mut() {
-                process_bridge_requests(runtime, dispatcher)?;
-            }
-            (outcome, publication)
-        };
-        if let Some(publication) = publication {
-            self.frame_token = Some(publication.token);
-            self.frame = Some(publication.frame);
-        }
-        Ok(outcome)
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| "dispatch without a live guest session".to_owned())?;
+        Ok(session.dispatch(event))
     }
 
     fn dispatch_presented_input(
         &mut self,
         input: AppFrameInput,
     ) -> Result<AppDispatchOutcome, String> {
-        let Some(source_frame_token) = self.presented_frame_token else {
-            return Ok(AppDispatchOutcome::IDLE);
-        };
-        self.dispatch_guest(AppEvent::FrameInput {
-            source_frame_token,
-            input,
-        })
+        let outcome = self.dispatch_presented_input_without_text_reconcile(input)?;
+        self.synchronize_text_channel(None)?;
+        Ok(outcome)
     }
 
     fn dispatch_presented_input_without_text_reconcile(
         &mut self,
         input: AppFrameInput,
     ) -> Result<AppDispatchOutcome, String> {
-        let Some(source_frame_token) = self.presented_frame_token else {
-            return Ok(AppDispatchOutcome::IDLE);
-        };
-        self.dispatch_guest_without_text_reconcile(AppEvent::FrameInput {
-            source_frame_token,
-            input,
-        })
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| "dispatch without a live guest session".to_owned())?;
+        Ok(session.dispatch_frame_input(input))
     }
 
     fn synchronize_text_channel(&mut self, window_focus: Option<bool>) -> Result<(), String> {
         let guest_wants_text = self
-            .runtime
+            .session
             .as_ref()
-            .is_some_and(|runtime| runtime.status().input_focused);
+            .is_some_and(|session| session.input_focused());
         let first = match window_focus {
             Some(focused) => self.lifecycle.set_window_focus(focused, guest_wants_text),
             None => self.lifecycle.reconcile_text_channel(guest_wants_text),
@@ -532,9 +427,9 @@ impl WindowState {
         // A Blur can cause a guest to advance between two text fields. Reconcile that one semantic
         // edge immediately, but never loop indefinitely around guest code from a native callback.
         let guest_wants_text = self
-            .runtime
+            .session
             .as_ref()
-            .is_some_and(|runtime| runtime.status().input_focused);
+            .is_some_and(|session| session.input_focused());
         let second = self.lifecycle.reconcile_text_channel(guest_wants_text);
         self.dispatch_text_channel_action(second)
     }
@@ -600,9 +495,9 @@ impl WindowState {
             return Ok(false);
         }
         let input_focused = self
-            .runtime
+            .session
             .as_ref()
-            .is_some_and(|runtime| runtime.status().input_focused);
+            .is_some_and(|session| session.input_focused());
         if input_focused {
             match virtual_key {
                 key if key == VK_RETURN.0 => {
@@ -623,7 +518,7 @@ impl WindowState {
                 _ => {}
             }
         }
-        let Some(physical_key) = physical_key(virtual_key) else {
+        let Some(physical_key) = input::physical_key(virtual_key) else {
             return Ok(false);
         };
         let outcome = self.dispatch_presented_input(AppFrameInput::KeyDown {
@@ -638,29 +533,15 @@ impl WindowState {
     }
 
     fn character(&mut self, code_unit: u16) -> Result<bool, String> {
-        if !self.lifecycle.can_render()
-            || !self
-                .runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.status().input_focused)
-        {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(false);
+        };
+        if !self.lifecycle.can_render() || !session.input_focused() {
             return Ok(false);
         }
-        let mut value = self
-            .runtime
-            .as_ref()
-            .expect("runtime checked above")
-            .status()
-            .input_value
-            .clone();
-        match code_unit {
-            8 => {
-                value.pop();
-            }
-            0x20..=0x7e => {
-                value.push(char::from_u32(code_unit as u32).expect("ASCII character"));
-            }
-            _ => return Ok(false),
+        let mut value = session.input_value();
+        if !input::apply_character_code_unit(&mut value, code_unit) {
+            return Ok(false);
         }
         let outcome = self.dispatch_presented_input(AppFrameInput::SetInputValue(value))?;
         if outcome.publish_requested {
@@ -674,42 +555,23 @@ impl WindowState {
             return Ok(RenderOutcome::Occluded);
         }
         let frame = self
-            .frame
+            .session
             .as_ref()
+            .map(|session| session.frame())
             .ok_or_else(|| "render without a resolved UI frame".to_owned())?;
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| "render without a live GPU session".to_owned())?;
-        let (texture, suboptimal) = match gpu.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            wgpu::CurrentSurfaceTexture::Outdated => return Ok(RenderOutcome::Outdated),
-            wgpu::CurrentSurfaceTexture::Lost => return Ok(RenderOutcome::Lost),
-            wgpu::CurrentSurfaceTexture::Timeout => return Ok(RenderOutcome::Timeout),
-            wgpu::CurrentSurfaceTexture::Occluded => return Ok(RenderOutcome::Occluded),
-            wgpu::CurrentSurfaceTexture::Validation => return Ok(RenderOutcome::Validation),
-        };
-        let view = texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        gpu.renderer
-            .render_frame(frame, &view, gpu.config.width, gpu.config.height);
-        gpu.renderer.present(texture);
-        Ok(RenderOutcome::Presented { suboptimal })
+        gpu.render(frame)
     }
 
     fn paint_guest(&mut self) -> Result<(), String> {
         match self.render()? {
             RenderOutcome::Presented { suboptimal } => {
-                if self.frame_token != self.presented_frame_token
-                    && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), self.frame_token)
-                {
-                    let _ = runtime
-                        .presented(token)
-                        .map_err(|error| error.to_string())?;
+                if let Some(session) = self.session.as_mut() {
+                    session.frame_presented();
                 }
-                self.presented_frame_token = self.frame_token;
                 self.lifecycle.surface_presented();
                 self.cancel_surface_retry();
                 if suboptimal {
@@ -718,12 +580,16 @@ impl WindowState {
                 }
             }
             RenderOutcome::Outdated => {
-                self.presented_frame_token = None;
+                if let Some(session) = self.session.as_mut() {
+                    session.invalidate_presented();
+                }
                 self.reconfigure_surface()?;
                 self.request_redraw();
             }
             RenderOutcome::Lost => {
-                self.presented_frame_token = None;
+                if let Some(session) = self.session.as_mut() {
+                    session.invalidate_presented();
+                }
                 self.recreate_surface()?;
                 self.request_redraw();
             }
@@ -737,7 +603,9 @@ impl WindowState {
     }
 
     fn reconfigure_surface(&mut self) -> Result<(), String> {
-        self.presented_frame_token = None;
+        if let Some(session) = self.session.as_mut() {
+            session.invalidate_presented();
+        }
         let Some(metrics) = self.client_metrics()? else {
             self.lifecycle.client_area_changed(false);
             return Ok(());
@@ -746,15 +614,15 @@ impl WindowState {
             .gpu
             .as_mut()
             .ok_or_else(|| "reconfigure without a live GPU session".to_owned())?;
-        gpu.config.width = metrics.width;
-        gpu.config.height = metrics.height;
-        gpu.surface.configure(gpu.renderer.device(), &gpu.config);
+        gpu.reconfigure(metrics.width, metrics.height);
         self.dpi_scale = metrics.dpi_scale;
         Ok(())
     }
 
     fn recreate_surface(&mut self) -> Result<(), String> {
-        self.presented_frame_token = None;
+        if let Some(session) = self.session.as_mut() {
+            session.invalidate_presented();
+        }
         let Some(metrics) = self.client_metrics()? else {
             self.lifecycle.client_area_changed(false);
             return Ok(());
@@ -763,12 +631,8 @@ impl WindowState {
             .gpu
             .as_mut()
             .ok_or_else(|| "recreate surface without a live GPU session".to_owned())?;
-        let surface = create_surface(&gpu.instance, self.hwnd)?;
-        gpu.config.width = metrics.width;
-        gpu.config.height = metrics.height;
-        surface.configure(gpu.renderer.device(), &gpu.config);
-        let previous = std::mem::replace(&mut gpu.surface, surface);
-        drop(previous);
+        gpu.recreate(self.hwnd)?;
+        gpu.reconfigure(metrics.width, metrics.height);
         self.dpi_scale = metrics.dpi_scale;
         self.dispatch_viewport(metrics)?;
         Ok(())
@@ -779,7 +643,7 @@ impl WindowState {
             return Ok(());
         };
         // SAFETY: this sets a window-owned one-shot timer; WM_TIMER kills it before repainting.
-        let timer = unsafe { SetTimer(Some(self.hwnd), SURFACE_RETRY_TIMER, delay_ms, None) };
+        let timer = unsafe { SetTimer(Some(self.hwnd), TIMER_SURFACE_RETRY, delay_ms, None) };
         if timer == 0 {
             return Err("schedule WGPU surface retry timer".to_owned());
         }
@@ -788,7 +652,7 @@ impl WindowState {
 
     fn on_surface_retry_timer(&mut self) {
         // SAFETY: it is harmless to cancel an already-fired one-shot window timer.
-        let _ = unsafe { KillTimer(Some(self.hwnd), SURFACE_RETRY_TIMER) };
+        let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_SURFACE_RETRY) };
         if self.lifecycle.take_surface_retry() {
             self.request_redraw();
         }
@@ -797,23 +661,18 @@ impl WindowState {
     fn cancel_surface_retry(&mut self) {
         // The lifecycle will ignore a stale WM_TIMER after this. Kill it too, so recovery does not
         // cause an unnecessary later paint.
-        let _ = unsafe { KillTimer(Some(self.hwnd), SURFACE_RETRY_TIMER) };
+        let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_SURFACE_RETRY) };
         self.lifecycle.cancel_surface_retry();
     }
 
     fn receive_device_loss(&mut self) {
-        let Some(report) = self
-            .device_loss
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
-        else {
+        let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        if report.generation != self.gpu_generation {
+        let Some(report) = gpu.take_device_loss_report() else {
             return;
-        }
-        if self.gpu.is_none() {
+        };
+        if report.generation != gpu.generation() {
             return;
         }
         let detail = report.detail;
@@ -822,7 +681,9 @@ impl WindowState {
             Some(DeviceLossAction::RecreateGpu) => {
                 eprintln!("tela-win32-host: WGPU device lost, rebuilding once: {detail}");
                 self.gpu = None;
-                self.presented_frame_token = None;
+                if let Some(session) = self.session.as_mut() {
+                    session.invalidate_presented();
+                }
                 if self.lifecycle.phase() == ShellPhase::Suspended {
                     return;
                 }
@@ -845,6 +706,94 @@ impl WindowState {
                     "WGPU device was lost again after recovery: {detail}"
                 ));
             }
+        }
+    }
+
+    /// 动画驱动：活动动画按 deadline（钳制 1..16ms）排定时器；空闲时撤销。
+    fn sync_animation_timer(&mut self) {
+        let Some((animation_active, next_deadline_ms)) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.status())
+            .map(|status| (status.animation_active, status.next_deadline_ms))
+        else {
+            return;
+        };
+        if animation_active {
+            let now_ms = self.input_epoch.elapsed().as_millis() as u64;
+            let delay_ms = next_deadline_ms
+                .map(|deadline| deadline.saturating_sub(now_ms).clamp(1, 16))
+                .unwrap_or(16) as u32;
+            // SAFETY: window-owned timer on the UI thread.
+            let _ = unsafe { SetTimer(Some(self.hwnd), TIMER_ANIMATION, delay_ms, None) };
+        } else {
+            // SAFETY: harmless to revoke an idle timer.
+            let _ = unsafe { KillTimer(Some(self.hwnd), TIMER_ANIMATION) };
+        }
+    }
+
+    /// 动画节拍：DwmFlush 对齐合成器；失败场景（RDP/禁用 DWM）仍由短定时器保底。
+    fn on_animation_timer(&mut self) -> bool {
+        // SAFETY: DwmFlush 是同步合成器等待，UI 线程安全。
+        let _ = unsafe { DwmFlush() };
+        self.tick(AppEvent::Tick {
+            timestamp_ms: self.input_epoch.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn wake(&mut self) -> bool {
+        self.tick(AppEvent::Wake {
+            timestamp_ms: self.input_epoch.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn tick(&mut self, event: AppEvent) -> bool {
+        match self.dispatch_guest_without_text_reconcile(event) {
+            Ok(outcome) => {
+                if outcome.publish_requested {
+                    self.request_redraw();
+                }
+                outcome.publish_requested
+            }
+            Err(error) => {
+                self.terminate(error);
+                false
+            }
+        }
+    }
+
+    /// 自绘 chrome 的最大化状态同步；返回是否变化。
+    fn sync_window_maximized(&mut self) -> bool {
+        if self.chrome != WindowChrome::CustomTitleBar {
+            return false;
+        }
+        // SAFETY: IsZoomed 是同步窗口查询。
+        let maximized = unsafe { IsZoomed(self.hwnd) }.as_bool();
+        self.session
+            .as_mut()
+            .map(|session| {
+                session
+                    .dispatch(AppEvent::WindowState { maximized })
+                    .handled
+            })
+            .unwrap_or(false)
+    }
+
+    /// 取出并执行一条随呈现排空的窗口命令（自绘 chrome 专用）。
+    fn execute_pending_window_command(&mut self) {
+        if self.chrome != WindowChrome::CustomTitleBar {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(command) = session.take_window_command() else {
+            return;
+        };
+        // SAFETY: hwnd 属于 UI 线程，命令执行是标准的窗口管理调用。
+        unsafe { crate::chrome::execute_window_command(self.hwnd, command) };
+        if self.sync_window_maximized() {
+            self.request_redraw();
         }
     }
 
@@ -907,7 +856,9 @@ impl WindowState {
             return;
         }
         self.startup_cancel.store(true, Ordering::Release);
-        self.presented_frame_token = None;
+        if let Some(session) = self.session.as_mut() {
+            session.invalidate_presented();
+        }
         self.end_pointer_capture(true);
         let _ = self.pointer_left_client();
         self.cancel_surface_retry();
@@ -935,16 +886,20 @@ impl WindowState {
         };
     }
 
-    fn update_cursor(&self) {
-        let cursor = self
-            .runtime
+    /// 客户区光标：输入聚焦 → I-beam；hover 命中可点击 → 手型；否则箭头。
+    ///
+    /// 在 WM_SETCURSOR（系统请求）与 WM_MOUSEMOVE（实时刷新，覆盖拖拽缩放结束等
+    /// 系统不再发 WM_SETCURSOR 的场景）两处调用。
+    fn apply_client_cursor(&self) {
+        let cursor = match self
+            .session
             .as_ref()
-            .map(|runtime| runtime.status().cursor)
-            .unwrap_or(CursorKind::Default);
-        let cursor = match cursor {
-            CursorKind::Default => IDC_ARROW,
+            .map(|session| session.cursor())
+            .unwrap_or(CursorKind::Default)
+        {
             CursorKind::Text => IDC_IBEAM,
             CursorKind::Pointer => IDC_HAND,
+            CursorKind::Default => IDC_ARROW,
         };
         // SAFETY: system cursor resources are process-owned and do not transfer ownership.
         if let Ok(cursor) = unsafe { LoadCursorW(None, cursor) } {
@@ -991,57 +946,30 @@ impl WindowState {
     }
 }
 
-fn create_surface(instance: &wgpu::Instance, hwnd: HWND) -> Result<wgpu::Surface<'static>, String> {
-    let hwnd = NonZeroIsize::new(hwnd.0 as isize)
-        .ok_or_else(|| "Win32 window handle is null".to_owned())?;
-    let raw_window_handle = RawWindowHandle::Win32(Win32WindowHandle::new(hwnd));
-    let raw_display_handle = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
-    // SAFETY: the HWND belongs to the UI thread and outlives the returned surface. The Windows
-    // display marker has no borrowed data. It matches the `DisplayHandle::windows()` given to the
-    // instance, which is required when both instance and target carry display information.
-    unsafe {
-        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_display_handle),
-            raw_window_handle,
-        })
+/// 统一壳入口：创建窗口并运行至关闭。
+pub fn run_window(options: ShellOptions) -> Result<(), String> {
+    // 启动轴分叉：Immediate 在建窗前同步初始化会话并发布首帧（失败仍建窗显示
+    // Failed 诊断页）；Background 建窗后由 worker 接管（Loading 页先行）。
+    let startup_cancel = Arc::new(AtomicBool::new(false));
+    let mut immediate_session = None;
+    let mut immediate_error = None;
+    let mut background: Option<(
+        PlatformLaunchOptions,
+        mpsc::Sender<Result<GuestRuntime, String>>,
+    )> = None;
+    let mut startup_rx: Option<Receiver<Result<GuestRuntime, String>>> = None;
+    match options.source {
+        SessionSource::Immediate(app) => match SessionDriver::new(app) {
+            Ok(session) => immediate_session = Some(session),
+            Err(error) => immediate_error = Some(error),
+        },
+        SessionSource::Background(launch) => {
+            let (sender, receiver) = mpsc::channel();
+            startup_rx = Some(receiver);
+            background = Some((launch, sender));
+        }
     }
-    .map_err(|error| format!("create WGPU surface: {error}"))
-}
-
-fn spawn_startup_worker(
-    options: PlatformLaunchOptions,
-    cache_path: PathBuf,
-    sender: mpsc::Sender<Result<GuestRuntime, String>>,
-    cancel: Arc<AtomicBool>,
-    hwnd: HWND,
-) -> Result<(), String> {
-    let hwnd_bits = hwnd.0 as isize;
-    thread::Builder::new()
-        .name("tela-win32-startup".to_owned())
-        .spawn(move || {
-            let result = load_guest(options, cache_path);
-            if cancel.load(Ordering::Acquire) {
-                return;
-            }
-            if sender.send(result).is_ok() && !cancel.load(Ordering::Acquire) {
-                let hwnd = HWND(hwnd_bits as *mut c_void);
-                // SAFETY: the notification carries no pointer. If the HWND was destroyed first,
-                // PostMessageW fails and the receiver/result are simply dropped by the worker.
-                let _ = unsafe {
-                    PostMessageW(
-                        Some(hwnd),
-                        WM_TELA_STARTUP_READY,
-                        WPARAM::default(),
-                        LPARAM::default(),
-                    )
-                };
-            }
-        })
-        .map(|_| ())
-        .map_err(|error| format!("spawn startup worker: {error}"))
-}
-
-fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(), String> {
+    let _cache = startup::cache_path()?;
     // SAFETY: Per-Monitor V2 is selected before this process creates an HWND. Unsupported older
     // Windows versions keep their default DPI mode and are still usable.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -1049,7 +977,7 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
         unsafe { GetModuleHandleW(None) }.map_err(|error| format!("get module handle: {error}"))?;
     let instance = HINSTANCE(module.0);
     let class_name = utf16z(WINDOW_CLASS);
-    let title = utf16z(WINDOW_TITLE);
+    let title = utf16z(&options.title);
     let class = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
@@ -1065,9 +993,11 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
         ));
     }
 
-    let (startup_sender, startup_rx) = mpsc::channel();
-    let startup_cancel = Arc::new(AtomicBool::new(false));
-    let state = Box::new(WindowState::new(startup_rx, Arc::clone(&startup_cancel)));
+    let state = Box::new(WindowState::new(
+        options.chrome,
+        startup_rx,
+        Arc::clone(&startup_cancel),
+    ));
     let state_pointer = Box::into_raw(state);
     // SAFETY: WM_NCCREATE stores this allocation in GWLP_USERDATA; run_window recovers it exactly
     // once after the message loop. CreateWindowExW does not retain the UTF-16 vectors after return.
@@ -1076,11 +1006,11 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
             WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(title.as_ptr()),
-            WS_OVERLAPPEDWINDOW,
+            options.chrome.window_style(),
             120,
             120,
-            1280,
-            840,
+            options.width.max(320),
+            options.height.max(240),
             None,
             None,
             Some(instance),
@@ -1099,23 +1029,34 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
         unsafe { state_from(hwnd) }.ok_or_else(|| "Win32 state was not installed".to_owned())?;
     state.hwnd = hwnd;
 
-    // Show and paint the loading page before even spawning the potentially multi-second Wasmtime
-    // compilation. The UI thread remains available for move/close/focus messages throughout startup.
     // SAFETY: the HWND and state are initialized.
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
-    // SAFETY: forces an initial WM_PAINT for the native loading page.
+    // SAFETY: forces an initial WM_PAINT (loading page or first application frame).
     let _ = unsafe { UpdateWindow(hwnd) };
-    if let Err(error) =
-        spawn_startup_worker(options, cache_path, startup_sender, startup_cancel, hwnd)
-    {
-        state.fail_startup(error);
+
+    if let Some(session) = immediate_session.take() {
+        // Immediate 轴：会话已就绪（首帧已发布），直接完成启动收尾。
+        state.install_immediate(session);
+    } else if let Some(error) = immediate_error.take() {
+        state.fail_startup(format!("application session failed to initialize: {error}"));
+    } else if let Some((launch, sender)) = background.take() {
+        // Loading 页已经可见；再启动可能耗时数秒的 bundle 下载与 Wasmtime 编译。
+        if let Err(error) =
+            startup::spawn_startup_worker(launch, _cache, sender, Arc::clone(&startup_cancel), hwnd)
+        {
+            state.fail_startup(error);
+        }
     }
+
+    // Host owns the wake-up cadence. Applications decide whether a tick changes state.
+    // SAFETY: window-owned repeating timer on the UI thread.
+    let _ = unsafe { SetTimer(Some(hwnd), TIMER_WAKE, 500, None) };
 
     let mut message = MSG::default();
     let message_result = 'running: loop {
         let quantum_started = Instant::now();
         let mut drained = 0u32;
-        while drained < 64 && quantum_started.elapsed().as_micros() < 2_000 {
+        while drained < 64 && !input::quantum_expired(quantum_started) {
             // SAFETY: message is writable and belongs to this UI thread's queue.
             if !unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
                 break;
@@ -1127,12 +1068,18 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            if let Some(state) = unsafe { state_from(hwnd) } {
+                state.execute_pending_window_command();
+            }
             drained += 1;
         }
 
         // Give a coalesced invalid region one synchronous paint opportunity between input
         // quanta, even while WM_MOUSEMOVE continues to arrive.
         let _ = unsafe { UpdateWindow(hwnd) };
+        if let Some(state) = unsafe { state_from(hwnd) } {
+            state.execute_pending_window_command();
+        }
 
         if drained < 64 {
             let _ = unsafe {
@@ -1151,6 +1098,9 @@ fn run_window(options: PlatformLaunchOptions, cache_path: PathBuf) -> Result<(),
         .clone()
         .or_else(|| state.startup_error.clone());
     drop(state);
+    // SAFETY: revoke the shell timers after the loop.
+    let _ = unsafe { KillTimer(Some(hwnd), TIMER_WAKE) };
+    let _ = unsafe { KillTimer(Some(hwnd), TIMER_ANIMATION) };
     message_result.and_then(|()| terminal_error.map_or(Ok(()), Err))
 }
 
@@ -1173,8 +1123,32 @@ unsafe extern "system" fn window_proc(
     };
 
     match message {
+        WM_NCHITTEST if state.chrome == WindowChrome::CustomTitleBar => {
+            // 自绘 chrome：客户区顶部拖动带 → HTCAPTION；按钮区保持 HTCLIENT。
+            // take/还回驱动器：hit_test 回调需要 &SessionDriver，与 wndproc 的 &mut 状态错开。
+            let chrome = state.chrome;
+            let dpi_scale = state.dpi_scale;
+            let session = state.session.take();
+            let result = hit_test(
+                hwnd,
+                message,
+                wparam,
+                lparam,
+                chrome,
+                |point| {
+                    session
+                        .as_ref()
+                        .map(|driver| driver.hit_role_at(point))
+                        .unwrap_or(tela_contract::HitRole::Client)
+                },
+                dpi_scale,
+            );
+            state.session = session;
+            result
+        }
         WM_TELA_STARTUP_READY => {
             state.receive_startup_result();
+            state.sync_animation_timer();
             LRESULT(0)
         }
         WM_TELA_DEVICE_LOST => {
@@ -1190,6 +1164,7 @@ unsafe extern "system" fn window_proc(
                 ShellPhase::Loading | ShellPhase::Failed => state.paint_native_status(&paint),
                 ShellPhase::Running => {
                     let result = state.paint_guest();
+                    state.sync_animation_timer();
                     handle_window_error(state, result);
                 }
                 ShellPhase::Suspended | ShellPhase::Closing => {}
@@ -1255,6 +1230,16 @@ unsafe extern "system" fn window_proc(
                 0.0,
             );
             let result = state.pointer(event);
+            handle_window_error(state, result);
+            // 实时刷新客户区光标：拖拽缩放（sizing loop）结束等场景系统不再发
+            // WM_SETCURSOR，只有这里能覆盖残留的系统光标。
+            state.apply_client_cursor();
+            LRESULT(0)
+        }
+        WM_NCMOUSEMOVE if state.chrome == WindowChrome::CustomTitleBar => {
+            // 非客户区（边缘/标题栏）移动期间清空 hover：此时没有客户区 WM_MOUSEMOVE，
+            // hover_key 保持陈旧，回到客户区会显示错误的手型。
+            let result = state.pointer_left_client();
             handle_window_error(state, result);
             LRESULT(0)
         }
@@ -1322,7 +1307,7 @@ unsafe extern "system" fn window_proc(
                 point.y as f32 / dpi_scale,
                 0,
                 0.0,
-                -(delta / 120.0) * 48.0,
+                input::wheel_delta_y(delta),
             );
             let result = state.pointer(event);
             handle_window_error(state, result);
@@ -1347,13 +1332,34 @@ unsafe extern "system" fn window_proc(
                 LRESULT(0)
             }
         },
-        WM_TIMER if wparam.0 == SURFACE_RETRY_TIMER => {
-            state.on_surface_retry_timer();
-            LRESULT(0)
-        }
+        WM_TIMER => match wparam.0 as usize {
+            TIMER_WAKE => {
+                state.wake();
+                state.sync_animation_timer();
+                LRESULT(0)
+            }
+            TIMER_ANIMATION => {
+                state.on_animation_timer();
+                state.sync_animation_timer();
+                LRESULT(0)
+            }
+            TIMER_SURFACE_RETRY => {
+                state.on_surface_retry_timer();
+                LRESULT(0)
+            }
+            _ => LRESULT(0),
+        },
         WM_SETCURSOR => {
-            state.update_cursor();
-            LRESULT(1)
+            // MSDN: wParam = 光标所在窗口句柄；lParam 低位 = hit-test 码，高位 = 触发消息。
+            // 只有客户区（HTCLIENT）由应用接管光标；边缘/标题栏/系统菜单必须交回
+            // DefWindowProcW，由系统显示 resize/移动等标准光标并支持边缘拖拽缩放。
+            let hit_test_code = (lparam.0 & 0xffff) as u16;
+            if hit_test_code == HTCLIENT as u16 {
+                state.apply_client_cursor();
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
         }
         WM_CLOSE => {
             state.begin_close();
@@ -1406,68 +1412,23 @@ fn utf16z(value: &str) -> Vec<u16> {
 }
 
 fn client_point(lparam: LPARAM) -> (i32, i32) {
-    let packed = lparam.0 as u32;
-    (
-        (packed & 0xffff) as u16 as i16 as i32,
-        (packed >> 16) as u16 as i16 as i32,
-    )
+    input::client_point(lparam.0 as u32)
 }
 
 fn modifier_bits() -> u8 {
-    const SHIFT: u8 = 1 << 0;
-    const CTRL: u8 = 1 << 1;
-    const ALT: u8 = 1 << 2;
-    const META: u8 = 1 << 3;
-    let mut result = 0;
-    if key_is_down(VK_SHIFT.0) {
-        result |= SHIFT;
-    }
-    if key_is_down(VK_CONTROL.0) {
-        result |= CTRL;
-    }
-    if key_is_down(VK_MENU.0) {
-        result |= ALT;
-    }
-    if key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0) {
-        result |= META;
-    }
-    result
+    input::modifier_bits_from_key_state(
+        key_is_down(VK_SHIFT.0),
+        key_is_down(VK_CONTROL.0),
+        key_is_down(VK_MENU.0),
+        key_is_down(VK_LWIN.0) || key_is_down(VK_RWIN.0),
+    )
 }
 
 fn has_command_modifier() -> bool {
-    let modifiers = modifier_bits();
-    modifiers & ((1 << 1) | (1 << 3)) != 0
+    input::has_command_modifier(modifier_bits())
 }
 
 fn key_is_down(virtual_key: u16) -> bool {
     // SAFETY: GetAsyncKeyState reads global keyboard state without borrowing Rust memory.
     unsafe { GetAsyncKeyState(virtual_key as i32) < 0 }
-}
-
-fn physical_key(virtual_key: u16) -> Option<u16> {
-    if (b'A' as u16..=b'Z' as u16).contains(&virtual_key) {
-        return Some(0x04 + (virtual_key - b'A' as u16));
-    }
-    if (b'1' as u16..=b'9' as u16).contains(&virtual_key) {
-        return Some(0x1e + (virtual_key - b'1' as u16));
-    }
-    if virtual_key == b'0' as u16 {
-        return Some(0x27);
-    }
-    match virtual_key {
-        key if key == VK_RETURN.0 => Some(0x28),
-        key if key == VK_ESCAPE.0 => Some(0x29),
-        key if key == VK_BACK.0 => Some(0x2a),
-        key if key == VK_TAB.0 => Some(0x2b),
-        key if key == VK_HOME.0 => Some(0x4a),
-        key if key == VK_PRIOR.0 => Some(0x4b),
-        key if key == VK_DELETE.0 => Some(0x4c),
-        key if key == VK_END.0 => Some(0x4d),
-        key if key == VK_NEXT.0 => Some(0x4e),
-        key if key == VK_RIGHT.0 => Some(0x4f),
-        key if key == VK_LEFT.0 => Some(0x50),
-        key if key == VK_DOWN.0 => Some(0x51),
-        key if key == VK_UP.0 => Some(0x52),
-        _ => None,
-    }
 }

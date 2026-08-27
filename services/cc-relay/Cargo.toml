@@ -1,0 +1,15 @@
+[package]
+name = "tela-cc-relay"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "CC Remote relay: std-threaded HTTP + agent-link hub for the 2c2G server"
+
+[dependencies]
+httparse = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tela-cc-protocol = { path = "../cc-protocol" }
+
+[lints]
+workspace = true

@@ -24,5 +24,6 @@ pub use bundle_loader::{
 pub use launch::{LaunchMode, PlatformLaunchOptions, index_url_for_port, launch_mode, usage};
 pub use lifecycle::{DeviceLossAction, ShellLifecycle, ShellPhase, TextChannelAction};
 pub use tela_guest_runtime::{
-    BundleVerification, GuestRuntime, GuestRuntimeError, GuestRuntimeMetrics, verify_bundle,
+    BundleVerification, GuestRuntime, GuestRuntimeError, GuestRuntimeMetrics, GuestSession,
+    verify_bundle,
 };

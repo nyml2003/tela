@@ -1,0 +1,1 @@
+{"seq":7,"ts_ms":1758595220000,"kind":"permission_requested","permission_id":"66ae0533-a1f8-417c-a62c-0f397cdd9cba","session_id":"0f9d1549-2620-463c-b206-b734d4ac0a11","turn_id":"turn-0008","tool_name":"Bash","input_summary":"echo forced > /tmp/cc-probe/perm.txt","expires_at_ms":1758595340000}

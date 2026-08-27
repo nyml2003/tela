@@ -1,0 +1,1 @@
+{"events":[{"seq":1,"ts_ms":1758595200000,"kind":"agent_status","online":true,"agent_id":"desktop-wsl"},{"seq":2,"ts_ms":1758595210000,"kind":"turn_started","session_id":"0f9d1549-2620-463c-b206-b734d4ac0a11","turn_id":"turn-0007","user_text":"看一下当前项目"}],"cursor":2,"truncated":false,"agent_online":true,"server_time_ms":1758595210500}

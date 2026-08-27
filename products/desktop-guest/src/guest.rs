@@ -1,20 +1,38 @@
 //! WASM ABI 导出与 desktop 产品资源组合。
+//!
+//! 会话生命周期全部由共享运行时 `tela_app_runtime::Application` 持有；这里只做三件事：
+//! 组装资源与控制器、维护桥请求队列、把宏回执转发给 `ApplicationSession`。
 
 use std::cell::{Cell, RefCell};
 
-use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppStatus, CursorKind};
+use tela_app_abi::{
+    AppDispatchOutcome, AppEvent, AppFrameToken, AppPublication, ApplicationSession,
+};
+use tela_app_runtime::Application;
 use tela_bridge::{BridgeResult, GuestBridge};
 use tela_contract::UiResourceSet;
-use tela_desktop_demo::App;
+use tela_desktop_demo::{DesktopDemoController, Intent, demo_config};
 use tela_icon_resources::MaterialIconFontProvider;
 use tela_text_resources::ControlledTextMeasurer;
 
 static RESOURCES: UiResourceSet<ControlledTextMeasurer, MaterialIconFontProvider> =
     UiResourceSet::new(ControlledTextMeasurer, MaterialIconFontProvider);
 
+type DemoApplication = Application<Intent, DesktopDemoController>;
+
+fn new_application() -> DemoApplication {
+    Application::new(
+        &RESOURCES,
+        DesktopDemoController::new(&RESOURCES),
+        demo_config(),
+    )
+}
+
 thread_local! {
-    static APP: RefCell<App> = RefCell::new(App::new(&RESOURCES));
-    static FRAME_TOKEN: Cell<u64> = const { Cell::new(0) };
+    static APP: RefCell<DemoApplication> = RefCell::new(new_application());
+    // 宏只在自身 thread_local 里记账；适配器自持待呈现令牌，镜像宿主 publish_latest
+    // 在重发布前先拒绝旧候选。
+    static PENDING: Cell<Option<AppFrameToken>> = const { Cell::new(None) };
     // 桥：guest 侧参考实现实例 + host 写入响应的保留区 + 演示回调状态。
     static BRIDGE: RefCell<GuestBridge> = RefCell::new(GuestBridge::new());
     static BRIDGE_INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -26,15 +44,17 @@ tela_app_abi::export_guest! {
     with_app = with_app;
     apply = apply_event;
     publish = publish_app;
+    presented = on_presented;
+    rejected = on_rejected;
 }
 
-fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
+fn with_app<T>(f: impl FnOnce(&mut DemoApplication) -> T) -> T {
     APP.with(|app| f(&mut app.borrow_mut()))
 }
 
 fn reset_app() {
-    APP.with(|app| *app.borrow_mut() = App::new(&RESOURCES));
-    FRAME_TOKEN.with(|token| token.set(0));
+    APP.with(|app| *app.borrow_mut() = new_application());
+    PENDING.with(|slot| slot.set(None));
     BRIDGE.with(|bridge| {
         let mut bridge = bridge.borrow_mut();
         // 演示：初始化时排队两个只读桥请求，回调把结果写入演示状态，
@@ -66,77 +86,37 @@ fn reset_app() {
     });
 }
 
-fn apply_event(app: &mut App, event: AppEvent) -> bool {
+fn apply_event(app: &mut DemoApplication, event: AppEvent) -> AppDispatchOutcome {
     // 上一轮请求队列已被宿主读取；帧边界清空，避免重复执行。
     BRIDGE.with(|bridge| {
         bridge.borrow_mut().take_request_queue();
     });
-    match event {
-        AppEvent::Wake { .. } => false,
-        AppEvent::Tick { timestamp_ms } => app.animation_tick(timestamp_ms),
-        AppEvent::Viewport { width, height } => app.set_viewport(width, height),
-        AppEvent::WindowState { .. } => false,
-        AppEvent::FrameInput {
-            source_frame_token,
-            input,
-        } => {
-            if active_frame_token() != Some(source_frame_token) {
-                return false;
-            }
-            match input {
-                AppFrameInput::Pointer(pointer) => app.handle_pointer(pointer.into()) != 0,
-                AppFrameInput::KeyDown {
-                    physical_key,
-                    modifier_bits,
-                    repeat,
-                } => app.handle_raw_key_codes(physical_key, modifier_bits, repeat) != 0,
-                AppFrameInput::SetInputValue(value) => app.set_input_value(value) != 0,
-                AppFrameInput::InputFocus => app.input_focus() != 0,
-                AppFrameInput::InputBlur => app.input_blur() != 0,
-                AppFrameInput::InputEnter => app.input_enter() != 0,
-                AppFrameInput::InputCancel => app.input_cancel() != 0,
-                AppFrameInput::InputCompositionStart => app.composition_start() != 0,
-                AppFrameInput::InputCompositionEnd => app.composition_end() != 0,
-            }
-        }
-        AppEvent::ReplaceKeymapJson(json) => app.replace_keymap_json(&json).is_ok(),
+    // 共享运行时的 dispatch 覆盖全部事件（含 WindowState 与 ReplaceKeymapJson）；
+    // 陈旧 FrameInput 由会话的 presented 令牌门直接拒绝。
+    ApplicationSession::dispatch(app, event).unwrap_or(AppDispatchOutcome::IDLE)
+}
+
+fn publish_app(app: &mut DemoApplication) -> Result<AppPublication, String> {
+    // 镜像宿主 publish_latest：上一发布仍未呈现时先拒绝旧候选，再发布新帧。
+    if let Some(pending) = PENDING.with(|slot| slot.take()) {
+        ApplicationSession::rejected(app, pending);
     }
+    let publication = ApplicationSession::publish(app).map_err(|error| error.to_string())?;
+    PENDING.with(|slot| slot.set(Some(publication.token)));
+    Ok(publication)
 }
 
-fn publish_app(app: &mut App) -> Result<(&tela_contract::UiFrame, AppStatus), String> {
-    ensure_frame(app);
-    let cursor = match app.pointer_cursor() {
-        1 => CursorKind::Text,
-        2 => CursorKind::Pointer,
-        _ => CursorKind::Default,
-    };
-    Ok((
-        app.frame(),
-        AppStatus {
-            frame_token: active_frame_token(),
-            cursor,
-            input_focused: app.input_focused(),
-            input_value: app.input_value(),
-            animation_active: app.animation_schedule().active,
-            next_deadline_ms: app.animation_schedule().next_deadline_ms,
-        },
-    ))
+fn on_presented(
+    app: &mut DemoApplication,
+    token: AppFrameToken,
+) -> Result<AppDispatchOutcome, String> {
+    PENDING.with(|slot| slot.set(None));
+    ApplicationSession::presented(app, token).map_err(|error| error.to_string())
 }
 
-fn ensure_frame(app: &mut App) {
-    if app.ensure_frame() {
-        FRAME_TOKEN.with(|token| {
-            let next = token
-                .get()
-                .checked_add(1)
-                .expect("desktop guest frame token counter exhausted");
-            token.set(next);
-        });
-    }
-}
-
-fn active_frame_token() -> Option<AppFrameToken> {
-    FRAME_TOKEN.with(|token| AppFrameToken::new(token.get()))
+fn on_rejected(app: &mut DemoApplication, token: AppFrameToken) {
+    PENDING.with(|slot| slot.set(None));
+    ApplicationSession::rejected(app, token);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +178,7 @@ pub extern "C" fn tela_app_bridge_dispatch(len: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tela_app_abi::{AppFrameInput, OUTCOME_OK, OUTCOME_PUBLISH_REQUESTED};
     use tela_bridge::{BridgeEvent, BridgeResult};
 
     #[test]
@@ -239,9 +220,9 @@ mod tests {
         );
 
         // 第二次 apply 会清空队列；再排队一个请求，模拟宿主读取闭环。
-        let mut app = App::new(&RESOURCES);
+        let mut application = new_application();
         let _ = apply_event(
-            &mut app,
+            &mut application,
             AppEvent::Viewport {
                 width: 100.0,
                 height: 100.0,
@@ -264,23 +245,22 @@ mod tests {
         let first = with_app(|app| {
             publish_app(app)
                 .expect("publish initial desktop frame")
-                .1
-                .frame_token
-                .expect("initial desktop frame token")
+                .token
         });
         let second = with_app(|app| {
-            assert!(apply_event(
-                app,
-                AppEvent::Viewport {
-                    width: 1103.0,
-                    height: 721.0,
-                },
-            ));
+            assert!(
+                apply_event(
+                    app,
+                    AppEvent::Viewport {
+                        width: 1103.0,
+                        height: 721.0,
+                    },
+                )
+                .publish_requested
+            );
             publish_app(app)
                 .expect("publish resized desktop frame")
-                .1
-                .frame_token
-                .expect("resized desktop frame token")
+                .token
         });
         assert_ne!(first, second);
 
@@ -296,7 +276,35 @@ mod tests {
                     },
                 },
             )
+            .handled
         });
         assert!(!changed);
+    }
+
+    #[test]
+    fn presented_receipt_commits_the_shared_runtime_candidate() {
+        tela_app_init();
+        assert!(tela_app_publish() & OUTCOME_OK != 0);
+        let token = PENDING.with(|slot| slot.get()).expect("pending token");
+        let low = token.get() as u32;
+        let high = (token.get() >> 32) as u32;
+        let bits = tela_app_presented(low, high);
+        assert_eq!(bits & OUTCOME_OK, OUTCOME_OK);
+        // 宏回执经适配器进入 ApplicationSession::presented：候选帧已提交为 active。
+        with_app(|app| {
+            assert!(app.active().is_some(), "presented 后必须有 active 帧");
+        });
+        // 宏自身的陈旧令牌防线：重复 presented 必须失败。
+        assert_eq!(tela_app_presented(low, high), 0);
+    }
+
+    #[test]
+    fn init_returns_a_publish_request_for_the_first_frame() {
+        let bits = tela_app_init();
+        assert_eq!(
+            bits,
+            OUTCOME_OK | OUTCOME_PUBLISH_REQUESTED,
+            "宿主要求 init 请求首个发布"
+        );
     }
 }

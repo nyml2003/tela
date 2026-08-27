@@ -33,6 +33,7 @@ pub fn run() -> Result<(), String> {
                 width: 980.0,
                 height: 680.0,
             },
+            ..ApplicationConfig::default()
         },
     );
     run_native_window(

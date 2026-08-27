@@ -8,6 +8,9 @@ export const ANDROID_RUST_TARGET = 'aarch64-linux-android';
 export const ANDROID_DEV_PORT = 8000;
 /** APK 每次启动都严格请求这个移动 Guest index。 */
 export const ANDROID_BUNDLE_INDEX_URL = `http://127.0.0.1:${ANDROID_DEV_PORT}/tela-mobile/latest.json`;
+
+/** CC Remote guest 的开发态索引（同一 serve 进程按路径区分通道）。 */
+export const ANDROID_CC_BUNDLE_INDEX_URL = `http://127.0.0.1:${ANDROID_DEV_PORT}/tela-cc/latest.json`;
 /** debug applicationId 包含 Gradle 的 applicationIdSuffix。 */
 export const ANDROID_DEBUG_PACKAGE = 'dev.tela.mobile.dev';
 export const ANDROID_DEBUG_ACTIVITY = 'dev.tela.mobile.TelaActivity';

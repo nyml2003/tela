@@ -12,6 +12,8 @@ mod event;
 mod frame;
 mod publication;
 
+use tela_contract::UiFrame;
+
 pub use error::FrameCodecError;
 pub use event::{decode_event, decode_status, encode_event, encode_status};
 pub use frame::{WireFrame, decode_frame, encode_frame};
@@ -37,6 +39,62 @@ pub fn decode_outcome(bits: u32) -> Option<AppDispatchOutcome> {
     })
 }
 
+/// 把 `apply` 回调的返回值胁迫为完整派发结果。
+///
+/// `bool` 保持旧语义（handled 与 publish_requested 同值）；返回
+/// [`AppDispatchOutcome`] 的应用可以表达"未处理但投影脏"的发布请求，避免宿主循环
+/// 停摆。
+pub trait IntoDispatchOutcome {
+    /// 转换为完整派发结果。
+    fn into_dispatch_outcome(self) -> AppDispatchOutcome;
+}
+
+impl IntoDispatchOutcome for bool {
+    fn into_dispatch_outcome(self) -> AppDispatchOutcome {
+        AppDispatchOutcome {
+            handled: self,
+            publish_requested: self,
+        }
+    }
+}
+
+impl IntoDispatchOutcome for AppDispatchOutcome {
+    fn into_dispatch_outcome(self) -> AppDispatchOutcome {
+        self
+    }
+}
+
+/// 把 `publish` 回调的返回值胁迫为完整发布。
+///
+/// 旧形状 `Result<(&UiFrame, AppStatus), String>` 保持 effects 为空的旧行为；返回
+/// [`AppPublication`] 的应用让事务性 effects 随发布过线（线格式本就携带）。
+pub trait IntoPublicationResult {
+    /// 转换为完整发布。
+    fn into_publication_result(self) -> Result<AppPublication, String>;
+}
+
+impl IntoPublicationResult for Result<AppPublication, String> {
+    fn into_publication_result(self) -> Result<AppPublication, String> {
+        self
+    }
+}
+
+impl IntoPublicationResult for Result<(&UiFrame, AppStatus), String> {
+    fn into_publication_result(self) -> Result<AppPublication, String> {
+        self.and_then(|(frame, status)| {
+            let token = status
+                .frame_token
+                .ok_or_else(|| "publication status must contain a frame token".to_owned())?;
+            Ok(AppPublication {
+                token,
+                frame: frame.clone(),
+                status,
+                effects: Vec::new(),
+            })
+        })
+    }
+}
+
 /// Exports the stable Tela guest ABI for one concrete application type.
 ///
 /// The macro intentionally only removes byte-buffer and export boilerplate. Callers retain their
@@ -49,12 +107,22 @@ pub fn decode_outcome(bits: u32) -> Option<AppDispatchOutcome> {
 ///     with_app = crate::with_app;
 ///     apply = apply_event;
 ///     publish = publish_app;
+///     presented = on_presented;
+///     rejected = on_rejected;
 /// }
 /// ```
 ///
-/// `apply` receives `(&mut App, AppEvent) -> bool`. `publish` receives `&mut App` and returns
-/// `Result<(&UiFrame, AppStatus), String>`. `with_app` is the application's synchronous access
-/// helper and `reset` clears its concrete application state.
+/// `apply` receives `(&mut App, AppEvent)` and returns either `bool`（旧语义）or
+/// [`AppDispatchOutcome`]（完整协议）。`publish` receives `&mut App` and returns either
+/// `Result<(&UiFrame, AppStatus), String>`（effects 为空）or
+/// `Result<AppPublication, String>`（effects 随发布走）。`with_app` is the application's
+/// synchronous access helper and `reset` clears its concrete application state.
+///
+/// 可选的 `presented` / `rejected` 尾臂把呈现回执转发回应用：
+/// `presented = fn(&mut App, AppFrameToken) -> Result<AppDispatchOutcome, String>`，
+/// `rejected = fn(&mut App, AppFrameToken)`。会话运行时（如
+/// `tela_app_runtime::Application`）依赖 presented 提交候选帧；缺省时行为与旧宏逐字节
+/// 一致。
 #[macro_export]
 macro_rules! export_guest {
     {
@@ -62,6 +130,8 @@ macro_rules! export_guest {
         with_app = $with_app:path;
         apply = $apply:path;
         publish = $publish:path;
+        $(presented = $presented:path;)?
+        $(rejected = $rejected:path;)?
     } => {
         ::std::thread_local! {
             static __TELA_INPUT_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
@@ -132,11 +202,17 @@ macro_rules! export_guest {
                 __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
                 return $crate::OUTCOME_OK;
             }
-            let changed = $with_app(|app| $apply(app, event));
+            let changed =
+                $with_app(|app| $crate::IntoDispatchOutcome::into_dispatch_outcome($apply(app, event)));
             __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
             $crate::OUTCOME_OK
-                | if changed {
-                    $crate::OUTCOME_HANDLED | $crate::OUTCOME_PUBLISH_REQUESTED
+                | if changed.handled {
+                    $crate::OUTCOME_HANDLED
+                } else {
+                    0
+                }
+                | if changed.publish_requested {
+                    $crate::OUTCOME_PUBLISH_REQUESTED
                 } else {
                     0
                 }
@@ -174,8 +250,27 @@ macro_rules! export_guest {
             }
             __TELA_PRESENTED_TOKEN.with(|slot| slot.set(token));
             __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
+            let mut outcome_bits = 0u32;
+            $(
+                let token = $crate::AppFrameToken::new(token)
+                    .expect("presented token is validated non-zero");
+                match $with_app(|app| $presented(app, token)) {
+                    ::std::result::Result::Ok(outcome) => {
+                        if outcome.handled {
+                            outcome_bits |= $crate::OUTCOME_HANDLED;
+                        }
+                        if outcome.publish_requested {
+                            outcome_bits |= $crate::OUTCOME_PUBLISH_REQUESTED;
+                        }
+                    }
+                    ::std::result::Result::Err(error) => {
+                        __tela_set_error(error);
+                        return 0;
+                    }
+                }
+            )?
             __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
-            $crate::OUTCOME_OK
+            $crate::OUTCOME_OK | outcome_bits
         }
 
         #[allow(unsafe_code)]
@@ -187,6 +282,11 @@ macro_rules! export_guest {
                 return 0;
             }
             __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
+            $(
+                let token = $crate::AppFrameToken::new(token)
+                    .expect("rejected token is validated non-zero");
+                $with_app(|app| $rejected(app, token));
+            )?
             __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
             $crate::OUTCOME_OK
         }
@@ -205,16 +305,9 @@ macro_rules! export_guest {
 
         fn __tela_publish() -> bool {
             let published = $with_app(|app| {
-                let (frame, status) = $publish(app)?;
-                let token = status
-                    .frame_token
-                    .ok_or_else(|| "publication status must contain a frame token".to_owned())?;
-                let publication = $crate::AppPublication {
-                    token,
-                    frame: frame.clone(),
-                    status,
-                    effects: ::std::vec::Vec::new(),
-                };
+                let publication =
+                    $crate::IntoPublicationResult::into_publication_result($publish(app))?;
+                let token = publication.token;
                 let bytes = $crate::encode_publication(&publication)
                     .map_err(|error| error.to_string())?;
                 Ok::<_, ::std::string::String>((token, bytes))
@@ -244,3 +337,90 @@ macro_rules! export_guest {
 /// Version 6 separates event dispatch from atomic publication and adds presentation
 /// acknowledgement. Hosts reject bundles whose declared version does not exactly match.
 pub const ABI_VERSION: u32 = 6;
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+
+    fn frame() -> UiFrame {
+        UiFrame {
+            viewport: tela_contract::Viewport {
+                width: 16.0,
+                height: 8.0,
+            },
+            commands: Vec::new(),
+            hit_regions: Vec::new(),
+            scroll_bounds: Vec::new(),
+        }
+    }
+
+    fn status(token: Option<AppFrameToken>) -> AppStatus {
+        AppStatus {
+            frame_token: token,
+            cursor: CursorKind::Default,
+            input_focused: false,
+            input_value: String::new(),
+            animation_active: false,
+            next_deadline_ms: None,
+        }
+    }
+
+    #[test]
+    fn bool_collapses_handled_and_publish_requested_together() {
+        let outcome = true.into_dispatch_outcome();
+        assert!(outcome.handled && outcome.publish_requested);
+        let outcome = false.into_dispatch_outcome();
+        assert!(!outcome.handled && !outcome.publish_requested);
+    }
+
+    #[test]
+    fn dispatch_outcome_passes_through_untouched() {
+        let outcome = AppDispatchOutcome {
+            handled: false,
+            publish_requested: true,
+        };
+        assert_eq!(
+            outcome.into_dispatch_outcome(),
+            AppDispatchOutcome {
+                handled: false,
+                publish_requested: true,
+            }
+        );
+    }
+
+    #[test]
+    fn borrowed_frame_publication_keeps_effects_empty() {
+        let frame = frame();
+        let publication = Ok::<_, String>((&frame, status(Some(AppFrameToken::new(1).unwrap()))))
+            .into_publication_result()
+            .expect("publication");
+        assert_eq!(publication.token.get(), 1);
+        assert!(
+            publication.effects.is_empty(),
+            "旧形状必须保持 effects 为空"
+        );
+    }
+
+    #[test]
+    fn borrowed_frame_publication_requires_a_token() {
+        let frame = frame();
+        let error = Ok::<_, String>((&frame, status(None)))
+            .into_publication_result()
+            .unwrap_err();
+        assert!(error.contains("frame token"));
+    }
+
+    #[test]
+    fn owned_publication_passes_through_with_effects() {
+        let publication = AppPublication {
+            token: AppFrameToken::new(2).unwrap(),
+            frame: frame(),
+            status: status(Some(AppFrameToken::new(2).unwrap())),
+            effects: vec![AppEffect::Window(tela_contract::WindowCommand::Close)],
+        };
+        let converted = Ok::<_, String>(publication.clone())
+            .into_publication_result()
+            .expect("publication");
+        assert_eq!(converted, publication);
+    }
+}

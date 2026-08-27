@@ -15,3 +15,8 @@ mod touch;
 #[cfg(target_os = "android")]
 #[allow(unsafe_code)]
 mod android;
+
+// 桥接线依赖 android-gated 的 HostEvent 与 ureq；纯逻辑测试随之只在 Android 目标编译
+// （对齐 win32 providers.rs 的 `#[cfg(all(test, target_os = "windows"))]` 先例）。
+#[cfg(target_os = "android")]
+mod bridge;

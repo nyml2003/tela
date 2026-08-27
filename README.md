@@ -49,6 +49,8 @@
 | [035-变速齿轮APP产品逻辑意图](docs/035-变速齿轮APP产品逻辑意图.md) | 变速齿轮的产品形态、主链路与验收边界是什么？ | 开发 speed-gear 应用族时 |
 | [036-事件系统与组件生命周期机制梳理](docs/036-事件系统与组件生命周期机制梳理.md) | 事件六层怎么分？已呈现帧闭环与组件生命周期的当前基准是什么？ | **当前开发基准**；写任何交互/组件代码前 |
 | [037-视觉保真与微交互动画实施目标](docs/037-视觉保真与微交互动画实施目标.md) | 视觉差距的根因是什么？wgpu 原语补齐、Tick 动画与五端验收如何分期？ | 启动视觉/动画 Goal 时 |
+| [038-CC远程会话产品意图](docs/038-CC远程会话产品意图.md) | 手机如何经中继操控桌面 Claude Code？三端拓扑、CLI 线格式实测与部署边界是什么？ | 开发 CC Remote 产品族（cc-protocol/relay/agent/app）时 |
+| [039-桥net能力与移动回投实施目标](docs/039-桥net能力与移动回投实施目标.md) | guest 联网为什么走具名 `net.http.request`？跨帧回投生命周期与 fuel 预算如何闭环？ | 给宿主加网络桥、写联网 guest 或排查回投不上屏时 |
 
 ### 专题文档（未编号目录）
 
@@ -87,6 +89,10 @@ nix develop .#ios --command ops ios deploy --device <UDID>
                          # 使用 Xcode 已配置 Team 安装并启动真机 App
 ops verify [bundle|gpu]  # 默认校验 desktop 应用包；bundle 可指定 desktop|mobile
 ops serve                # 开发静态服务器（http://127.0.0.1:8000/）
+ops build relay            # 构建 CC Remote 中继到 dist/cc-relay/（std 线程零 tokio，常驻 ~4MB）
+ops build agent           # 构建桌面 agent 到 dist/cc-agent/（子进程驱动 claude CLI）
+TELA_CC_RELAY_URL=http://<relay>:8787 TELA_CC_TOKEN=<token> ops build cc
+                          # 构建 CC Remote 手机端（cc bundle + APK，注入中继配置）
 ```
 
 `dist/` 是浏览器、动态包与既有平台工件的发布目录，已被 Git 忽略；浏览器静态文件、`tela-dev` WASM 包、

@@ -1,0 +1,29 @@
+[package]
+name = "tela-cc-remote"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "CC Remote phone application: remote control for desktop Claude Code sessions"
+
+[features]
+default = []
+app-runtime = []
+native-app = ["app-runtime"]
+
+[dependencies]
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-core = { path = "../../crates/kernel/core" }
+tela-ui-foundation = { path = "../../crates/ui/foundation" }
+tela-ui-dsl = { path = "../../crates/ui/dsl" }
+tela-mobile-ui-kit = { path = "../../crates/ui/mobile-kit" }
+tela-cc-protocol = { path = "../../services/cc-protocol" }
+serde_json = "1"
+
+[dev-dependencies]
+# 真实资源只用于应用回归测试；产品运行时经 UiResources 注入。
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-render-raster = { path = "../../crates/presentation/renderers/raster" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+
+[lints.rust]
+unsafe_code = "deny"

@@ -1,0 +1,22 @@
+[package]
+name = "tela-product-cc-guest"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "CC Remote dynamic guest product assembly with bridge exports"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tela-app-abi = { path = "../../crates/delivery/app-abi" }
+tela-bridge = { path = "../../crates/delivery/bridge", features = ["guest"] }
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-cc-protocol = { path = "../../services/cc-protocol" }
+tela-cc-remote = { path = "../../apps/cc-remote", features = ["app-runtime"] }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+
+[lints.rust]
+# 手写桥 ABI 导出逐条 `allow`；其余产品代码禁止 unsafe。
+unsafe_code = "deny"

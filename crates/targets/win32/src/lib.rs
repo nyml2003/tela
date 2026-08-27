@@ -6,6 +6,15 @@
 #[cfg(target_os = "windows")]
 use std::sync::OnceLock;
 
+/// 纯输入归一化层：不依赖 `windows` crate，可在任意宿主编译与单测。
+/// 非 Windows 宿主上只有单测消费它，允许 dead_code。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod input;
+
+/// 会话驱动器：发布/呈现/令牌/效应簿记（跨平台，mock 会话可测）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod driver;
+
 #[cfg(target_os = "windows")]
 pub(crate) fn trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -18,15 +27,23 @@ pub(crate) fn trace_enabled() -> bool {
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) mod chrome;
+#[cfg(target_os = "windows")]
 mod gpu;
 #[cfg(target_os = "windows")]
-mod native;
-#[cfg(target_os = "windows")]
 mod providers;
+#[cfg(target_os = "windows")]
+pub(crate) mod shell;
+#[cfg(target_os = "windows")]
+pub(crate) mod startup;
 
+#[cfg(target_os = "windows")]
+pub use chrome::WindowChrome;
 #[cfg(target_os = "windows")]
 pub use gpu::{GpuSession, RenderOutcome, create_surface};
 #[cfg(target_os = "windows")]
-pub use native::{NativeWindowOptions, run_native_window};
-#[cfg(target_os = "windows")]
 pub use providers::{WindowMetrics, build_dispatcher};
+#[cfg(target_os = "windows")]
+pub use shell::{
+    NativeWindowOptions, SessionSource, ShellOptions, run_native_window, run_sdk_window, run_window,
+};

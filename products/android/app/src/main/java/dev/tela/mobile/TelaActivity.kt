@@ -48,6 +48,11 @@ class TelaActivity : GameActivity() {
         // GameActivity starts Rust while its superclass initializes. Configure before that point
         // so android_main sees the exact URL Gradle injected into this build.
         nativeConfigureBundleIndex(BuildConfig.TELA_BUNDLE_INDEX)
+        // CC Remote relay credentials follow the same rule: the Rust host must be able to open
+        // the net bridge during android_main, before any later lifecycle callback runs.
+        if (BuildConfig.TELA_RELAY_URL.isNotEmpty()) {
+            nativeConfigureRelay(BuildConfig.TELA_RELAY_URL, BuildConfig.TELA_RELAY_TOKEN)
+        }
         super.onCreate(savedInstanceState)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         installTextInput()
@@ -175,6 +180,7 @@ class TelaActivity : GameActivity() {
     }
 
     private external fun nativeConfigureBundleIndex(value: String)
+    private external fun nativeConfigureRelay(url: String, token: String)
     private external fun nativeInputFocused(): Boolean
     private external fun nativeInputValue(): String
     private external fun nativeSetInputValue(value: String): Boolean

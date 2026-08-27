@@ -6,6 +6,9 @@ fun String.asBuildConfigString(): String =
     "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
 val telaBundleIndex = providers.gradleProperty("telaBundleIndex").orElse("").get()
+val telaAppId = providers.gradleProperty("telaAppId").orElse("dev.tela.mobile").get()
+val telaRelayUrl = providers.gradleProperty("telaRelayUrl").orElse("").get()
+val telaRelayToken = providers.gradleProperty("telaRelayToken").orElse("").get()
 
 android {
     namespace = "dev.tela.mobile"
@@ -13,7 +16,7 @@ android {
     ndkVersion = "27.1.12297006"
 
     defaultConfig {
-        applicationId = "dev.tela.mobile"
+        applicationId = telaAppId
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -22,6 +25,9 @@ android {
             abiFilters += "arm64-v8a"
         }
         buildConfigField("String", "TELA_BUNDLE_INDEX", telaBundleIndex.asBuildConfigString())
+        // CC Remote 中继配置（可选）：注入后 Rust 宿主在 android_main 前建立 net 桥。
+        buildConfigField("String", "TELA_RELAY_URL", telaRelayUrl.asBuildConfigString())
+        buildConfigField("String", "TELA_RELAY_TOKEN", telaRelayToken.asBuildConfigString())
     }
 
     buildTypes {

@@ -7,7 +7,7 @@ description = "Portable Tela guest execution and strict development-bundle valid
 
 [dependencies]
 tela-app-abi = { path = "../app-abi" }
-tela-bridge = { path = "../bridge" }
+tela-bridge = { path = "../bridge", features = ["guest", "host"] }
 tela-bundle = { path = "../bundle" }
 tela-contract = { path = "../../kernel/contract" }
 serde_json = "1"

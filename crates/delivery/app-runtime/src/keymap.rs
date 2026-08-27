@@ -14,22 +14,28 @@ use tela_contract::{
 /// 键位表 JSON 协议版本。升级协议时拒绝旧/新版本，避免静默改变快捷键含义。
 pub const KEYMAP_PROTOCOL_VERSION: u32 = 1;
 
-/// 浏览器/CPU ABI 使用的修饰键位掩码。
+/// 浏览器/CPU ABI 使用的修饰键位掩码：Shift。
 pub const MODIFIER_SHIFT: u8 = 1 << 0;
+/// 浏览器/CPU ABI 使用的修饰键位掩码：Ctrl。
 pub const MODIFIER_CTRL: u8 = 1 << 1;
+/// 浏览器/CPU ABI 使用的修饰键位掩码：Alt。
 pub const MODIFIER_ALT: u8 = 1 << 2;
+/// 浏览器/CPU ABI 使用的修饰键位掩码：Meta/Super。
 pub const MODIFIER_META: u8 = 1 << 3;
 
 /// 一条单组合键绑定。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyBinding {
+    /// 触发组合键。
     pub combo: KeyCombo,
+    /// 命中后派发的语义意图。
     pub intent: KeyboardIntent,
 }
 
 /// 一层局部或默认键位表。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeymapLayer {
+    /// 本层绑定列表（组合键唯一性由 [`KeymapSnapshot::validate`] 校验）。
     pub bindings: Vec<KeyBinding>,
 }
 
@@ -38,39 +44,49 @@ pub struct KeymapLayer {
 /// 作用域路径必须由内向外传入 `resolve`；第一个命中的局部层覆盖外层和默认层。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeymapSnapshot {
+    /// 单调递增版本；替换时禁止回退。
     pub revision: u64,
+    /// 无作用域命中时使用的默认层。
     pub default_layer: KeymapLayer,
+    /// 焦点作用域 -> 局部层（由内向外匹配）。
     pub scoped_layers: BTreeMap<KeymapScopeId, KeymapLayer>,
 }
 
 /// 快照校验或 JSON 传输失败。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeymapError {
+    /// JSON 协议版本不受支持。
     UnsupportedProtocol {
+        /// 收到的版本号。
         received: u32,
     },
+    /// 快照版本比当前生效版本更旧。
     RevisionRegression {
+        /// 当前生效版本。
         current: u64,
+        /// 收到的版本。
         received: u64,
     },
+    /// 同层内出现重复组合键。
     DuplicateBinding {
+        /// 重复所在的层（`None` = 默认层）。
         scope: Option<KeymapScopeId>,
+        /// 重复的组合键。
         combo: KeyCombo,
     },
+    /// 绑定引用了不受支持的快捷键。
     UnsupportedShortcut(ShortcutId),
+    /// JSON 结构或字段非法。
     InvalidWireFormat(String),
 }
 
 impl KeymapSnapshot {
-    /// 文件管理器的默认无障碍导航与一组示例业务组合键。
-    pub fn file_manager_default() -> Self {
+    /// 基础无障碍导航键位：Tab 循环、方向键移动、Enter/Space 激活、Escape 取消、
+    /// Home/End 跳到边界。等价于旧运行时内硬编码的物理键表；不含任何业务快捷键。
+    pub fn navigation_default() -> Self {
         let plain = Modifiers::default();
         let shift = Modifiers {
             shift: true,
-            ..Modifiers::default()
-        };
-        let ctrl = Modifiers {
-            ctrl: true,
             ..Modifiers::default()
         };
         Self {
@@ -100,16 +116,27 @@ impl KeymapSnapshot {
                         KeyboardIntent::MoveFocus(FocusDirection::Right),
                     ),
                     binding(PhysicalKey::Enter, plain, KeyboardIntent::Activate),
+                    binding(PhysicalKey::Space, plain, KeyboardIntent::Activate),
                     binding(PhysicalKey::Escape, plain, KeyboardIntent::Cancel),
-                    binding(
-                        PhysicalKey::KeyZ,
-                        ctrl,
-                        KeyboardIntent::Invoke(ShortcutId::Undo),
-                    ),
+                    binding(PhysicalKey::Home, plain, KeyboardIntent::MoveToStart),
+                    binding(PhysicalKey::End, plain, KeyboardIntent::MoveToEnd),
                 ],
             },
             scoped_layers: BTreeMap::new(),
         }
+    }
+
+    /// 在默认层追加一条业务组合键（构建器风格）；应用用它补齐自己的快捷键。
+    pub fn with_default_binding(
+        mut self,
+        key: PhysicalKey,
+        modifiers: Modifiers,
+        intent: KeyboardIntent,
+    ) -> Self {
+        self.default_layer
+            .bindings
+            .push(binding(key, modifiers, intent));
+        self
     }
 
     /// 解析一个按下事件。释放事件和未知组合键不消费。
@@ -176,7 +203,7 @@ impl KeymapSnapshot {
                 let bindings = bindings
                     .into_iter()
                     .map(WireBinding::into_binding)
-                    .collect::<Result<_, _>>()?;
+                    .collect::<Result<_, KeymapError>>()?;
                 Ok((KeymapScopeId(id), KeymapLayer { bindings }))
             })
             .collect::<Result<_, KeymapError>>()?;
@@ -411,9 +438,43 @@ mod tests {
     }
 
     #[test]
+    fn navigation_default_keeps_the_legacy_navigation_table() {
+        let keymap = KeymapSnapshot::navigation_default();
+        assert_eq!(
+            keymap
+                .resolve(raw(PhysicalKey::Tab, Modifiers::default()), &[])
+                .expect("Tab 应命中")
+                .intent,
+            KeyboardIntent::FocusNext
+        );
+        assert!(
+            keymap
+                .resolve(
+                    raw(
+                        PhysicalKey::KeyZ,
+                        Modifiers {
+                            ctrl: true,
+                            ..Modifiers::default()
+                        }
+                    ),
+                    &[]
+                )
+                .is_none(),
+            "基础导航表不应包含业务快捷键"
+        );
+    }
+
+    #[test]
     fn local_scope_overrides_default_layer() {
         let scope = KeymapScopeId("modal".to_owned());
-        let mut keymap = KeymapSnapshot::file_manager_default();
+        let mut keymap = KeymapSnapshot::navigation_default().with_default_binding(
+            PhysicalKey::KeyZ,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            KeyboardIntent::Invoke(ShortcutId::Undo),
+        );
         keymap.scoped_layers.insert(
             scope.clone(),
             KeymapLayer {
@@ -450,7 +511,7 @@ mod tests {
         ));
         let older = KeymapSnapshot {
             revision: 0,
-            ..KeymapSnapshot::file_manager_default()
+            ..KeymapSnapshot::navigation_default()
         };
         assert!(matches!(
             older.validate(Some(1)),

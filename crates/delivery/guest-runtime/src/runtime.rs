@@ -18,6 +18,10 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store, TypedFunc};
 const INITIALIZE_FUEL: u64 = 50_000_000;
 const DISPATCH_FUEL: u64 = 50_000_000;
 const PUBLICATION_FUEL: u64 = 50_000_000;
+// Bridge ABI calls run outside the dispatch/publish lifecycle: asynchronous capability
+// completions may arrive between frames, so they cannot borrow leftover fuel from the previous
+// dispatch. Cross-frame bridge users (e.g. named `net` capabilities) need their own budget.
+const BRIDGE_ABI_FUEL: u64 = 50_000_000;
 const MAX_PACKET_BYTES: usize = 64 * 1024 * 1024;
 
 /// Compilation and dispatch timings exposed to the platform shell for development diagnostics.
@@ -37,6 +41,10 @@ pub struct GuestRuntimeMetrics {
     pub last_publish: Duration,
     /// Fuel consumed by the most recent explicit publication.
     pub last_publish_fuel_consumed: u64,
+    /// Fuel consumed by the most recent bridge request drain.
+    pub last_bridge_drain_fuel_consumed: u64,
+    /// Fuel consumed by the most recent bridge event delivery.
+    pub last_bridge_deliver_fuel_consumed: u64,
 }
 
 /// A guest ABI or Wasmtime runtime failure.
@@ -167,6 +175,8 @@ impl GuestRuntime {
                 last_dispatch_fuel_consumed: 0,
                 last_publish: Duration::ZERO,
                 last_publish_fuel_consumed: 0,
+                last_bridge_drain_fuel_consumed: 0,
+                last_bridge_deliver_fuel_consumed: 0,
             },
         };
         set_fuel(&mut runtime.store, INITIALIZE_FUEL)?;
@@ -201,6 +211,12 @@ impl GuestRuntime {
         decode_publication(&self.publication_packet)
             .map(|publication| publication.frame)
             .map_err(codec_error)
+    }
+
+    /// 解码当前缓存的完整发布（不重入 WASM）。initialize 后的首次发布由此取用，
+    /// 避免宿主壳为拿到首帧再执行一次 `tela_app_publish`。
+    pub fn pending_publication(&self) -> Result<AppPublication, GuestRuntimeError> {
+        decode_publication(&self.publication_packet).map_err(codec_error)
     }
 
     /// Current non-drawing state requested by the guest.
@@ -340,8 +356,11 @@ impl GuestRuntime {
         let Some(request_len) = self.bridge_request_len.clone() else {
             return Ok(Vec::new());
         };
+        set_fuel(&mut self.store, BRIDGE_ABI_FUEL)?;
         let len = request_len.call(&mut self.store, ()).map_err(|error| {
-            GuestRuntimeError::message(format!("read guest bridge request length: {error}"))
+            GuestRuntimeError::message(format!(
+                "read guest bridge request length (fuel budget={BRIDGE_ABI_FUEL}): {error}"
+            ))
         })? as usize;
         if len == 0 || len > MAX_PACKET_BYTES {
             return Ok(Vec::new());
@@ -355,9 +374,11 @@ impl GuestRuntime {
             .map_err(|error| {
                 GuestRuntimeError::message(format!("copy guest bridge requests: {error}"))
             })?;
-        decode_request_stream(&bytes).map_err(|error| {
+        let requests = decode_request_stream(&bytes).map_err(|error| {
             GuestRuntimeError::message(format!("invalid guest bridge request packet: {error}"))
-        })
+        })?;
+        self.metrics.last_bridge_drain_fuel_consumed = consumed_fuel(&self.store, BRIDGE_ABI_FUEL)?;
+        Ok(requests)
     }
 
     /// Delivers one encoded bridge event packet to the guest (response or future message).
@@ -377,10 +398,13 @@ impl GuestRuntime {
                 "bridge event packet exceeds host limit",
             ));
         }
+        set_fuel(&mut self.store, BRIDGE_ABI_FUEL)?;
         let pointer = dispatch_begin
             .call(&mut self.store, bytes.len() as u32)
             .map_err(|error| {
-                GuestRuntimeError::message(format!("reserve guest bridge input: {error}"))
+                GuestRuntimeError::message(format!(
+                    "reserve guest bridge input (fuel budget={BRIDGE_ABI_FUEL}): {error}"
+                ))
             })? as usize;
         self.memory
             .write(&mut self.store, pointer, bytes)
@@ -390,8 +414,14 @@ impl GuestRuntime {
         dispatch
             .call(&mut self.store, bytes.len() as u32)
             .map_err(|error| {
-                GuestRuntimeError::message(format!("dispatch bridge event to guest: {error}"))
-            })
+                let remaining = remaining_fuel(&self.store).unwrap_or_default();
+                GuestRuntimeError::message(format!(
+                    "dispatch bridge event to guest (fuel budget={BRIDGE_ABI_FUEL}, remaining={remaining}): {error}"
+                ))
+            })?;
+        self.metrics.last_bridge_deliver_fuel_consumed =
+            consumed_fuel(&self.store, BRIDGE_ABI_FUEL)?;
+        Ok(())
     }
 
     fn error_message(&mut self) -> Result<String, GuestRuntimeError> {

@@ -11,6 +11,8 @@
 pub mod remote_bundle;
 /// Bounded Wasmtime guest execution for the Tela application ABI.
 pub mod runtime;
+/// 把 [`GuestRuntime`] 适配成平台无关的 [`ApplicationSession`]。
+pub mod session;
 /// Headless bundle/guest verification used by the build pipeline.
 pub mod verify;
 
@@ -19,4 +21,5 @@ pub use remote_bundle::{
     validate_bundle_archive,
 };
 pub use runtime::{GuestRuntime, GuestRuntimeError, GuestRuntimeMetrics};
+pub use session::GuestSession;
 pub use verify::{BundleVerification, verify_bundle};

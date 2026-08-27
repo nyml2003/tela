@@ -694,4 +694,108 @@ mod tests {
             .iter()
             .any(|child| tree_contains_text_font(child, font, text_fragment))
     }
+
+    #[test]
+    fn wheel_scroll_over_the_icon_grid_applies_and_clamps() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        // 切到图标页：Material 图标网格远超滚动视口。
+        let nav = point_for_key(&app, "editor.nav.icons");
+        assert!(app.handle_pointer(PointerEvent::mouse_down(nav)) > 0);
+        assert!(app.handle_pointer(PointerEvent::mouse_up(nav)) > 0);
+        ensure_and_present(&mut app);
+
+        let (center, max_offset) = {
+            let (_tree, frame) = app.active().expect("icons frame");
+            let bounds = frame
+                .scroll_bounds
+                .iter()
+                .find(|bounds| bounds.key.0 == "editor.icons.scroll")
+                .expect("icons scroll bounds");
+            (
+                Point {
+                    x: bounds.viewport.x + bounds.viewport.w / 2.0,
+                    y: bounds.viewport.y + bounds.viewport.h / 2.0,
+                },
+                bounds.max_offset_y,
+            )
+        };
+        assert!(max_offset > 0.0, "图标网格必须产生可滚动余量");
+
+        let scroll_key = tela_contract::SemanticKey("editor.icons.scroll".to_owned());
+        assert!(
+            app.handle_pointer(PointerEvent::new(
+                tela_contract::PointerId(0),
+                tela_contract::PointerKind::Mouse,
+                tela_contract::PointerPhase::Scroll,
+                center,
+                tela_contract::PointerButtons::NONE,
+                1,
+                Point { x: 0.0, y: 120.0 },
+            )) > 0
+        );
+        ensure_and_present(&mut app);
+        assert_eq!(app.view_state().scroll(&scroll_key).offset_y, 120.0);
+
+        // 过量滚动被钳制在边界内。
+        assert!(
+            app.handle_pointer(PointerEvent::new(
+                tela_contract::PointerId(0),
+                tela_contract::PointerKind::Mouse,
+                tela_contract::PointerPhase::Scroll,
+                center,
+                tela_contract::PointerButtons::NONE,
+                2,
+                Point {
+                    x: 0.0,
+                    y: max_offset * 10.0
+                },
+            )) > 0
+        );
+        ensure_and_present(&mut app);
+        assert_eq!(app.view_state().scroll(&scroll_key).offset_y, max_offset);
+    }
+
+    #[test]
+    fn input_blur_commits_the_pending_draft_idempotently() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        let point = point_for_key(&app, "editor.page.field");
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        assert!(app.input_focused());
+
+        assert_eq!(app.set_input_value("未提交草稿".to_owned()), 1);
+        assert_eq!(app.controller().document.get(), "未提交草稿");
+        // blur 把局部草稿以 Commit 补交回旧目标；editor 的 EditorInput 映射把 Edit 与
+        // Commit 折叠为同一动作，值未变 → 幂等返回 0，但草稿必须保持。
+        assert_eq!(app.input_blur(), 0);
+        assert_eq!(app.controller().document.get(), "未提交草稿");
+        assert!(!app.input_is_composing());
+        // 再次 blur：通道已交还，目标仍指向输入框，同样幂等。
+        assert_eq!(app.input_blur(), 0);
+        assert_eq!(app.controller().document.get(), "未提交草稿");
+    }
+
+    #[test]
+    fn ime_composition_blocks_raw_keys_until_it_ends() {
+        let mut app = app();
+        ensure_and_present(&mut app);
+        let point = point_for_key(&app, "editor.page.field");
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        assert!(app.input_focused());
+
+        // 组合开始：空值重派发对 editor 的纯值映射幂等（返回 0），但组合态已生效。
+        assert_eq!(app.composition_start(), 0);
+        assert!(app.input_is_composing());
+        let tab: u16 = 0x2b;
+        assert_eq!(app.handle_key(tab, 0, false), 0);
+        // 组合编辑照常进入草稿。
+        assert_eq!(app.set_input_value("拼音组合".to_owned()), 1);
+        assert_eq!(app.controller().document.get(), "拼音组合");
+        // 组合结束：同值 Edit 幂等，但组合态必须解除并恢复原始键派发。
+        assert_eq!(app.composition_end(), 0);
+        assert!(!app.input_is_composing());
+        assert_eq!(app.controller().document.get(), "拼音组合");
+        assert_eq!(app.handle_key(tab, 0, false), 1);
+    }
 }

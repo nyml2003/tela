@@ -1,0 +1,1 @@
+{"seq":4,"ts_ms":1758595214000,"kind":"tool_use","session_id":"0f9d1549-2620-463c-b206-b734d4ac0a11","turn_id":"turn-0007","tool_use_id":"call_c9aef0e7854a492dbdac8357","tool_name":"Bash","input_json":"{\"command\":\"ls -la /home/nyml/projects/tela\"}"}

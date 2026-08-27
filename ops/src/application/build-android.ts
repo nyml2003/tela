@@ -1,7 +1,9 @@
 // 应用层：构建 Android GameActivity 开发 APK；mobile guest 保持在单独的远程 bundle 中。
 
 import type { FsPort, ProcessPort, ProcessResult, Reporter } from '../domain/ports.ts';
-import { ANDROID_BUNDLE_INDEX_URL, ANDROID_NDK_ABI, ANDROID_RUST_TARGET } from '../domain/android.ts';
+import {
+  ANDROID_BUNDLE_INDEX_URL, ANDROID_CC_BUNDLE_INDEX_URL, ANDROID_NDK_ABI, ANDROID_RUST_TARGET,
+} from '../domain/android.ts';
 import { ANDROID_TARGET_CRATE } from '../domain/workspace.ts';
 import type { WorkspacePaths } from '../domain/workspace.ts';
 import { runBuildBundle } from './build-bundle.ts';
@@ -19,6 +21,14 @@ export interface BuildAndroidResult {
   ok: boolean;
 }
 
+export interface AndroidChannel {
+  /** `mobile`：文件浏览器演示；`cc`：CC Remote 手机端（独立 applicationId 与 bundle 通道）。 */
+  channel: 'mobile' | 'cc';
+  /** CC Remote 的中继注入（来自调用方环境变量；空串表示不注入）。 */
+  relayUrl?: string;
+  relayToken?: string;
+}
+
 /**
  * Builds the independent mobile guest first, then packages a Vulkan-only ARM64 GameActivity APK.
  *
@@ -27,11 +37,18 @@ export interface BuildAndroidResult {
  */
 export async function runBuildAndroid(
   deps: BuildAndroidDeps,
+  options: AndroidChannel = { channel: 'mobile' },
 ): Promise<BuildAndroidResult> {
   const { cargo, process, fs, reporter, workspace } = deps;
-  const bundleIndex = ANDROID_BUNDLE_INDEX_URL;
+  const cc = options.channel === 'cc';
+  const bundleIndex = cc ? ANDROID_CC_BUNDLE_INDEX_URL : ANDROID_BUNDLE_INDEX_URL;
+  const relayUrl = options.relayUrl ?? '';
+  const relayToken = options.relayToken ?? '';
 
-  const bundle = await runBuildBundle({ cargo, process, fs, reporter, workspace }, 'mobile');
+  const bundle = await runBuildBundle(
+    { cargo, process, fs, reporter, workspace },
+    cc ? 'cc' : 'mobile',
+  );
   if (!bundle.ok) return bundle;
 
   reporter.section(`构建 Android GameActivity APK（${ANDROID_NDK_ABI} / Vulkan）`);
@@ -69,28 +86,38 @@ export async function runBuildAndroid(
     return { ok: false };
   }
 
+  const gradleArgs = ['--no-daemon', ':app:assembleDebug', `-PtelaBundleIndex=${bundleIndex}`];
+  if (cc) {
+    // CC Remote 与 mobile-demo 共用一个 Gradle 工程：用独立 applicationId 并注入中继配置。
+    gradleArgs.push('-PtelaAppId=dev.tela.ccremote');
+    if (relayUrl) {
+      gradleArgs.push(`-PtelaRelayUrl=${relayUrl}`, `-PtelaRelayToken=${relayToken}`);
+    }
+  }
   const gradle = await runExternal(
     process,
     'tela-android-gradle',
-    ['--no-daemon', ':app:assembleDebug', `-PtelaBundleIndex=${bundleIndex}`],
+    gradleArgs,
     workspace.androidProjectDir(),
     reporter,
     'Android Gradle APK 构建失败（需要 JDK 17、Android SDK API 36 与 Gradle）',
   );
   if (!gradle || gradle.code !== 0) return { ok: false };
 
+  const distPath = cc ? workspace.ccAndroidDistPath() : workspace.androidDistPath();
   try {
     await fs.ensureDir(workspace.androidDistDir());
-    await fs.copyFile(workspace.androidDebugApkPath(), workspace.androidDistPath());
+    await fs.copyFile(workspace.androidDebugApkPath(), distPath);
   } catch (error) {
     reporter.fail('Android APK 构建完成，但发布到 dist/ 失败');
     reporter.info(String(error));
     return { ok: false };
   }
 
-  const bytes = await fs.statSize(workspace.androidDistPath());
-  reporter.ok(`发布 Android APK → ${workspace.androidDistPath()}`);
+  const bytes = await fs.statSize(distPath);
+  reporter.ok(`发布 Android APK → ${distPath}`);
   reporter.info(`尺寸 ${((bytes ?? 0) / 1024 / 1024).toFixed(1)}MB；启动时严格请求 ${bundleIndex}`);
+  if (cc && relayUrl) reporter.info('已注入 CC Remote 中继配置（TELA_CC_RELAY_URL/TOKEN 经 BuildConfig）。');
   return { ok: true };
 }
 

@@ -4,29 +4,42 @@
 //! 帧协调器、视图状态仓库、输入派发与窗口命令队列等通用生命周期，应用只需实现
 //! [`AppController`] 提供域渲染与动作处理。本模块不触碰任何 Windows API，可在非
 //! Windows 宿主上编译，供多端静态壳复用。
+//!
+//! 帧构建采用有界收敛循环：模态栈同步、焦点/悬停投影反馈与滚动钳制都可能要求用新
+//! 状态重建候选（虚拟列表依据滚动偏移窗口化子项）。所有应用共享同一套滚动、键位、
+//! IME 与模态语义；应用差异只经 [`AppController`] 的钩子表达。
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::{collections::BTreeSet, time::Instant};
+pub mod keymap;
+
+use std::collections::{BTreeSet, HashMap};
 
 use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPublication,
     AppStatus, ApplicationSession, CursorKind, SessionError,
 };
 use tela_contract::{
-    FocusAppearance, FocusDirection, InputEvent, KernelInteraction, KeyboardIntent,
-    KeyboardIntentEvent, Modifiers, PhysicalKey, Point, PointerEvent, SemanticKey, TextInputEvent,
-    TextInputSpec, TextSelection, UiFrame, UiLayoutError, UiResources, Viewport,
+    FocusAppearance, InputEvent, KernelInteraction, NodeId, NodeKind, Point, PointerEvent,
+    ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame, UiLayoutError, UiNode,
+    UiResources, Viewport,
 };
-use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
+use tela_core::{
+    DefaultApplicationProfile, FocusSlot, UiTree, ViewStateStore, restore_focus, save_focus,
+};
 use tela_ui_dsl::{
     AnimationClock, AnimationSchedule, FrameCoordinator, FrameToken, FramedInteraction,
-    ResolvedFrame, ViewBuild, ViewOutput, ViewResult,
+    PreparedFrame, ResolvedFrame, ViewBuild, ViewOutput, ViewResult, ViewSite,
 };
 
+use crate::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
+
 /// 单帧渲染上下文：壳状态中应用渲染需要的只读投影。
-#[derive(Clone, Debug)]
+///
+/// [`PartialEq`] 用于收敛循环判定：reconcile 之后投影仍与渲染输入一致时，候选才算
+/// 稳定。
+#[derive(Clone, Debug, PartialEq)]
 pub struct FrameContext {
     /// 当前逻辑内容区尺寸（CSS 点）。
     pub viewport: Viewport,
@@ -36,6 +49,10 @@ pub struct FrameContext {
     pub hover_key: Option<SemanticKey>,
     /// 当前鼠标按压命中的节点 key。
     pub pressed_key: Option<SemanticKey>,
+    /// 当前键盘焦点 key（输入框聚焦投影需要）。
+    pub focus_key: Option<SemanticKey>,
+    /// 已发现滚动容器（提交序）的当前 offset_y（虚拟列表窗口化需要）。
+    pub scroll_offsets: Vec<(SemanticKey, f32)>,
 }
 
 /// 应用会话配置（壳无关，由产品装配时注入）。
@@ -45,6 +62,8 @@ pub struct ApplicationConfig {
     pub initial_viewport: Viewport,
     /// 焦点高亮外观（`None` = 不绘制焦点环）。
     pub focus_appearance: Option<FocusAppearance>,
+    /// 初始键位表快照；运行时接受 `AppEvent::ReplaceKeymapJson` 原子替换。
+    pub keymap: KeymapSnapshot,
 }
 
 /// 应用动作的一次性结果；effect 与由该动作产生的候选帧一起提交。
@@ -54,6 +73,9 @@ pub struct ControllerOutcome {
     pub changed: bool,
     /// 仅在对应 publication 成功呈现后执行的 Host effect。
     pub effects: Vec<AppEffect>,
+    /// 随本动作归零的滚动容器 key（详情内容被整体替换时；key 由控制器从
+    /// [`FrameContext::scroll_offsets`] 学到）。
+    pub scroll_resets: Vec<SemanticKey>,
 }
 
 impl ControllerOutcome {
@@ -62,6 +84,7 @@ impl ControllerOutcome {
         Self {
             changed,
             effects: Vec::new(),
+            scroll_resets: Vec::new(),
         }
     }
 
@@ -70,6 +93,16 @@ impl ControllerOutcome {
         Self {
             changed: true,
             effects: vec![effect],
+            scroll_resets: Vec::new(),
+        }
+    }
+
+    /// 声明投影变化并归零一个滚动容器（内容被替换，旧偏移不再有意义）。
+    pub fn with_scroll_reset(key: SemanticKey) -> Self {
+        Self {
+            changed: true,
+            effects: Vec::new(),
+            scroll_resets: vec![key],
         }
     }
 }
@@ -82,6 +115,7 @@ impl Default for ApplicationConfig {
                 height: 640.0,
             },
             focus_appearance: None,
+            keymap: KeymapSnapshot::navigation_default(),
         }
     }
 }
@@ -111,7 +145,37 @@ pub trait AppController<A: Clone + 'static> {
 
     /// Host 即将销毁窗口时调用；应用可在此完成外部资源的安全停止。
     fn on_close(&mut self) {}
+
+    /// 当前应位于模态栈顶的业务模态 key。
+    ///
+    /// 运时负责 `save_focus`/`push_modal`/`pop_modal` 与弹窗关闭后的延迟
+    /// `restore_focus`；应用只声明"现在有没有模态"。
+    fn modal_key(&self) -> Option<SemanticKey> {
+        None
+    }
+
+    /// 本帧需要锚定到语义 key 的动态点击动作。
+    ///
+    /// 键可能不存在于当前树（`entry-{id}` 等动态 key）；运行时先渲染试探遍收集
+    /// 存活 key，再渲染定稿遍只为存活键挂载锚点。返回空时跳过第二遍。
+    fn anchor_actions(&mut self) -> Vec<(SemanticKey, A)> {
+        Vec::new()
+    }
+
+    /// 无法路由到 DSL 动作或组件的 core 交互事实（`CloseModal`、
+    /// `ShortcutActivated`、`OpenModal`、`OutsidePress` 等）。
+    ///
+    /// 默认忽略。返回的 outcome 与 `handle_action` 的 outcome 同语义。
+    fn on_kernel_interaction(&mut self, _interaction: &KernelInteraction) -> ControllerOutcome {
+        ControllerOutcome::changed(false)
+    }
 }
+
+/// 收敛循环上限。超过后与布局错误同路径：保留旧 active 帧。
+const MAX_FRAME_FIXPOINT_ITERATIONS: usize = 8;
+
+/// 定稿渲染遍的锚点输入：候选动作表 + 试探遍发现的存活 key 集合。
+type AnchorPass<'a, A> = (&'a [(SemanticKey, A)], &'a BTreeSet<SemanticKey>);
 
 fn session_trace_enabled() -> bool {
     std::env::var_os("TELA_APP_TRACE").is_some()
@@ -120,7 +184,7 @@ fn session_trace_enabled() -> bool {
 macro_rules! session_trace {
     ($($arg:tt)*) => {
         if session_trace_enabled() {
-            eprintln!("tela-win32-trace: {}", format!($($arg)*));
+            eprintln!("tela-app-runtime-trace: {}", format!($($arg)*));
         }
     };
 }
@@ -129,8 +193,8 @@ macro_rules! session_trace {
 ///
 /// 通用逻辑全部在此，应用只提供 [`AppController`]。Target 经 [`ApplicationSession`]
 /// 驱动本会话，不直接接触应用类型。跨应用可用：
-/// 所有应用专属常量（初始视口、焦点外观等）都经 [`ApplicationConfig`] 注入，本类型
-/// 不含任何具体应用的语义。
+/// 所有应用专属常量（初始视口、焦点外观、键位表等）都经 [`ApplicationConfig`] 注入，
+/// 本类型不含任何具体应用的语义。
 pub struct Application<A: Clone + 'static, C: AppController<A>> {
     resources: &'static dyn UiResources,
     controller: C,
@@ -142,9 +206,21 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     frames: FrameCoordinator<A>,
     pending_frame: Option<PendingFrame<A>>,
     text_input: Option<TextInputChannel>,
+    /// IME 组合态。组合期间原始按键全部让路，Edit 事件携带 composing 标志。
+    text_composing: bool,
     projection_invalidated: bool,
+    /// 弹窗关闭后的显式焦点恢复延迟到新树建好后执行，避免把旧帧 node id 带回页面。
+    restore_focus_pending: bool,
+    /// 控制器上一帧是否声明过模态；检测开->闭迁移（无论栈由谁弹出都欠一次恢复）。
+    modal_open: bool,
+    /// 上次提交帧发现的滚动容器 key（发现序）。渲染投影与控制器学习都从这里取。
+    scroll_keys: Vec<SemanticKey>,
+    /// 上次提交帧发现的可点击 key 集合。光标策略只在悬停命中可点击节点时给手型。
+    clickable_keys: BTreeSet<SemanticKey>,
+    keymap: KeymapSnapshot,
     last_layout_measures: usize,
-    last_rebuild_log_at: Instant,
+    /// 上次 rebuild 日志的动画时钟毫秒（Instant 在 wasm32 上不可用，节流用宿主时钟）。
+    last_rebuild_log_at: u64,
     animation_clock: AnimationClock,
     next_publication_token: u64,
     pending_publication_token: Option<AppFrameToken>,
@@ -157,6 +233,8 @@ struct PendingFrame<A> {
     resolved: ResolvedFrame<A>,
     view_state: ViewStateStore,
     dirty: BTreeSet<SemanticKey>,
+    controls: Controls,
+    restore_focus_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +252,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         config: ApplicationConfig,
     ) -> Self {
         let viewport = config.initial_viewport;
+        let keymap = config.keymap.clone();
         Self {
             resources,
             controller,
@@ -185,9 +264,15 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             frames: FrameCoordinator::new(),
             pending_frame: None,
             text_input: None,
+            text_composing: false,
             projection_invalidated: true,
+            restore_focus_pending: false,
+            modal_open: false,
+            scroll_keys: Vec::new(),
+            clickable_keys: BTreeSet::new(),
+            keymap,
             last_layout_measures: 0,
-            last_rebuild_log_at: Instant::now(),
+            last_rebuild_log_at: 0,
             animation_clock: AnimationClock::default(),
             next_publication_token: 0,
             pending_publication_token: None,
@@ -264,6 +349,45 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .map(|active| (active.tree(), active.frame()))
     }
 
+    /// 只读访问视图状态仓库（滚动/焦点/模态投影查询）。
+    pub fn view_state(&self) -> &ViewStateStore {
+        &self.view_state
+    }
+
+    /// 直接写入一个滚动容器状态；返回是否引起变化。
+    pub fn set_scroll(&mut self, key: SemanticKey, state: ScrollState) -> bool {
+        if self.view_state.scroll(&key) == state {
+            return false;
+        }
+        self.view_state.set_scroll(key, state);
+        self.invalidate_frame();
+        true
+    }
+
+    /// 上次提交帧发现的滚动容器 key（发现序；虚拟列表内容替换时用于归零）。
+    pub fn scroll_keys(&self) -> &[SemanticKey] {
+        &self.scroll_keys
+    }
+
+    /// 写入当前键盘焦点 key（测试与宿主恢复入口）。
+    pub fn set_current_focus_key(&mut self, key: Option<SemanticKey>) {
+        match key {
+            Some(key) => self.view_state.set_current_focus(FocusSlot {
+                node_id: None,
+                key: Some(key),
+            }),
+            None => {
+                self.view_state.clear_current_focus();
+            }
+        }
+        self.invalidate_frame();
+    }
+
+    /// 使当前投影失效，下一次 `ensure_frame` 重建候选帧。
+    pub fn invalidate_frame(&mut self) {
+        self.projection_invalidated = true;
+    }
+
     /// 更新逻辑内容区（CSS 点）与 DPI；返回是否引起界面变化。
     pub fn set_viewport(&mut self, width: f32, height: f32, dpr: f32) -> bool {
         let viewport = Viewport {
@@ -311,6 +435,11 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     }
 
     /// 确保当前投影与帧存在；返回是否重建了帧。
+    ///
+    /// 候选构建运行有界收敛循环：先用候选投影渲染试探遍，reconcile 后投影若被改写
+    /// （模态焦点、悬停卸载清理、焦点重映射）则用新投影重建；滚动钳制改变了边界时
+    /// 同样重建（窗口化列表依据 offset 构建子项）。动态动作锚点（`anchor_actions`）
+    /// 只在定稿遍为存活 key 挂载。
     pub fn ensure_frame(&mut self) -> bool {
         if (self.pending_frame.is_some() || self.frames.active().is_some())
             && !self.projection_invalidated
@@ -338,48 +467,119 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             self.frames.active().map(|frame| frame.frame().viewport)
         );
         // 拖拽缩放时每帧 rebuild，日志 500ms 节流；rebuild 与 layout 统计同批打印。
-        let log_this_frame = self.last_rebuild_log_at.elapsed().as_millis() >= 500;
+        // 节流时钟复用宿主动画毫秒：Instant 在 wasm32 目标上不可用。
+        let log_this_frame = self
+            .animation_clock
+            .timestamp_ms
+            .saturating_sub(self.last_rebuild_log_at)
+            >= 500;
         if log_this_frame {
-            self.last_rebuild_log_at = Instant::now();
+            self.last_rebuild_log_at = self.animation_clock.timestamp_ms;
             session_trace!(
                 "session_ensure_frame rebuild invalidated={} dirty={dirty:?}",
                 self.projection_invalidated
             );
         }
+
         let mut candidate_state = self.view_state.clone();
-        let prepared = match self.prepare_projection() {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                eprintln!("tela-win32-editor: retain previous frame: {error}");
-                session_trace!("session_ensure_frame result=retain_projection_error");
-                self.frames.abort_component_transaction();
-                self.frames.runtime().restore_dirty(dirty);
-                return false;
+        let mut candidate_restore_focus_pending = self.restore_focus_pending;
+        // 模态栈与业务状态同步：入栈前保存焦点，出栈把恢复延迟到新树建好之后。
+        // core 可能在 Cancel 意图处理中自行弹栈（Escape 路径），所以闭合迁移用
+        // `modal_open` 状态位检测，而不是只看栈是否仍非空。
+        match self.controller.modal_key() {
+            Some(modal_key) => {
+                if !candidate_state.modal_stack().contains(&modal_key) {
+                    save_focus(&mut candidate_state);
+                    candidate_state.push_modal(modal_key);
+                }
+                self.modal_open = true;
             }
-        };
-        self.profile
-            .reconcile_tree(prepared.tree(), &mut candidate_state);
-        self.profile
-            .ensure_modal_focus(prepared.tree(), &mut candidate_state);
-        // 走 Dirty 布局缓存路径（resolve 而非 resolve_candidate）：纯视觉变化（hover
-        // 高亮等）不改变子树指纹，直接命中缓存零重测；只有尺寸/文本/结构变化才重算
-        // 对应子树。滚动输入使用真实状态，滚动偏移进入布局。
-        let frame = match self.profile.resolve(
-            prepared.tree(),
-            self.viewport,
-            self.resources.text_measurer(),
-            candidate_state.scrolls(),
-            &candidate_state,
-            self.config.focus_appearance,
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                eprintln!("tela-win32-editor: retain previous frame: {error:?}");
-                session_trace!("session_ensure_frame result=retain_layout_error");
-                self.frames.abort_component_transaction();
-                self.frames.runtime().restore_dirty(dirty);
-                return false;
+            None => {
+                let was_open = std::mem::take(&mut self.modal_open);
+                if was_open || candidate_state.modal_stack().last().is_some() {
+                    if candidate_state.modal_stack().last().is_some() {
+                        candidate_state.pop_modal();
+                    }
+                    candidate_restore_focus_pending = true;
+                }
             }
+        }
+        let anchors = self.controller.anchor_actions();
+
+        let mut staged: Option<(ResolvedFrame<A>, Controls)> = None;
+        for _ in 0..MAX_FRAME_FIXPOINT_ITERATIONS {
+            let ctx = self.candidate_context(&candidate_state);
+            let provisional = match self.prepare_projection(&ctx, None) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.retain_previous_frame(dirty, error);
+                    return false;
+                }
+            };
+            self.profile
+                .reconcile_tree(provisional.tree(), &mut candidate_state);
+            if candidate_restore_focus_pending {
+                restore_focus(provisional.tree(), &mut candidate_state);
+                candidate_restore_focus_pending = false;
+            }
+            self.profile
+                .ensure_modal_focus(provisional.tree(), &mut candidate_state);
+            if self.candidate_context(&candidate_state) != ctx {
+                // reconcile 改写了焦点/悬停投影；用新投影重建候选。
+                continue;
+            }
+            let prepared = if anchors.is_empty() {
+                provisional
+            } else {
+                let present_keys: BTreeSet<SemanticKey> =
+                    provisional.tree().keys().iter().cloned().collect();
+                let prepared = match self.prepare_projection(&ctx, Some((&anchors, &present_keys)))
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.retain_previous_frame(dirty, error);
+                        return false;
+                    }
+                };
+                self.profile
+                    .reconcile_tree(prepared.tree(), &mut candidate_state);
+                self.profile
+                    .ensure_modal_focus(prepared.tree(), &mut candidate_state);
+                prepared
+            };
+            let controls = discover_controls(prepared.tree());
+            let scroll_inputs = scroll_inputs_for(&candidate_state, &controls.scrolls);
+            // 走 Dirty 布局缓存路径（resolve 而非 resolve_candidate）：纯视觉变化（hover
+            // 高亮等）不改变子树指纹，直接命中缓存零重测；只有尺寸/文本/结构变化才重算
+            // 对应子树。滚动输入使用真实状态，滚动偏移进入布局。
+            let frame = match self.profile.resolve(
+                prepared.tree(),
+                self.viewport,
+                self.resources.text_measurer(),
+                &scroll_inputs,
+                &candidate_state,
+                self.config.focus_appearance,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.retain_previous_frame(dirty, format!("{error:?}"));
+                    return false;
+                }
+            };
+            if clamp_scroll_states(&mut candidate_state, &frame) {
+                // 窗口化列表依据 offset 构建子项；边界改变后用钳制值重建 candidate，
+                // active state 和 active frame 在成功提交前都保持不变。
+                continue;
+            }
+            let resolved = prepared
+                .resolve(|_| Ok::<_, UiLayoutError>(frame))
+                .expect("already resolved session candidate cannot fail again");
+            staged = Some((resolved, controls));
+            break;
+        }
+        let Some((resolved, controls)) = staged else {
+            self.retain_previous_frame(dirty, "frame fixpoint did not converge");
+            return false;
         };
         let total_measures = self.profile.layout_measure_count();
         let measured_this_frame = total_measures.saturating_sub(self.last_layout_measures);
@@ -392,14 +592,13 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 self.profile.layout_entry_count()
             );
         }
-        let resolved = prepared
-            .resolve(|_| Ok::<_, UiLayoutError>(frame))
-            .expect("already resolved session candidate cannot fail again");
         let candidate_viewport = resolved.frame().viewport;
         self.pending_frame = Some(PendingFrame {
             resolved,
             view_state: candidate_state,
             dirty,
+            controls,
+            restore_focus_pending: candidate_restore_focus_pending,
         });
         self.projection_invalidated = false;
         session_trace!("session_ensure_frame result=staged frame_viewport={candidate_viewport:?}");
@@ -418,11 +617,19 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             resolved,
             view_state,
             dirty: _,
+            controls,
+            restore_focus_pending,
         } = pending;
         let committed_viewport = resolved.frame().viewport;
         let active_view_state = &mut self.view_state;
+        let scroll_keys = &mut self.scroll_keys;
+        let clickable_keys = &mut self.clickable_keys;
+        let pending_restore = &mut self.restore_focus_pending;
         self.frames.commit_with(resolved, |_| {
             *active_view_state = view_state;
+            *scroll_keys = controls.scrolls;
+            *clickable_keys = controls.clickable;
+            *pending_restore = restore_focus_pending;
         });
         self.reconcile_text_input_channel();
 
@@ -482,6 +689,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 派发一个归一化指针事件；返回消费的动作数。
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
+        self.ensure_frame();
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
@@ -519,34 +727,28 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         actions.len() as u32
     }
 
-    /// 派发一个物理键事件；返回消费的动作数。
+    /// 派发一个原始键事件；键位快照先行解析，未消费的组合键不进入 core。
+    ///
+    /// 返回 1 表示组合键已被当前键位表消费（即使该意图最终没有产生业务动作）；宿主
+    /// 据此抑制原生 Tab 等默认行为。IME 组合期间原始按键全部让路。
     pub fn handle_key(&mut self, physical_key: u16, modifier_bits: u8, repeat: bool) -> u32 {
-        let Some(physical) = PhysicalKey::from_code(physical_key) else {
+        self.ensure_frame();
+        if self.input_is_composing() {
+            return 0;
+        }
+        let Some(raw) = raw_key_from_codes(physical_key, modifier_bits, repeat) else {
             return 0;
         };
-        let modifiers = Modifiers {
-            shift: modifier_bits & 1 != 0,
-            ctrl: modifier_bits & 2 != 0,
-            alt: modifier_bits & 4 != 0,
-            meta: modifier_bits & 8 != 0,
-        };
-        let intent = match physical {
-            PhysicalKey::Tab => Some(if modifiers.shift {
-                KeyboardIntent::FocusPrevious
-            } else {
-                KeyboardIntent::FocusNext
-            }),
-            PhysicalKey::Enter | PhysicalKey::Space => Some(KeyboardIntent::Activate),
-            PhysicalKey::Escape => Some(KeyboardIntent::Cancel),
-            PhysicalKey::ArrowUp => Some(KeyboardIntent::MoveFocus(FocusDirection::Up)),
-            PhysicalKey::ArrowDown => Some(KeyboardIntent::MoveFocus(FocusDirection::Down)),
-            PhysicalKey::ArrowLeft => Some(KeyboardIntent::MoveFocus(FocusDirection::Left)),
-            PhysicalKey::ArrowRight => Some(KeyboardIntent::MoveFocus(FocusDirection::Right)),
-            PhysicalKey::Home => Some(KeyboardIntent::MoveToStart),
-            PhysicalKey::End => Some(KeyboardIntent::MoveToEnd),
-            _ => None,
-        };
-        let Some(intent) = intent else {
+        let scopes = self
+            .frames
+            .active()
+            .map(|active| {
+                active
+                    .tree()
+                    .keymap_scopes_for_focus(self.view_state.current_focus_key())
+            })
+            .unwrap_or_default();
+        let Some(intent) = self.keymap.resolve(raw, &scopes) else {
             return 0;
         };
         let Some(token) = self.current_frame_token() else {
@@ -557,37 +759,48 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .active()
             .expect("accepted token requires an active frame")
             .input_plan()
-            .dispatch(
-                &mut self.view_state,
-                &InputEvent::Keyboard(KeyboardIntentEvent { intent, repeat }),
-            );
+            .dispatch(&mut self.view_state, &InputEvent::Keyboard(intent));
         let changed = self.handle_framed_actions(token, &actions);
         if changed {
             self.invalidate_frame();
         }
-        actions.len() as u32
+        1
     }
 
-    /// 替换焦点文本输入的值。
+    /// 原子替换已校验的完整键位表；失败时保留旧快照。
+    pub fn replace_keymap(&mut self, snapshot: KeymapSnapshot) -> Result<(), KeymapError> {
+        snapshot.validate(Some(self.keymap.revision))?;
+        self.keymap = snapshot;
+        Ok(())
+    }
+
+    /// 浏览器/原生宿主的 JSON 注入入口。传输格式不进入 core 或 renderer。
+    pub fn replace_keymap_json(&mut self, json: &str) -> Result<(), KeymapError> {
+        self.replace_keymap(KeymapSnapshot::from_json(json)?)
+    }
+
+    /// 当前键位表快照（诊断与测试入口）。
+    pub fn keymap(&self) -> &KeymapSnapshot {
+        &self.keymap
+    }
+
+    /// 浏览器把 DOM 输入值写入当前局部草稿，不直接更新业务模型。
     pub fn set_input_value(&mut self, value: String) -> u32 {
-        let Some((key, _)) = self.focused_input_snapshot() else {
+        self.ensure_frame();
+        let Some(target) = self.active_input_target() else {
             return 0;
         };
-        let key = key.clone();
-        let Some(token) = self.current_frame_token() else {
-            return 0;
-        };
-        let changed = self.dispatch_text_input(
-            token,
+        let changed = self.dispatch_text_input_for(
+            &target,
             TextInputEvent::Edit {
-                selection: TextSelection::collapsed(value.len() as u32),
+                selection: collapsed_at_end(&value),
                 value: value.clone(),
-                composing: false,
+                composing: self.text_composing,
             },
         );
         if changed {
             self.text_input = Some(TextInputChannel {
-                key,
+                key: target,
                 value,
                 dirty: true,
             });
@@ -595,49 +808,49 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         u32::from(changed)
     }
 
-    /// 原生文本通道获得焦点。
+    /// 原生文本通道获得焦点；记住 core 已判定的文本目标。
     pub fn input_focus(&mut self) -> u32 {
-        let Some((key, value)) = self
-            .focused_input_snapshot()
-            .map(|(key, input)| (key.clone(), input.value.clone()))
-        else {
-            return 0;
-        };
-        if self
-            .text_input
-            .as_ref()
-            .is_none_or(|channel| channel.key != key)
-        {
-            self.text_input = Some(TextInputChannel {
-                key,
-                value,
-                dirty: false,
-            });
-        }
-        1
+        self.ensure_frame();
+        let target = self.focused_input_key().cloned();
+        self.text_input = target.as_ref().map(|key| TextInputChannel {
+            key: key.clone(),
+            value: self.frames.input_value(key).unwrap_or_default(),
+            dirty: false,
+        });
+        self.text_composing = false;
+        u32::from(target.is_some())
     }
 
-    /// 原生文本通道失去焦点。
+    /// 原生文本通道失去焦点；把未提交的局部草稿补交回旧目标（blur 可能晚于焦点转移）。
+    ///
+    /// 只有粘滞草稿通道存在时才补交：通道就是"未提交草稿"的持有者，通道不存在说明
+    /// 没有属于旧目标的待提交内容，重复 blur 必须是幂等空操作。
     pub fn input_blur(&mut self) -> u32 {
-        if !self.input_focused() {
+        self.ensure_frame();
+        let Some(channel) = self.text_input.take() else {
             return 0;
-        }
-        self.view_state.clear_current_focus();
-        self.text_input = None;
-        self.invalidate_frame();
-        1
+        };
+        self.text_composing = false;
+        let TextInputChannel { key, value, .. } = channel;
+        u32::from(self.dispatch_text_input_for(
+            &key,
+            TextInputEvent::Commit {
+                selection: collapsed_at_end(&value),
+                value,
+            },
+        ))
     }
 
     /// 提交当前文本交互。
     pub fn input_enter(&mut self) -> u32 {
-        let Some(token) = self.current_frame_token() else {
+        let value = self.input_value();
+        let Some(target) = self.active_input_target() else {
             return 0;
         };
-        let value = self.input_value();
-        u32::from(self.dispatch_text_input(
-            token,
+        u32::from(self.dispatch_text_input_for(
+            &target,
             TextInputEvent::Commit {
-                selection: TextSelection::collapsed(value.len() as u32),
+                selection: collapsed_at_end(&value),
                 value,
             },
         ))
@@ -645,26 +858,56 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 取消当前文本交互。
     pub fn input_cancel(&mut self) -> u32 {
-        let Some(token) = self.current_frame_token() else {
+        let value = self.input_value();
+        let Some(target) = self.active_input_target() else {
             return 0;
         };
-        let value = self.input_value();
-        let canceled = self.dispatch_text_input(
-            token,
+        let canceled = self.dispatch_text_input_for(
+            &target,
             TextInputEvent::Cancel {
-                selection: TextSelection::collapsed(value.len() as u32),
+                selection: collapsed_at_end(&value),
             },
         );
-        if canceled {
-            self.text_input = self
-                .focused_input_snapshot()
-                .map(|(key, input)| TextInputChannel {
-                    key: key.clone(),
-                    value: input.value.clone(),
-                    dirty: false,
-                });
+        if canceled
+            && let Some(channel) = self.text_input.as_mut()
+            && channel.key == target
+        {
+            channel.value = self.frames.input_value(&target).unwrap_or_default();
+            channel.dirty = false;
         }
-        u32::from(canceled || self.input_blur() > 0)
+        u32::from(canceled)
+    }
+
+    /// IME 组合开始：后续 Edit 事件携带 composing 标志，原始按键让路。
+    pub fn composition_start(&mut self) -> u32 {
+        self.set_composing(true)
+    }
+
+    /// IME 组合结束：用最终值派发一次非组合 Edit。
+    pub fn composition_end(&mut self) -> u32 {
+        self.set_composing(false)
+    }
+
+    fn set_composing(&mut self, composing: bool) -> u32 {
+        self.ensure_frame();
+        self.text_composing = composing;
+        let value = self.input_value();
+        let Some(target) = self.active_input_target() else {
+            return 0;
+        };
+        u32::from(self.dispatch_text_input_for(
+            &target,
+            TextInputEvent::Edit {
+                selection: collapsed_at_end(&value),
+                value,
+                composing,
+            },
+        ))
+    }
+
+    /// 当前是否处于 IME 组合态（组合期间原始按键不进入 core）。
+    pub fn input_is_composing(&self) -> bool {
+        self.text_composing && (self.text_input.is_some() || self.focused_input_key().is_some())
     }
 
     /// 当前焦点是否挂在受控文本输入通道上。
@@ -674,17 +917,28 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 当前受控文本输入通道的值。
     pub fn input_value(&self) -> String {
-        let Some((key, input)) = self.focused_input_snapshot() else {
-            return String::new();
-        };
-        self.text_input
+        let target = self
+            .text_input
             .as_ref()
-            .filter(|channel| &channel.key == key)
-            .map(|channel| channel.value.clone())
-            .unwrap_or_else(|| input.value.clone())
+            .map(|channel| channel.key.clone())
+            .or_else(|| self.focused_input_key().cloned());
+        match target {
+            Some(target) if self.text_input.as_ref().is_some_and(|c| c.key == target) => self
+                .text_input
+                .as_ref()
+                .map(|channel| channel.value.clone())
+                .unwrap_or_default(),
+            Some(target) => self.frames.input_value(&target).unwrap_or_default(),
+            None => String::new(),
+        }
     }
 
-    fn focused_input_snapshot(&self) -> Option<(&SemanticKey, &TextInputSpec)> {
+    /// 当前 core 焦点对应的文本输入 key（无输入焦点时为 `None`）。
+    pub fn focused_input_key(&self) -> Option<&SemanticKey> {
+        self.focused_input_snapshot().map(|(key, _)| key)
+    }
+
+    fn focused_input_snapshot(&self) -> Option<(&SemanticKey, &tela_contract::TextInputSpec)> {
         let key = self.view_state.current_focus_key()?;
         let input = self
             .frames
@@ -696,12 +950,21 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         Some((key, input))
     }
 
+    /// 文本通道的粘滞目标：通道存活期间优先于当前焦点，保证晚到的 blur 仍能补交草稿。
+    fn active_input_target(&self) -> Option<SemanticKey> {
+        self.text_input
+            .as_ref()
+            .map(|channel| channel.key.clone())
+            .or_else(|| self.focused_input_key().cloned())
+    }
+
     fn reconcile_text_input_channel(&mut self) {
-        let focused = self
+        let Some((key, value)) = self
             .focused_input_snapshot()
-            .map(|(key, input)| (key.clone(), input.value.clone()));
-        let Some((key, value)) = focused else {
-            self.text_input = None;
+            .map(|(key, input)| (key.clone(), input.value.clone()))
+        else {
+            // 焦点已离开所有输入节点：保留粘滞通道，等待 input_blur 补交草稿或
+            // input_focus 换靶，与隐藏 DOM 编辑器的生命周期一致。
             return;
         };
         match self.text_input.as_mut() {
@@ -711,7 +974,9 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                     channel.dirty = false;
                 }
             }
-            _ => {
+            // 焦点移到了另一个输入：通道保持旧目标（粘滞），由 blur/focus 交接。
+            Some(_) => {}
+            None => {
                 self.text_input = Some(TextInputChannel {
                     key,
                     value,
@@ -734,34 +999,63 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         active.input_plan().hit_test_interactive(point)
     }
 
-    fn prepare_projection(&mut self) -> Result<tela_ui_dsl::PreparedFrame<A>, String> {
-        let ctx = FrameContext {
+    fn candidate_context(&self, state: &ViewStateStore) -> FrameContext {
+        FrameContext {
             viewport: self.viewport,
             window_maximized: self.window_maximized,
-            hover_key: self.view_state.hover_key().cloned(),
-            pressed_key: self.view_state.pressed_mouse_key().cloned(),
-        };
+            hover_key: state.hover_key().cloned(),
+            pressed_key: state.pressed_mouse_key().cloned(),
+            focus_key: state.current_focus_key().cloned(),
+            scroll_offsets: self
+                .scroll_keys
+                .iter()
+                .map(|key| (key.clone(), state.scroll(key).offset_y))
+                .collect(),
+        }
+    }
+
+    fn prepare_projection(
+        &mut self,
+        ctx: &FrameContext,
+        anchors: Option<AnchorPass<'_, A>>,
+    ) -> Result<PreparedFrame<A>, String> {
         let mut build = self.frames.begin_build();
         build.set_animation_clock(self.animation_clock);
-        let root = self
+        let mut output = self
             .controller
-            .render(&mut build, &ctx)
+            .render(&mut build, ctx)
             .map_err(|error| error.to_string())?;
-        self.frames.prepare(root).map_err(|error| error.to_string())
+        if let Some((anchors, present_keys)) = anchors {
+            let site = ViewSite::new(file!(), line!(), column!());
+            for (key, action) in anchors {
+                if present_keys.contains(key) {
+                    output = output.attach_action_at(key.clone(), action.clone(), site);
+                }
+            }
+        }
+        self.frames
+            .prepare(output)
+            .map_err(|error| error.to_string())
     }
 
     fn current_frame_token(&self) -> Option<FrameToken> {
         self.frames.active().map(|frame| frame.token())
     }
 
-    fn dispatch_text_input(&mut self, token: FrameToken, event: TextInputEvent) -> bool {
-        let actions = self
+    /// 按 key 直投文本交互（不经过焦点仲裁）：粘滞目标在焦点已转移后仍可收到补交。
+    fn dispatch_text_input_for(&mut self, target: &SemanticKey, event: TextInputEvent) -> bool {
+        let Some(token) = self.current_frame_token() else {
+            return false;
+        };
+        let Some(node_id) = self
             .frames
             .active()
-            .expect("accepted token requires an active frame")
-            .input_plan()
-            .dispatch(&mut self.view_state, &InputEvent::Text(event));
-        let changed = self.handle_framed_actions(token, &actions);
+            .and_then(|active| active.tree().node_id_for_key(target))
+        else {
+            return false;
+        };
+        let changed =
+            self.handle_framed_actions(token, &[KernelInteraction::TextInput { node_id, event }]);
         if changed {
             self.invalidate_frame();
         }
@@ -787,25 +1081,69 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 changed = true;
                 continue;
             }
-            match framed.into_parts().1 {
+            let interaction = framed.into_parts().1;
+            match &interaction {
                 KernelInteraction::RequestFocus { .. } | KernelInteraction::FocusChanged { .. } => {
                     changed = true
                 }
                 KernelInteraction::Hover { .. } => changed = true,
-                _ => {}
+                KernelInteraction::Scroll { node_id, delta } => {
+                    changed |= self.apply_scroll(*node_id, delta.y);
+                }
+                _ => {
+                    let outcome = self.controller.on_kernel_interaction(&interaction);
+                    changed |= self.apply_controller_outcome(outcome);
+                }
             }
         }
         changed
     }
 
-    fn invalidate_frame(&mut self) {
-        self.projection_invalidated = true;
+    /// 滚轮/触控板滚动：按 active 帧的 scroll_bounds 应用并钳制偏移。
+    fn apply_scroll(&mut self, node_id: NodeId, delta_y: f32) -> bool {
+        let Some(bounds) = self.frames.active().and_then(|active| {
+            active
+                .frame()
+                .scroll_bounds
+                .iter()
+                .find(|bounds| bounds.node_id == node_id)
+        }) else {
+            return false;
+        };
+        let mut state = self.view_state.scroll(&bounds.key);
+        let next = (state.offset_y + delta_y).clamp(0.0, bounds.max_offset_y);
+        if (next - state.offset_y).abs() < f32::EPSILON {
+            return false;
+        }
+        state.offset_y = next;
+        let key = bounds.key.clone();
+        self.view_state.set_scroll(key, state);
+        true
+    }
+
+    fn retain_previous_frame(
+        &mut self,
+        dirty: BTreeSet<SemanticKey>,
+        reason: impl std::fmt::Display,
+    ) {
+        eprintln!("tela-app-runtime: retain previous frame: {reason}");
+        session_trace!("session_ensure_frame result=retain");
+        self.frames.abort_component_transaction();
+        self.frames.runtime().restore_dirty(dirty);
     }
 
     fn apply_controller_action(&mut self, action: A) -> bool {
         let outcome = self.controller.handle_action(action);
+        self.apply_controller_outcome(outcome)
+    }
+
+    fn apply_controller_outcome(&mut self, outcome: ControllerOutcome) -> bool {
         self.pending_effects.extend(outcome.effects);
-        outcome.changed
+        for key in &outcome.scroll_resets {
+            self.view_state
+                .set_scroll(key.clone(), ScrollState::default());
+        }
+        outcome.changed || !outcome.scroll_resets.is_empty()
     }
 }
 
@@ -824,7 +1162,7 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
             AppEvent::Tick { timestamp_ms } => self.on_animation_tick(timestamp_ms),
             AppEvent::Viewport { width, height } => self.set_viewport(width, height, 1.0),
             AppEvent::WindowState { maximized } => self.set_window_maximized(maximized),
-            AppEvent::ReplaceKeymapJson(_) => false,
+            AppEvent::ReplaceKeymapJson(json) => self.replace_keymap_json(&json).is_ok(),
             AppEvent::FrameInput {
                 source_frame_token,
                 input,
@@ -844,9 +1182,8 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
                     AppFrameInput::InputBlur => self.input_blur() > 0,
                     AppFrameInput::InputEnter => self.input_enter() > 0,
                     AppFrameInput::InputCancel => self.input_cancel() > 0,
-                    AppFrameInput::InputCompositionStart | AppFrameInput::InputCompositionEnd => {
-                        self.input_focused()
-                    }
+                    AppFrameInput::InputCompositionStart => self.composition_start() > 0,
+                    AppFrameInput::InputCompositionEnd => self.composition_end() > 0,
                 }
             }
         };
@@ -882,7 +1219,11 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
         let schedule = self.animation_schedule();
         let cursor = if self.input_focused() {
             CursorKind::Text
-        } else if self.hover_interactive() {
+        } else if self
+            .view_state
+            .hover_key()
+            .is_some_and(|key| self.clickable_keys.contains(key))
+        {
             CursorKind::Pointer
         } else {
             CursorKind::Default
@@ -939,6 +1280,75 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
     }
 }
 
+/// 一次提交帧发现的可交互控件清单。
+struct Controls {
+    /// 滚动容器 key（树序）。
+    scrolls: Vec<SemanticKey>,
+    /// 可点击 key 集合（光标策略）。
+    clickable: BTreeSet<SemanticKey>,
+}
+
+fn discover_controls(tree: &UiTree) -> Controls {
+    fn visit(node: &UiNode, keys: &[SemanticKey], i: &mut usize, out: &mut Controls) {
+        let key = keys.get(*i).cloned();
+        *i += 1;
+        if let Some(key) = key {
+            if node
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.clickable)
+            {
+                out.clickable.insert(key.clone());
+            }
+            if matches!(
+                node.kind,
+                NodeKind::ScrollView | NodeKind::VirtualListView(_)
+            ) {
+                out.scrolls.push(key);
+            }
+        }
+        for child in &node.children {
+            visit(child, keys, i, out);
+        }
+    }
+    let mut out = Controls {
+        scrolls: Vec::new(),
+        clickable: BTreeSet::new(),
+    };
+    visit(tree.root(), tree.keys(), &mut 0, &mut out);
+    out
+}
+
+fn scroll_inputs_for(
+    view_state: &ViewStateStore,
+    scroll_keys: &[SemanticKey],
+) -> HashMap<SemanticKey, ScrollState> {
+    scroll_keys
+        .iter()
+        .map(|key| (key.clone(), view_state.scroll(key)))
+        .collect()
+}
+
+fn clamp_scroll_states(view_state: &mut ViewStateStore, frame: &UiFrame) -> bool {
+    let mut changed = false;
+    for bounds in &frame.scroll_bounds {
+        let state = view_state.scroll(&bounds.key);
+        let clamped = ScrollState {
+            offset_x: state.offset_x.clamp(0.0, bounds.max_offset_x),
+            offset_y: state.offset_y.clamp(0.0, bounds.max_offset_y),
+        };
+        if clamped != state {
+            view_state.set_scroll(bounds.key.clone(), clamped);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn collapsed_at_end(value: &str) -> TextSelection {
+    TextSelection::collapsed(value.len().min(u32::MAX as usize) as u32)
+}
+
 fn action_kind(action: &KernelInteraction) -> &'static str {
     match action {
         KernelInteraction::Pointer { .. } => "Pointer",
@@ -956,5 +1366,384 @@ fn action_kind(action: &KernelInteraction) -> &'static str {
         KernelInteraction::ShortcutActivated { .. } => "ShortcutActivated",
         KernelInteraction::SaveFocus => "SaveFocus",
         KernelInteraction::RestoreFocus => "RestoreFocus",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tela_contract::{
+        IconProvider, IconRequest, IconResolveError, IconVisual, IdentityConcern, InteractConcern,
+        KeyStrategy, Overflow, PointerButtons, PointerId, PointerKind, PointerPhase, Size,
+        TextMeasureRequest, TextMeasurer, TextMetrics, UpdateMode,
+    };
+
+    static TEST_RESOURCES: TestResources = TestResources;
+
+    struct TestResources;
+
+    /// 固定度量：宽度按字符数 × 0.6 × 字号估计，足够让布局产生确定尺寸。
+    struct StubMeasurer;
+
+    impl TextMeasurer for StubMeasurer {
+        fn measure(&self, request: &TextMeasureRequest<'_>) -> TextMetrics {
+            let width = request.text.chars().count() as f32 * request.font_size * 0.6;
+            TextMetrics {
+                width,
+                height: request.line_height,
+                line_count: 1,
+                first_baseline: request.font_size,
+            }
+        }
+    }
+
+    impl UiResources for TestResources {
+        fn text_measurer(&self) -> &dyn TextMeasurer {
+            &StubMeasurer
+        }
+
+        fn icon_provider(&self) -> &dyn IconProvider {
+            &StubIcons
+        }
+
+        fn fonts(&self) -> &'static [tela_contract::FontDescriptor] {
+            &[]
+        }
+    }
+
+    struct StubIcons;
+
+    impl IconProvider for StubIcons {
+        fn resolve(&self, request: IconRequest) -> Result<IconVisual, IconResolveError> {
+            Err(IconResolveError { key: request.key })
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum FixtureAction {
+        Click(u32),
+    }
+
+    /// 最小可交互夹具：可滚动列表 + 可点击行 + 可开关模态。
+    struct FixtureController {
+        clicks: Vec<u32>,
+        modal_open: bool,
+    }
+
+    fn keyed(mut node: UiNode, key: &str) -> UiNode {
+        node.identity = Some(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            semantic_key: Some(SemanticKey(key.to_owned())),
+            update_mode: UpdateMode::Dirty,
+            ..IdentityConcern::default()
+        });
+        node
+    }
+
+    fn fixed_box(key: &str, width: f32, height: f32, clickable: bool) -> UiNode {
+        let mut node = UiNode::new(NodeKind::View);
+        node.layout = Some(tela_contract::LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height)),
+            ..tela_contract::LayoutConcern::default()
+        });
+        if clickable {
+            node.interact = Some(InteractConcern {
+                clickable: true,
+                hoverable: true,
+                focusable: true,
+                ..InteractConcern::default()
+            });
+        }
+        keyed(node, key)
+    }
+
+    /// 只可悬停、不可点击的节点：验证光标策略不会把手型给它。
+    fn inert_hover_box(key: &str, width: f32, height: f32) -> UiNode {
+        let mut node = UiNode::new(NodeKind::View);
+        node.layout = Some(tela_contract::LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height)),
+            ..tela_contract::LayoutConcern::default()
+        });
+        node.interact = Some(InteractConcern {
+            hoverable: true,
+            ..InteractConcern::default()
+        });
+        keyed(node, key)
+    }
+
+    fn scroll_view(key: &str, width: f32, height: f32, children: Vec<UiNode>) -> UiNode {
+        let mut node = UiNode::new(NodeKind::ScrollView);
+        node.layout = Some(tela_contract::LayoutConcern {
+            width: Some(Size::fixed(width)),
+            height: Some(Size::fixed(height)),
+            clip: true,
+            overflow: Overflow::Scroll,
+            ..tela_contract::LayoutConcern::default()
+        });
+        node.children = children;
+        keyed(node, key)
+    }
+
+    fn column(key: &str, children: Vec<UiNode>) -> UiNode {
+        let mut node = UiNode::new(NodeKind::Column);
+        node.layout = Some(tela_contract::LayoutConcern {
+            width: Some(Size::fixed(200.0)),
+            ..tela_contract::LayoutConcern::default()
+        });
+        node.children = children;
+        keyed(node, key)
+    }
+
+    impl AppController<FixtureAction> for FixtureController {
+        fn render(
+            &mut self,
+            _build: &mut ViewBuild<FixtureAction>,
+            _ctx: &FrameContext,
+        ) -> ViewResult<ViewOutput<FixtureAction>> {
+            let rows: Vec<UiNode> = (0..10)
+                .map(|index| fixed_box(&format!("row.{index}"), 180.0, 20.0, true))
+                .collect();
+            let mut root = vec![
+                scroll_view("fixture.scroll", 200.0, 100.0, rows),
+                inert_hover_box("fixture.inert", 160.0, 20.0),
+                fixed_box("fixture.button", 160.0, 20.0, true),
+            ];
+            if self.modal_open {
+                root.push(fixed_box("fixture.modal", 120.0, 40.0, true));
+            }
+            Ok(ViewOutput::opaque(column("fixture.root", root)))
+        }
+
+        fn handle_action(&mut self, action: FixtureAction) -> ControllerOutcome {
+            match action {
+                FixtureAction::Click(id) => self.clicks.push(id),
+            }
+            ControllerOutcome::changed(true)
+        }
+
+        fn modal_key(&self) -> Option<SemanticKey> {
+            self.modal_open
+                .then(|| SemanticKey("fixture.modal".to_owned()))
+        }
+    }
+
+    fn app() -> Application<FixtureAction, FixtureController> {
+        Application::new(
+            &TEST_RESOURCES,
+            FixtureController {
+                clicks: Vec::new(),
+                modal_open: false,
+            },
+            ApplicationConfig::default(),
+        )
+    }
+
+    fn ensure_and_present(application: &mut Application<FixtureAction, FixtureController>) {
+        assert!(application.ensure_frame());
+        application.frame_presented();
+    }
+
+    fn wheel_at(
+        application: &mut Application<FixtureAction, FixtureController>,
+        delta_y: f32,
+    ) -> u32 {
+        let point = {
+            let (_tree, frame) = application.active().expect("fixture frame");
+            let bounds = frame
+                .scroll_bounds
+                .iter()
+                .find(|bounds| bounds.key.0 == "fixture.scroll")
+                .expect("scroll bounds");
+            Point {
+                x: bounds.viewport.x + bounds.viewport.w / 2.0,
+                y: bounds.viewport.y + bounds.viewport.h / 2.0,
+            }
+        };
+        application.handle_pointer(PointerEvent::new(
+            PointerId(0),
+            PointerKind::Mouse,
+            PointerPhase::Scroll,
+            point,
+            PointerButtons::NONE,
+            1,
+            Point { x: 0.0, y: delta_y },
+        ))
+    }
+
+    fn scroll_offset(application: &Application<FixtureAction, FixtureController>) -> f32 {
+        application
+            .view_state()
+            .scroll(&SemanticKey("fixture.scroll".to_owned()))
+            .offset_y
+    }
+
+    #[test]
+    fn wheel_scroll_applies_and_clamps_to_bounds() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        let max_offset = {
+            let (_tree, frame) = application.active().expect("fixture frame");
+            frame
+                .scroll_bounds
+                .iter()
+                .find(|bounds| bounds.key.0 == "fixture.scroll")
+                .expect("scroll bounds")
+                .max_offset_y
+        };
+        assert!(max_offset > 0.0, "10 行 × 20px 内容必须超过 100px 视口");
+
+        assert!(wheel_at(&mut application, 60.0) > 0);
+        ensure_and_present(&mut application);
+        assert_eq!(scroll_offset(&application), 60.0);
+
+        // 过量滚动被钳制到边界，不会越界。
+        assert!(wheel_at(&mut application, max_offset * 4.0) > 0);
+        ensure_and_present(&mut application);
+        assert_eq!(scroll_offset(&application), max_offset);
+    }
+
+    #[test]
+    fn out_of_bounds_offsets_are_clamped_by_the_next_candidate() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        let max_offset = {
+            let (_tree, frame) = application.active().expect("fixture frame");
+            frame
+                .scroll_bounds
+                .iter()
+                .find(|bounds| bounds.key.0 == "fixture.scroll")
+                .expect("scroll bounds")
+                .max_offset_y
+        };
+        assert!(application.set_scroll(
+            SemanticKey("fixture.scroll".to_owned()),
+            ScrollState {
+                offset_y: max_offset * 3.0,
+                ..ScrollState::default()
+            }
+        ));
+        ensure_and_present(&mut application);
+        assert_eq!(scroll_offset(&application), max_offset);
+    }
+
+    #[test]
+    fn scroll_resets_zero_the_discovered_container() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        assert!(wheel_at(&mut application, 50.0) > 0);
+        ensure_and_present(&mut application);
+        assert!(scroll_offset(&application) > 0.0);
+        let key = application
+            .scroll_keys()
+            .first()
+            .expect("scroll container discovery")
+            .clone();
+        application.dispatch_action(FixtureAction::Click(7));
+        // 控制器未申请归零：滚动偏移保持。
+        assert!(scroll_offset(&application) > 0.0);
+        // 直接归零通道（控制器经 ControllerOutcome::with_scroll_reset 使用同一入口）。
+        assert!(application.set_scroll(key, ScrollState::default()));
+        ensure_and_present(&mut application);
+        assert_eq!(scroll_offset(&application), 0.0);
+    }
+
+    #[test]
+    fn keymap_replacement_is_atomic_and_changes_the_next_key() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        let tab: u16 = 0x2b;
+        assert_eq!(application.handle_key(tab, 0, false), 1);
+
+        // 版本回退被拒绝，旧键位表保持生效。
+        assert!(application
+            .replace_keymap_json(
+                r#"{"version":1,"revision":0,"default_layer":[{"key":"Escape","intent":{"type":"cancel"}}]}"#
+            )
+            .is_err());
+        assert_eq!(application.handle_key(tab, 0, false), 1);
+
+        // 合法替换后 Tab 不再绑定。
+        assert!(application
+            .replace_keymap_json(
+                r#"{"version":1,"revision":2,"default_layer":[{"key":"Escape","intent":{"type":"cancel"}}]}"#
+            )
+            .is_ok());
+        assert_eq!(application.handle_key(tab, 0, false), 0);
+    }
+
+    fn point_for_key(
+        application: &Application<FixtureAction, FixtureController>,
+        key: &str,
+    ) -> Point {
+        let (tree, frame) = application.active().expect("fixture frame");
+        let node_id = tree
+            .node_id_for_key(&SemanticKey(key.to_owned()))
+            .expect("keyed node");
+        let region = frame
+            .hit_regions
+            .iter()
+            .find(|region| region.node_id == node_id)
+            .expect("hit region");
+        Point {
+            x: region.rect.x + region.rect.w / 2.0,
+            y: region.rect.y + region.rect.h / 2.0,
+        }
+    }
+
+    #[test]
+    fn cursor_is_pointer_only_over_clickable_nodes() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        use tela_app_session::ApplicationSession as _;
+        // 未悬停时默认光标。
+        let publication = application.publish().expect("publication");
+        assert_eq!(publication.status.cursor, CursorKind::Default);
+        // 悬停在"只可悬停、不可点击"的节点上：不是手型（旧策略会误报手型）。
+        application.handle_pointer(PointerEvent::mouse_move(point_for_key(
+            &application,
+            "fixture.inert",
+        )));
+        let publication = application.publish().expect("publication");
+        assert_eq!(publication.status.cursor, CursorKind::Default);
+        // 悬停在可点击节点上：手型。
+        application.handle_pointer(PointerEvent::mouse_move(point_for_key(
+            &application,
+            "fixture.button",
+        )));
+        let publication = application.publish().expect("publication");
+        assert_eq!(publication.status.cursor, CursorKind::Pointer);
+    }
+
+    #[test]
+    fn modal_sync_confines_focus_and_restores_it_after_close() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        application.set_current_focus_key(Some(SemanticKey("row.0".to_owned())));
+        ensure_and_present(&mut application);
+        assert_eq!(
+            application.view_state().current_focus_key(),
+            Some(&SemanticKey("row.0".to_owned()))
+        );
+
+        // 直接改控制器字段不经过 intent 通道，需要显式失效（真实路径由动作自动失效）。
+        application.controller_mut().modal_open = true;
+        application.invalidate_frame();
+        ensure_and_present(&mut application);
+        assert_eq!(
+            application.view_state().current_focus_key(),
+            Some(&SemanticKey("fixture.modal".to_owned())),
+            "模态打开后焦点必须进入模态子树"
+        );
+
+        application.controller_mut().modal_open = false;
+        application.invalidate_frame();
+        ensure_and_present(&mut application);
+        assert_eq!(
+            application.view_state().current_focus_key(),
+            Some(&SemanticKey("row.0".to_owned())),
+            "模态关闭后焦点必须恢复到之前保存的节点"
+        );
     }
 }

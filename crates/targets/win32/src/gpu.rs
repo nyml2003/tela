@@ -1,7 +1,8 @@
-//! WGPU presentation for the static Win32 shell (copied and simplified from tela-target-win32).
+//! WGPU 呈现会话：静态壳与 bundle 壳共用的 surface/renderer/设备丢失守卫。
 
 #![allow(unsafe_code)]
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use raw_window_handle::{
@@ -10,7 +11,11 @@ use raw_window_handle::{
 };
 use tela_contract::UiFrame;
 use tela_render_wgpu::WgpuRenderer;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+/// 全局单调代际：同一窗口多次重建 GPU 会话时区分迟到的旧回调。
+static DEVICE_LOSS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 macro_rules! gpu_trace {
     ($($arg:tt)*) => {
@@ -40,6 +45,15 @@ pub enum RenderOutcome {
     Validation,
 }
 
+/// 一次设备丢失报告：`generation` 用于丢弃旧 GPU 代际的迟到回调。
+#[derive(Clone, Debug)]
+pub struct DeviceLossReport {
+    /// 丢失设备的 GPU 会话代际。
+    pub generation: u64,
+    /// 驱动给出的丢失原因。
+    pub detail: String,
+}
+
 /// Surface, renderer, and presentation configuration.
 pub struct GpuSession {
     instance: wgpu::Instance,
@@ -47,11 +61,23 @@ pub struct GpuSession {
     /// Presentation configuration.
     pub config: wgpu::SurfaceConfiguration,
     renderer: WgpuRenderer,
+    /// 设备丢失回调的跨线程报告槽与代际号。
+    device_loss: Arc<Mutex<Option<DeviceLossReport>>>,
+    generation: u64,
 }
 
 impl GpuSession {
     /// Creates the renderer and configures the surface for the given client size.
-    pub fn new(hwnd: HWND, width: u32, height: u32, dpr: f32) -> Result<Self, String> {
+    ///
+    /// `device_lost_message` 是设备丢失时向 `hwnd` 投递的私有消息 ID（`WM_APP` 起算）；
+    /// UI 线程收到后调用 [`GpuSession::take_device_loss_report`] 并按代际判定是否恢复。
+    pub fn new(
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        dpr: f32,
+        device_lost_message: u32,
+    ) -> Result<Self, String> {
         let init_started = Instant::now();
         gpu_trace!(
             "tela-win32-trace: event=gpu_init stage=begin width={} height={} dpr={:.2}",
@@ -158,6 +184,49 @@ impl GpuSession {
             config.height
         );
         let _ = dpr;
+        // 设备丢失回调在驱动线程触发：只写入标量报告并向 UI 线程投递消息，
+        // 不触碰任何 Rust 窗口状态。
+        let device_loss = Arc::new(Mutex::new(None));
+        let generation =
+            DEVICE_LOSS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let report_slot = Arc::clone(&device_loss);
+        let hwnd_bits = hwnd.0 as isize;
+        let device = renderer.device().clone();
+        if device_lost_message == 0 {
+            // 调用方（尚未接入统一壳的旧路径）不处理设备丢失消息：不武装回调。
+            return Ok(Self {
+                instance,
+                surface,
+                config,
+                renderer,
+                device_loss,
+                generation,
+            });
+        }
+        device.set_device_lost_callback(move |reason, message| {
+            if let Ok(mut report) = report_slot.lock() {
+                let replace = report
+                    .as_ref()
+                    .is_none_or(|current| current.generation <= generation);
+                if replace {
+                    *report = Some(DeviceLossReport {
+                        generation,
+                        detail: format!("{reason:?}: {message}"),
+                    });
+                }
+            }
+            // SAFETY: PostMessageW copies only scalar values and is safe across threads. No raw
+            // window-state pointer is captured; the UI thread owns both recovery and state.
+            let hwnd = HWND(hwnd_bits as *mut core::ffi::c_void);
+            let _ = unsafe {
+                PostMessageW(
+                    Some(hwnd),
+                    device_lost_message,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            };
+        });
         gpu_trace!(
             "tela-win32-trace: event=gpu_init stage=complete elapsed_us={}",
             init_started.elapsed().as_micros()
@@ -167,7 +236,22 @@ impl GpuSession {
             surface,
             config,
             renderer,
+            device_loss,
+            generation,
         })
+    }
+
+    /// 本会话的 GPU 代际号（设备丢失报告按它过滤）。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 取走一次设备丢失报告；旧代际报告由调用侧用 [`GpuSession::generation`] 丢弃。
+    pub fn take_device_loss_report(&self) -> Option<DeviceLossReport> {
+        self.device_loss
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 
     /// Reconfigures the surface for a new client size.

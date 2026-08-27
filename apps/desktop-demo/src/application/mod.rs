@@ -4,8 +4,9 @@ use crate::domain::{
     EntryFilter, EntryId, FileCommand, FileManagerModel, FileManagerSession, OperationKind,
 };
 
-pub mod keymap;
-pub mod runtime;
+pub mod controller;
+#[cfg(test)]
+mod tests;
 
 /// View 可发出的语义意图；不暴露 tela `NodeId` 或 `SemanticKey`。
 #[derive(Clone, Debug, PartialEq, Eq)]
