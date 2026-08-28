@@ -219,6 +219,48 @@ test('动态 Product 不能被 Target 或错误应用污染', () => {
   assert.ok(violations.some((violation) => /移动动态 Product/.test(violation.message)));
 });
 
+test('静态 Agent Web Product 可组合应用、WebView Target 与资源', () => {
+  const violations = checkArchitecture([
+    crate('tela-agent-demo', [
+      ['serde', 'normal'],
+      ['serde_json', 'normal'],
+      ['tela-app-runtime', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-core', 'normal'],
+      ['tela-ui-dsl', 'normal'],
+      ['tela-ui-foundation', 'normal'],
+      ['tela-app-session', 'dev'],
+      ['tela-icon-resources', 'dev'],
+      ['tela-text-resources', 'dev'],
+    ]),
+    crate('tela-product-agent-demo', [
+      ['tela-agent-demo', 'normal'],
+      ['tela-app-abi', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-target-webview', 'normal'],
+      ['tela-text-resources', 'normal'],
+      ['wasm-bindgen', 'normal'],
+    ]),
+  ]);
+
+  assert.deepEqual(violations, []);
+});
+
+test('静态 Agent Win32 Product 可组合应用、Win32 Target 与资源', () => {
+  const violations = checkArchitecture([
+    crate('tela-product-win32-agent', [
+      ['tela-agent-demo', 'normal'],
+      ['tela-contract', 'normal'],
+      ['tela-icon-resources', 'normal'],
+      ['tela-target-win32', 'normal'],
+      ['tela-text-resources', 'normal'],
+    ]),
+  ]);
+
+  assert.deepEqual(violations, []);
+});
+
 test('完整的 026/030 workspace 依赖闭包通过', () => {
   const crates: CrateInfo[] = [
     crate('tela-contract'),
@@ -251,8 +293,6 @@ test('完整的 026/030 workspace 依赖闭包通过', () => {
       ['trybuild', 'dev'],
     ]),
     crate('tela-desktop-demo', [
-      ['serde', 'normal'],
-      ['serde_json', 'normal'],
       ['tela-contract', 'normal'],
       ['tela-core', 'normal'],
       ['tela-desktop-ui-dsl', 'normal'],

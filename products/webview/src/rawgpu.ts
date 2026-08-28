@@ -9,7 +9,7 @@ interface RawGpuTelemetry {
 
 // TypeScript 7 当前的 lib.dom 只声明 flag 类型，未声明这三个浏览器全局常量。
 // 保持 WebGPU 规范中的稳定位值，避免把未类型化全局扩散到诊断逻辑。
-const TEXTURE_COPY_SRC = 0x04;
+const TEXTURE_COPY_SRC = 0x01;
 const TEXTURE_RENDER_ATTACHMENT = 0x10;
 const BUFFER_MAP_READ = 0x01;
 const BUFFER_COPY_DST = 0x08;

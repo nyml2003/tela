@@ -47,8 +47,10 @@ pub fn render_frame(frame: &UiFrame, cfg: &RasterConfig) -> BitmapRGBA8 {
             render_command(&mut layer_canvas, command, cfg, scale);
             for (destination, source) in canvas
                 .pixels
-                .chunks_exact_mut(4)
-                .zip(layer.pixels.chunks_exact(4))
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(layer.pixels.as_chunks::<4>().0)
             {
                 let source = [
                     source[0],

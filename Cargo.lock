@@ -2323,6 +2323,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
 
 [[package]]
+name = "tela-agent-demo"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tela-app-runtime",
+ "tela-app-session",
+ "tela-contract",
+ "tela-core",
+ "tela-icon-resources",
+ "tela-text-resources",
+ "tela-ui-dsl",
+ "tela-ui-foundation",
+]
+
+[[package]]
 name = "tela-app-abi"
 version = "0.1.0"
 dependencies = [
@@ -2528,6 +2544,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-product-agent-demo"
+version = "0.1.0"
+dependencies = [
+ "tela-agent-demo",
+ "tela-app-abi",
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-target-webview",
+ "tela-text-resources",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "tela-product-cc-guest"
 version = "0.1.0"
 dependencies = [
@@ -2584,6 +2613,17 @@ dependencies = [
  "tela-contract",
  "tela-icon-resources",
  "tela-speed-gear",
+ "tela-target-win32",
+ "tela-text-resources",
+]
+
+[[package]]
+name = "tela-product-win32-agent"
+version = "0.1.0"
+dependencies = [
+ "tela-agent-demo",
+ "tela-contract",
+ "tela-icon-resources",
  "tela-target-win32",
  "tela-text-resources",
 ]

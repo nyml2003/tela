@@ -2,6 +2,11 @@
 // 事件/status/frame 的二进制格式全部委托 Rust tela-target-webview。
 
 import type { TelaWebviewBindings, WebAppStatus } from './bindings';
+import type {
+  ApplicationDispatchResult,
+  ApplicationPublication,
+  TelaApplicationRuntime,
+} from './runtime-driver';
 
 const MAX_PACKET_BYTES = 64 * 1024 * 1024;
 const OUTCOME_OK = 1 << 31;
@@ -29,18 +34,11 @@ interface GuestExports {
   tela_app_bridge_dispatch?: GuestFunction;
 }
 
-export interface GuestPublication {
-  readonly framePacket: Uint8Array;
-  readonly status: WebAppStatus;
-}
-
-export interface GuestDispatchResult {
-  readonly handled: boolean;
-  readonly published: boolean;
-}
+export type GuestPublication = ApplicationPublication;
+export type GuestDispatchResult = ApplicationDispatchResult;
 
 /** A bounded, browser-native instance of the portable Tela application guest. */
-export class TelaGuestRuntime {
+export class TelaGuestRuntime implements TelaApplicationRuntime {
   private latest: GuestPublication | undefined;
   private pendingToken: bigint | undefined;
 
@@ -95,12 +93,14 @@ export class TelaGuestRuntime {
   }
 
   /** Acknowledges that the browser has actually presented the latest publication. */
-  acknowledgePresented(token: bigint): void {
+  acknowledgePresented(token: bigint): GuestDispatchResult {
     if (this.pendingToken !== token) {
       throw new Error(`应用呈现回执不是当前待确认发布: token=${token}`);
     }
-    this.requireTokenOutcome(this.exports.tela_app_presented, token, '呈现回执');
+    const outcome = this.requireTokenOutcome(this.exports.tela_app_presented, token, '呈现回执');
     this.pendingToken = undefined;
+    if (outcome.publishRequested) this.publish();
+    return { handled: outcome.handled, published: outcome.publishRequested };
   }
 
   /** Rejects the latest publication when the host cannot retain or retry it. */
@@ -110,6 +110,11 @@ export class TelaGuestRuntime {
     }
     this.requireTokenOutcome(this.exports.tela_app_rejected, token, '发布拒绝');
     this.pendingToken = undefined;
+  }
+
+  /** Releases a still-pending candidate when the browser session closes. */
+  close(): void {
+    if (this.pendingToken !== undefined) this.rejectPublication(this.pendingToken);
   }
 
   /** Whether the guest exposes the full bridge ABI (all four exports present). */
@@ -199,10 +204,14 @@ export class TelaGuestRuntime {
     };
   }
 
-  private requireTokenOutcome(call: GuestFunction, token: bigint, operation: string): void {
+  private requireTokenOutcome(
+    call: GuestFunction,
+    token: bigint,
+    operation: string,
+  ): { handled: boolean; publishRequested: boolean } {
     const low = Number(token & 0xffff_ffffn);
     const high = Number((token >> 32n) & 0xffff_ffffn);
-    this.requireOutcome(call(low, high), operation);
+    return this.requireOutcome(call(low, high), operation);
   }
 
   private guestError(): string {

@@ -14,19 +14,28 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
   const { fs, server, reporter, workspace } = deps;
   reporter.section('开发服务器（serve）');
   const hasBrowserPage = await fs.exists(`${workspace.distDir}/index.html`);
+  const hasAgentPage = await fs.exists(`${workspace.distDir}/agent.html`);
   const desktopBundle = workspace.bundle('desktop');
   const mobileBundle = workspace.bundle('mobile');
   const hasDesktopSdkBundle = await fs.exists(desktopBundle.indexPath());
   const hasMobileSdkBundle = await fs.exists(mobileBundle.indexPath());
   const hasWebviewShell = (await fs.exists(workspace.webviewHostGluePath()))
     && (await fs.exists(workspace.webviewHostWasmPath()));
-  if (!hasBrowserPage && !hasDesktopSdkBundle && !hasMobileSdkBundle) {
-    reporter.fail(`缺少 ${workspace.distDir}/index.html、${desktopBundle.indexPath()} 和 ${mobileBundle.indexPath()}`);
-    reporter.info('请先运行: ops build（浏览器）或 ops build bundle（原生 SDK）');
+  const hasAgentWasm = (await fs.exists(workspace.agentDemoGluePath()))
+    && (await fs.exists(workspace.agentDemoWasmPath()));
+  if (!hasBrowserPage && !hasAgentPage && !hasDesktopSdkBundle && !hasMobileSdkBundle) {
+    reporter.fail(`缺少 ${workspace.distDir}/index.html、${workspace.distDir}/agent.html、${desktopBundle.indexPath()} 和 ${mobileBundle.indexPath()}`);
+    reporter.info('请先运行: ops build agent-demo、ops build webview 或 ops build bundle');
     return undefined;
   }
   const result = await server.serve(workspace.distDir, preferredPort, (msg) => reporter.info(msg));
   reporter.ok(`监听 0.0.0.0:${result.port}`);
+  if (hasAgentPage && hasAgentWasm) {
+    reporter.info('Tela Agent Demo（静态单 Wasm）：');
+    reporter.info(`http://127.0.0.1:${result.port}/agent.html`);
+  } else if (hasAgentPage) {
+    reporter.warn('Agent 页面构建不完整：还需要 tela_agent_demo.js 与 Wasm；运行 ops build agent-demo。');
+  }
   if (hasBrowserPage && hasDesktopSdkBundle && hasWebviewShell) {
     reporter.info('可用页面（URL 单独一行，点击直达）：');
     reporter.info(`http://127.0.0.1:${result.port}/              （统一 bundle + WGPU WebView SDK）`);

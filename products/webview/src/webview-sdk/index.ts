@@ -4,10 +4,7 @@
 import { loadTelaWebviewBindings } from './bindings';
 import { loadDevelopmentBundle } from './bundle-loader';
 import { TelaGuestRuntime } from './guest-runtime';
-import { installInputBridge, type InputBridgeHandle } from './input-bridge';
-import { observeCanvasSurface, syncCanvasSurface, type CanvasSurfaceSize } from './surface';
-import { decodeRequestPacket, encodeResponseEvent } from './bridge-codec';
-import { handleBridgeRequest } from './bridge-providers';
+import { startTelaRuntime } from './runtime-driver';
 
 export interface StartTelaWebviewOptions {
   /** One focusable DOM canvas owned by the caller. */
@@ -36,158 +33,11 @@ export async function startTelaWebview(
   const bindings = await loadTelaWebviewBindings();
   const bundle = await loadDevelopmentBundle(bindings, bundleIndex);
   const guest = await TelaGuestRuntime.create(bindings, bundle.guestWasm);
-  const initialSurface = syncCanvasSurface(canvas);
-  let currentSurface = initialSurface;
-
-  let closed = false;
-  let input: InputBridgeHandle | undefined;
-  let stopSurfaceObservation: (() => void) | undefined;
-  let animationFrame: number | undefined;
-  let retryTimer: number | undefined;
-  let renderError: string | undefined;
-  let presentedFrameToken: bigint | undefined;
-
-  const scheduleRender = () => {
-    if (closed || animationFrame !== undefined) return;
-    animationFrame = requestAnimationFrame((timestamp) => {
-      animationFrame = undefined;
-      if (closed) return;
-      try {
-        if (guest.status().animation_active) {
-          dispatch(bindings.event_tick(BigInt(Math.floor(timestamp))), false);
-        }
-        const framePacket = guest.framePacket();
-        const frameToken = guest.status().frame_token;
-        if (!bindings.render_gpu(framePacket)) {
-          retryTimer ??= window.setTimeout(() => {
-            retryTimer = undefined;
-            scheduleRender();
-          }, 100);
-        } else {
-          if (frameToken !== undefined && frameToken !== presentedFrameToken) {
-            guest.acknowledgePresented(frameToken);
-          }
-          presentedFrameToken = frameToken;
-          renderError = undefined;
-          if (guest.status().animation_active) scheduleRender();
-        }
-      } catch (error) {
-        const message = `tela WebView WGPU render failed: ${String(error)}; ${bindings.gpu_diagnostics()}`;
-        if (message !== renderError) {
-          console.error(message);
-          renderError = message;
-        }
-      }
-    });
-  };
-  const dispatch = (packet: Uint8Array, synchronizeClock = true): boolean => {
-    if (closed) return false;
-    if (synchronizeClock) {
-      guest.dispatch(bindings.event_tick(BigInt(Math.floor(performance.now()))));
-    }
-    const outcome = guest.dispatch(packet);
-    processBridgeRequests();
-    input?.synchronize();
-    if (outcome.published) scheduleRender();
-    return outcome.handled;
-  };
-  /** 桥队列处理：读队列 → 逐个 provider → 回投；异步 provider 完成后再回投。 */
-  const processBridgeRequests = (): void => {
-    if (closed || !guest.bridgeAvailable()) return;
-    const raw = guest.bridgeReadRequests();
-    if (raw.byteLength === 0) return;
-    let offset = 0;
-    let handled = 0;
-    while (offset < raw.byteLength) {
-      let decoded;
-      try {
-        decoded = decodeRequestPacket(raw.subarray(offset));
-      } catch (error) {
-        console.error(`桥请求包解码失败: ${String(error)}`);
-        break;
-      }
-      const request = decoded.request;
-      offset += decoded.consumed;
-      const outcome = handleBridgeRequest(request);
-      if (outcome.immediate) {
-        guest.bridgeDeliver(
-          encodeResponseEvent(
-            request.request_id,
-            outcome.error
-              ? { kind: 'err', error: outcome.error }
-              : { kind: 'ok', payload: outcome.payload },
-          ),
-        );
-      } else {
-        outcome.promise
-          ?.then((result) => {
-            if (closed) return;
-            guest.bridgeDeliver(
-              encodeResponseEvent(
-                request.request_id,
-                result.error
-                  ? { kind: 'err', error: result.error }
-                  : { kind: 'ok', payload: result.payload },
-              ),
-            );
-            scheduleRender();
-          })
-          .catch((error: unknown) => {
-            console.error(`桥异步 provider 失败: ${String(error)}`);
-          });
-      }
-      handled++;
-    }
-    if (handled > 0) {
-      console.debug(`tela bridge: 处理 ${handled} 个请求`);
-    }
-  };
-  const dispatchViewport = (surface: CanvasSurfaceSize) => {
-    currentSurface = surface;
-    presentedFrameToken = undefined;
-    dispatch(bindings.event_viewport(surface.logicalWidth, surface.logicalHeight));
-  };
-
-  try {
-    await bindings.start_gpu(canvas);
-    guest.initialize();
-    dispatchViewport(initialSurface);
-    input = installInputBridge({
-      canvas,
-      bindings,
-      dispatch,
-      status: () => guest.status(),
-      presentedFrameToken: () => presentedFrameToken,
-      viewport: () => ({
-        width: currentSurface.logicalWidth,
-        height: currentSurface.logicalHeight,
-      }),
-    });
-    input.synchronize();
-    stopSurfaceObservation = observeCanvasSurface(canvas, dispatchViewport);
-    scheduleRender();
-  } catch (error) {
-    stopSurfaceObservation?.();
-    input?.close();
-    bindings.shutdown_gpu();
-    throw error;
-  }
+  const session = await startTelaRuntime({ canvas, bindings, runtime: guest });
 
   return {
     bundleId: bundle.bundleId,
-    replaceKeymap(snapshot: string | object): boolean {
-      const json = typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
-      return dispatch(bindings.event_replace_keymap_json(json));
-    },
-    close(): void {
-      if (closed) return;
-      closed = true;
-      if (animationFrame !== undefined) cancelAnimationFrame(animationFrame);
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      stopSurfaceObservation?.();
-      input?.close();
-      presentedFrameToken = undefined;
-      bindings.shutdown_gpu();
-    },
+    replaceKeymap: (snapshot) => session.replaceKeymap(snapshot),
+    close: () => session.close(),
   };
 }

@@ -61,8 +61,10 @@ export interface TelaWebviewBindings {
   gpu_diagnostics(): string;
 }
 
+type WasmInitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+
 interface WasmGlue extends TelaWebviewBindings {
-  default(input?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module): Promise<unknown>;
+  default(options?: { module_or_path?: WasmInitInput }): Promise<unknown>;
 }
 
 /**
@@ -80,6 +82,6 @@ export async function loadTelaWebviewBindings(): Promise<TelaWebviewBindings> {
   if (!response.ok) {
     throw new Error(`加载 WebView WGPU 壳失败: ${response.status} ${response.statusText}`);
   }
-  await glue.default(response);
+  await glue.default({ module_or_path: response });
   return glue;
 }

@@ -55,6 +55,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-core',
     'tela-ui-dsl',
   ],
+  'tela-agent-demo': [
+    'serde',
+    'serde_json',
+    'tela-app-runtime',
+    'tela-contract',
+    'tela-core',
+    'tela-ui-dsl',
+    'tela-ui-foundation',
+  ],
   'tela-bridge': ['postcard', 'serde', 'tela-utils'],
   'tela-bundle': ['hex', 'serde', 'serde_json', 'sha2', 'tela-app-abi', 'zip'],
   'tela-core': ['tela-contract'],
@@ -111,6 +120,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-icon-resources',
     'tela-text-resources',
   ],
+  'tela-product-agent-demo': [
+    'tela-agent-demo',
+    'tela-app-abi',
+    'tela-contract',
+    'tela-icon-resources',
+    'tela-target-webview',
+    'tela-text-resources',
+    'wasm-bindgen',
+  ],
   'tela-product-ios': [
     'tela-contract',
     'tela-icon-resources',
@@ -127,6 +145,13 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-target-win32',
     'tela-text-resources',
     'tela-win32-editor',
+  ],
+  'tela-product-win32-agent': [
+    'tela-agent-demo',
+    'tela-contract',
+    'tela-icon-resources',
+    'tela-target-win32',
+    'tela-text-resources',
   ],
   'tela-product-speed-gear': [
     'tela-app-runtime',
@@ -263,6 +288,11 @@ const ALLOWED_NORMAL: AllowedDeps = {
 
 /** 单元/像素测试可在边界外读取下层实现，但不能扩大生产依赖闭包。 */
 const ALLOWED_DEV: AllowedDeps = {
+  'tela-agent-demo': [
+    'tela-app-session',
+    'tela-icon-resources',
+    'tela-text-resources',
+  ],
   'tela-desktop-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-desktop-runtime': ['serde_json', 'tela-app-abi'],
   'tela-win32-editor': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
@@ -287,17 +317,20 @@ const TARGET_CRATES = new Set([
 ]);
 
 const APPLICATION_CRATES = new Set([
+  'tela-agent-demo',
   'tela-cc-remote',
   'tela-desktop-demo',
   'tela-mobile-demo',
   'tela-speed-gear',
 ]);
 const PRODUCT_CRATES = new Set([
+  'tela-product-agent-demo',
   'tela-product-cc-guest',
   'tela-product-desktop-guest',
   'tela-product-ios',
   'tela-product-mobile-guest',
   'tela-product-speed-gear',
+  'tela-product-win32-agent',
 ]);
 const DELIVERY_CRATES = new Set([
   'tela-app-abi',

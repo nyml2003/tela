@@ -14,6 +14,7 @@ pub struct Input {
     placeholder: String,
     semantic_key: Option<SemanticKey>,
     width: f32,
+    height: f32,
     disabled: bool,
     focused: bool,
     border_radius: f32,
@@ -33,6 +34,7 @@ impl Input {
             placeholder: String::new(),
             semantic_key: None,
             width: 180.0,
+            height: 28.0,
             disabled: false,
             focused: false,
             border_radius: 4.0,
@@ -60,6 +62,12 @@ impl Input {
     /// 设置输入框宽度。
     pub fn width(mut self, width: f32) -> Self {
         self.width = width.max(1.0);
+        self
+    }
+
+    /// 设置输入框高度。
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = height.max(1.0);
         self
     }
 
@@ -91,14 +99,14 @@ impl Input {
         let mut node: UiNode = field_box(
             vec![shown],
             self.width,
-            28.0,
+            self.height,
             self.disabled,
             self.focused,
             self.border_radius,
         )
         .layout(LayoutConcern {
             width: Some(tela_contract::Size::fixed(self.width)),
-            height: Some(tela_contract::Size::fixed(28.0)),
+            height: Some(tela_contract::Size::fixed(self.height)),
             cross_align: tela_contract::CrossAlign::Center,
             ..LayoutConcern::default()
         })
@@ -320,6 +328,16 @@ mod tests {
         assert_eq!(
             number.visual.as_ref().map(|visual| visual.border_radius),
             Some(BorderRadius::all(9.0))
+        );
+    }
+
+    #[test]
+    fn input_accepts_a_larger_touch_target_height() {
+        let input = Input::new().height(44.0).into_node();
+
+        assert_eq!(
+            input.layout.as_ref().and_then(|layout| layout.height),
+            Some(tela_contract::Size::fixed(44.0))
         );
     }
 }
