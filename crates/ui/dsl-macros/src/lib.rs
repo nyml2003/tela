@@ -25,7 +25,7 @@ mod derive;
 ///
 /// The public spelling is `ui!(build { ... })`.
 /// 派生 `DslComponent`：struct 字段即 Props，生成 Props 镜像与 render 脚手架。
-#[proc_macro_derive(DslComponent, attributes(prop, inject, provide, watch))]
+#[proc_macro_derive(DslComponent, attributes(prop, inject, provide, watch, memo))]
 pub fn dsl_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
     match derive::expand_derive(input) {
@@ -398,6 +398,16 @@ fn generate_component(
             // 字符串字面量（&str）经 Into<String> 转换。
             quote!(__tela_dsl_props.#name = Some((#value).into());)
         });
+    // 无 child 内容的组件元素使用 `Children::empty()` 标记：
+    // `#[memo]` 记忆化以"内容为空"作为可缓存的前置条件。
+    let children_expr = if element.children.is_empty() {
+        quote!(#dsl::Children::empty())
+    } else {
+        quote!(#dsl::Children::new(|#build| {
+            let _ = &mut *#build;
+            #body
+        }))
+    };
     let render = if let Some(attribute) = output {
         let output = &attribute.value;
         quote! {
@@ -406,10 +416,7 @@ fn generate_component(
                 #dsl::render_component_with_output::<#tag, _>(
                     build,
                     __tela_dsl_props,
-                    #dsl::Children::new(|#build| {
-                        let _ = &mut *#build;
-                        #body
-                    }),
+                    #children_expr,
                     __tela_dsl_output,
                     #dsl::ViewSite::new(file!(), line!(), column!())
                 )
@@ -420,10 +427,7 @@ fn generate_component(
             #dsl::render_component::<#tag, _>(
                 build,
                 __tela_dsl_props,
-                #dsl::Children::new(|#build| {
-                    let _ = &mut *#build;
-                    #body
-                }),
+                #children_expr,
                 #dsl::ViewSite::new(file!(), line!(), column!())
             )
         }

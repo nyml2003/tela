@@ -72,22 +72,18 @@ impl<T> Signal<T> {
         read(&value)
     }
 
-    /// 返回写入版本；每次 `set` 或 `update` 后递增。
+    /// 返回写入版本；每次生效写入（`set`/`update` 值变化，或 `set_forced`）后递增。
     pub fn version(&self) -> u64 {
         self.inner.version.get()
     }
 
-    /// 写入新值并通知显式订阅者。
-    pub fn set(&self, value: T) {
+    /// 无条件写入新值并通知显式订阅者。
+    ///
+    /// `T` 未实现 `PartialEq`，或值相等但语义上仍是新事件（如重新触发动画）时使用；
+    /// 其余场景应使用会短路相同值的 [`Signal::set`]。
+    pub fn set_forced(&self, value: T) {
         *self.inner.value.borrow_mut() = value;
         self.notify();
-    }
-
-    /// 原地更新值并通知显式订阅者，返回更新闭包的结果。
-    pub fn update<R>(&self, update: impl FnOnce(&mut T) -> R) -> R {
-        let result = update(&mut self.inner.value.borrow_mut());
-        self.notify();
-        result
     }
 
     /// 注册一个变更监听器；令牌 drop 后自动取消监听。
@@ -95,7 +91,10 @@ impl<T> Signal<T> {
         self.subscribe_listener(Rc::new(listener))
     }
 
-    pub(crate) fn id(&self) -> SignalId {
+    /// 返回内部订阅身份；clone 共享同一 id。
+    ///
+    /// 供 `#[memo]` 组件指纹比较"是否同一个 Signal"，不代表跨线程或序列化语义。
+    pub fn id(&self) -> SignalId {
         self.inner.id
     }
 
@@ -142,6 +141,37 @@ impl<T> Signal<T> {
         for listener in listeners {
             listener();
         }
+    }
+}
+
+impl<T: PartialEq> Signal<T> {
+    /// 写入新值并通知显式订阅者。
+    ///
+    /// 与当前值相等时跳过写入、版本递增与通知——相同值写入不再触发帧重建。
+    pub fn set(&self, value: T) {
+        {
+            let current = self.inner.value.borrow();
+            if *current == value {
+                return;
+            }
+        }
+        *self.inner.value.borrow_mut() = value;
+        self.notify();
+    }
+}
+
+impl<T: Clone + PartialEq> Signal<T> {
+    /// 原地更新值并通知显式订阅者，返回更新闭包的结果。
+    ///
+    /// 更新闭包总是会执行；更新后与旧值相等时跳过通知与版本递增。
+    pub fn update<R>(&self, update: impl FnOnce(&mut T) -> R) -> R {
+        let previous = self.with(Clone::clone);
+        let result = update(&mut self.inner.value.borrow_mut());
+        if *self.inner.value.borrow() == previous {
+            return result;
+        }
+        self.notify();
+        result
     }
 }
 
@@ -205,5 +235,30 @@ mod tests {
         let second = Signal::new(2_u32);
         assert_eq!(first.id(), first.clone().id());
         assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn set_same_value_does_not_notify_or_bump_version() {
+        let signal = Signal::new(7_u32);
+        let notifications = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&notifications);
+        let _subscription = signal.subscribe(move || observed.set(observed.get() + 1));
+
+        signal.set(7);
+        assert_eq!(signal.version(), 0);
+        assert_eq!(notifications.get(), 0);
+
+        signal.update(|value| *value += 0);
+        assert_eq!(signal.version(), 0);
+        assert_eq!(notifications.get(), 0);
+
+        signal.set_forced(7);
+        assert_eq!(signal.version(), 1);
+        assert_eq!(notifications.get(), 1);
+
+        signal.set(8);
+        assert_eq!(signal.version(), 2);
+        assert_eq!(signal.get(), 8);
+        assert_eq!(notifications.get(), 2);
     }
 }

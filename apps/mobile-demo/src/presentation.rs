@@ -55,9 +55,9 @@ pub struct MobileViewProps<'a> {
     /// Exclusion area reserved by the target's system bars and gesture affordances.
     pub safe_area: Insets,
     /// Current browse results when not previewing.
-    pub entries: Vec<&'a Entry>,
+    pub entries: Vec<Entry>,
     /// Selected preview entry, if the screen is a preview route.
-    pub preview: Option<&'a Entry>,
+    pub preview: Option<Entry>,
     /// 图标由产品装配注入；移动业务视图不选择具体图标集。
     pub icons: &'a dyn IconProvider,
 }
@@ -128,6 +128,7 @@ pub(crate) fn render_preview_dsl(
     let preview = ViewOutput::opaque(preview(
         props
             .preview
+            .as_ref()
             .expect("preview DSL route requires a preview entry"),
         content_width,
         content_height,

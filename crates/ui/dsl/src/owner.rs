@@ -373,6 +373,15 @@ impl ComponentOwnerFrame {
     ) -> ComponentState<T> {
         self.state(identity, initial)
     }
+
+    /// 把一个被记忆化跳过的子树身份补进本帧 `seen`。
+    ///
+    /// `#[memo]` 命中时组件子树不会重新走 `state()`，没有该补登记，`commit` 的
+    /// 存在性回收会把它们误判为 Unmounted 并丢掉 State。states map 在候选开始时
+    /// 已从 active 浅复制，这里只需补 `seen`。
+    pub(crate) fn retain_subtree(&mut self, subtree: &BTreeSet<ComponentIdentity>) {
+        self.seen.extend(subtree.iter().cloned());
+    }
 }
 
 fn initial_from_active_or_initial<T: Clone + 'static>(

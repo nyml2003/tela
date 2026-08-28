@@ -241,6 +241,8 @@ pub(crate) struct ResolvedWatch {
 pub(crate) trait WatchSource {
     fn signal_id(&self) -> SignalId;
     fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any>;
+    /// 克隆来源，供 `#[memo]` 组件的 render 输出缓存重新声明订阅。
+    fn clone_box(&self) -> Box<dyn WatchSource>;
 }
 
 pub(crate) struct SignalWatch<T> {
@@ -262,6 +264,12 @@ impl<T: 'static> WatchSource for SignalWatch<T> {
 
     fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any> {
         self.signal.subscribe_erased(callback)
+    }
+
+    fn clone_box(&self) -> Box<dyn WatchSource> {
+        Box::new(Self {
+            signal: self.signal.clone(),
+        })
     }
 }
 

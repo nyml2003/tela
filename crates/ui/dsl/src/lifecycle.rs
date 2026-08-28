@@ -115,14 +115,22 @@ where
 {
     let key = C::identity_key(&props);
     let identity = build.component_identity(std::any::type_name::<C>(), site, key);
+    let memo_active = build.memo_enabled();
+    if memo_active {
+        build.memo_component_started(identity.clone());
+    }
     let setup_scope = build.current_scope();
     let state: ComponentState<C::State> = build.local_state_for(identity.clone(), || {
         C::setup(&ComponentSetupContext::new(setup_scope), &props)
     });
-    let output = build.with_component_identity(&identity, |build| {
+    let rendered = build.with_component_identity(&identity, |build| {
         let mut context = ComponentRenderContext::new(build, site, identity.clone());
         C::render(&mut context, props, &state.get(), children)
-    })?;
+    });
+    if memo_active {
+        build.memo_component_finished();
+    }
+    let output = rendered?;
     // A component may intentionally return an opaque or kit-provided node. The owner frame is
     // still part of the component's render result; otherwise state materialized by setup/render
     // is dropped before FrameCoordinator can commit it and later input cannot dispatch.

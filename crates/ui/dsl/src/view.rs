@@ -415,10 +415,23 @@ fn item_key_segment<T: ItemKey + ?Sized>(value: &T) -> KeySegment {
     KeySegment::new(value.encode_item_key())
 }
 
-struct PendingWatch {
+pub(crate) struct PendingWatch {
     anchor: NodeAnchor,
     source: Box<dyn WatchSource>,
     site: ViewSite,
+    /// 创建该 watch 时最内层组件的 scope 段；`#[memo]` 记忆化用它关联组件与解析 key。
+    scope: String,
+}
+
+impl Clone for PendingWatch {
+    fn clone(&self) -> Self {
+        Self {
+            anchor: self.anchor.clone(),
+            source: self.source.clone_box(),
+            site: self.site,
+            scope: self.scope.clone(),
+        }
+    }
 }
 
 impl PendingWatch {
@@ -432,6 +445,17 @@ impl PendingWatch {
 pub struct WatchHandle {
     source: Box<dyn WatchSource>,
     site: ViewSite,
+    scope: String,
+}
+
+impl Clone for WatchHandle {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone_box(),
+            site: self.site,
+            scope: self.scope.clone(),
+        }
+    }
 }
 
 /// 一个未写入 Kernel 的动作 target 描述。
@@ -609,6 +633,7 @@ impl<A> ViewNode<A> {
                 anchor: NodeAnchor::root(),
                 source: watch.source,
                 site: watch.site,
+                scope: watch.scope,
             }));
         self
     }
@@ -774,11 +799,25 @@ impl<'a, A> Children<'a, A> {
         }
     }
 
+    /// 创建没有 child 内容的空 children 标记。
+    ///
+    /// 宏对无子元素的自闭合组件使用该变体；`#[memo]` 记忆化以"内容为空"作为
+    /// 可缓存的前置条件之一（子内容含闭包与动作，v1 不参与结构比较）。
+    pub fn empty() -> Self {
+        Self { build: None }
+    }
+
+    /// 是否为无内容的空 children 标记。
+    pub fn is_empty(&self) -> bool {
+        self.build.is_none()
+    }
+
     /// 在当前父作用域中展开 children。
     pub fn build(mut self, build: &mut ViewBuild<A>) -> ViewResult<Body<A>> {
-        self.build
-            .take()
-            .expect("DSL children can only be expanded once")(build)
+        match self.build.take() {
+            Some(builder) => builder(build),
+            None => Ok(Body::new(Vec::new(), Vec::new())),
+        }
     }
 }
 
@@ -823,15 +862,20 @@ impl<A> PlanBundle<A> {
         let resolver = AnchorResolver::new(tree);
         self.validate(&resolver, tree)?;
 
+        let mut watch_scopes = Vec::new();
         let watches = self
             .watches
             .into_iter()
-            .map(|watch| ResolvedWatch {
-                key: resolver
+            .map(|watch| {
+                let key = resolver
                     .resolve(&watch.anchor)
                     .expect("validated watch anchor")
-                    .clone(),
-                source: watch.source,
+                    .clone();
+                watch_scopes.push((watch.scope, key.clone()));
+                ResolvedWatch {
+                    key,
+                    source: watch.source,
+                }
             })
             .collect();
         let actions = self
@@ -848,6 +892,7 @@ impl<A> PlanBundle<A> {
 
         Ok(ResolvedPlans {
             watches,
+            watch_scopes,
             actions,
             component_actions: self.component_actions,
         })
@@ -951,6 +996,7 @@ impl<A> ViewOutput<A> {
                 anchor: NodeAnchor::root(),
                 source: watch.source,
                 site: watch.site,
+                scope: watch.scope,
             }));
         self
     }
@@ -1049,6 +1095,9 @@ impl<A> From<UiNode> for ViewOutput<A> {
 /// runtime 的订阅或动作表。
 pub(crate) struct ResolvedPlans<A> {
     pub(crate) watches: Vec<ResolvedWatch>,
+    /// 每个声明 watch 的组件 scope 段与其解析 key 的配对；
+    /// `#[memo]` 记忆化用它判定"该组件订阅的 key 本帧是否被标脏"。
+    pub(crate) watch_scopes: Vec<(String, SemanticKey)>,
     pub(crate) actions: Vec<crate::action::ResolvedAction<A>>,
     pub(crate) component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
 }
@@ -1104,6 +1153,13 @@ where
     child.into_view_child()
 }
 
+/// `#[memo]` 记忆化在本帧的判定上下文。
+pub(crate) struct MemoFrameCtx {
+    candidate: Rc<RefCell<crate::memo::MemoCandidate>>,
+    dirty: BTreeSet<SemanticKey>,
+    watch_keys: crate::memo::WatchKeysByScope,
+}
+
 /// 一次 `ui!(build)` 调用的 Application 构建上下文。
 pub struct ViewBuild<A> {
     scope: Arc<ViewContext>,
@@ -1111,6 +1167,9 @@ pub struct ViewBuild<A> {
     pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
     animation_clock: AnimationClock,
     animation_schedule: AnimationSchedule,
+    memo: Option<MemoFrameCtx>,
+    /// 记忆化启用时的组件身份收集栈：每帧一个集合，弹栈时并入父集合。
+    memo_identities: Vec<BTreeSet<ComponentIdentity>>,
     marker: std::marker::PhantomData<A>,
 }
 
@@ -1129,6 +1188,8 @@ impl<A> ViewBuild<A> {
             owner_frame: None,
             animation_clock: AnimationClock::default(),
             animation_schedule: AnimationSchedule::default(),
+            memo: None,
+            memo_identities: Vec::new(),
             marker: std::marker::PhantomData,
         }
     }
@@ -1158,6 +1219,126 @@ impl<A> ViewBuild<A> {
     ) -> Self {
         self.owner_frame = Some(owner_frame);
         self
+    }
+
+    /// 绑定本帧的记忆化上下文（由 `FrameCoordinator::begin_build_for_frame` 调用）。
+    pub(crate) fn with_memo(
+        mut self,
+        candidate: Rc<RefCell<crate::memo::MemoCandidate>>,
+        dirty: BTreeSet<SemanticKey>,
+        watch_keys: crate::memo::WatchKeysByScope,
+    ) -> Self {
+        self.memo = Some(MemoFrameCtx {
+            candidate,
+            dirty,
+            watch_keys,
+        });
+        self
+    }
+
+    /// 本帧是否启用了 `#[memo]` 记忆化（signal 驱动帧且宿主声明了 dirty 集）。
+    #[doc(hidden)]
+    pub fn memo_enabled(&self) -> bool {
+        self.memo.is_some()
+    }
+
+    /// 尝试命中当前组件的 render 记忆。
+    ///
+    /// 命中条件：候选条目存在、指纹相等、缓存子树内任何组件订阅的 key 都不在本帧
+    /// dirty 集（嵌套子组件的 signal 变化必须让父级缓存失效，否则会拼回陈旧子树）。
+    /// 命中时补登记 owner `seen`、标记候选条目为 seen、把缓存子树身份并入当前收集帧，
+    /// 并重新声明缓存输出（节点 + watch 计划，供 reconcile 复用订阅）。
+    #[doc(hidden)]
+    pub fn memo_hit<F: PartialEq + 'static>(&mut self, fingerprint: &F) -> Option<ViewOutput<A>> {
+        let scope = self.component_identity_scopes.last().cloned()?;
+        let matched: Option<(Rc<crate::memo::MemoEntry>, bool)> = {
+            let memo = self.memo.as_ref()?;
+            let entry = Rc::clone(memo.candidate.borrow().entries.get(&scope)?);
+            let dirty_subtree = entry.watches.iter().any(|watch| {
+                memo.watch_keys
+                    .get(&watch.scope)
+                    .is_some_and(|keys| keys.iter().any(|key| memo.dirty.contains(key)))
+            });
+            Some((entry, dirty_subtree))
+        };
+        let (entry, dirty_subtree) = matched?;
+        if dirty_subtree {
+            return None;
+        }
+        if entry.fingerprint.downcast_ref::<F>() != Some(fingerprint) {
+            return None;
+        }
+        if let Some(owner) = self.owner_frame.as_ref() {
+            owner.borrow_mut().retain_subtree(&entry.subtree);
+        }
+        {
+            let mut candidate = self.memo.as_ref()?.candidate.borrow_mut();
+            candidate.seen.insert(scope);
+            for identity in &entry.subtree {
+                candidate.seen.insert(identity.scope_segment());
+            }
+        }
+        if let Some(frame) = self.memo_identities.last_mut() {
+            frame.extend(entry.subtree.iter().cloned());
+        }
+        Some(ViewOutput {
+            node: entry.node.clone(),
+            plans: PlanBundle {
+                watches: entry.watches.clone(),
+                actions: Vec::new(),
+                component_actions: Vec::new(),
+            },
+            owner_frame: None,
+            animation_schedule: AnimationSchedule::default(),
+        })
+    }
+
+    /// 记录当前组件的一次 render 输出，供后续帧命中。
+    ///
+    /// v1 只缓存纯 watch 输出：动作 / 组件动作 / 动画调度请求不参与
+    /// （动作载荷没有 `PartialEq` 保证，动画依赖时钟推进）。
+    #[doc(hidden)]
+    pub fn memo_record<F: 'static>(&mut self, fingerprint: F, output: &ViewOutput<A>) {
+        let Some(memo) = self.memo.as_ref() else {
+            return;
+        };
+        let Some(scope) = self.component_identity_scopes.last().cloned() else {
+            return;
+        };
+        if !output.plans.actions.is_empty()
+            || !output.plans.component_actions.is_empty()
+            || output.animation_schedule != AnimationSchedule::default()
+        {
+            return;
+        }
+        let subtree = self
+            .memo_identities
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let entry = Rc::new(crate::memo::MemoEntry {
+            fingerprint: Rc::new(fingerprint),
+            node: output.node.clone(),
+            watches: output.plans.watches.clone(),
+            subtree,
+        });
+        let mut candidate = memo.candidate.borrow_mut();
+        candidate.entries.insert(scope.clone(), entry);
+        candidate.seen.insert(scope);
+    }
+
+    /// 记忆化帧内一个组件开始 render：压入新的身份收集帧。
+    pub(crate) fn memo_component_started(&mut self, identity: ComponentIdentity) {
+        self.memo_identities.push(BTreeSet::from([identity]));
+    }
+
+    /// 一个组件结束 render：弹出身份收集帧并并入父帧。
+    pub(crate) fn memo_component_finished(&mut self) {
+        if let (Some(collected), Some(parent)) =
+            (self.memo_identities.pop(), self.memo_identities.last_mut())
+        {
+            parent.extend(collected);
+        }
     }
 
     pub(crate) fn local_state_for<T: Clone + 'static>(
@@ -1243,6 +1424,11 @@ impl<A> ViewBuild<A> {
         WatchHandle {
             source: Box::new(SignalWatch::new(signal)),
             site,
+            scope: self
+                .component_identity_scopes
+                .last()
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 

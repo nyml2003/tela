@@ -877,7 +877,7 @@ fn action_target_requires_exactly_one_real_child() {
 
 #[test]
 fn duplicate_action_targets_for_one_real_root_are_rejected() {
-    let coordinator = FrameCoordinator::new();
+    let mut coordinator = FrameCoordinator::new();
     let mut build = coordinator.begin_build();
     let root = render_duplicate_action_target(&mut build).expect("lowered duplicate target");
 

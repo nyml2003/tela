@@ -18,6 +18,7 @@ mod context;
 mod frame;
 mod interaction;
 mod lifecycle;
+mod memo;
 mod owner;
 mod runtime;
 mod signal;

@@ -10,16 +10,18 @@
 
 use std::{
     cell::Cell,
+    collections::BTreeSet,
     env,
     hint::black_box,
     rc::Rc,
     time::{Duration, Instant},
 };
 
-use tela_contract::{UiFrame, Viewport};
+use tela_contract::{SemanticKey, UiFrame, Viewport};
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{
-    FrameCoordinator, FrameInvalidator, Signal, ViewBuild, ViewOutput, ViewResult, ui,
+    Body, DslComponent, FrameCoordinator, FrameInvalidator, Signal, ViewBuild, ViewOutput,
+    ViewResult, ui,
 };
 
 #[allow(dead_code)]
@@ -29,6 +31,53 @@ struct BenchmarkAction;
 struct BenchmarkItem {
     id: u32,
     label: String,
+}
+
+/// 记忆化基准行：每行订阅自己的 signal。
+struct BenchmarkRow {
+    id: u32,
+    label: String,
+    value: Signal<u32>,
+}
+
+thread_local! {
+    static ROW_RENDERS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// `#[memo]` 行组件：signal 与 props 未变时跳过 render。
+#[derive(DslComponent)]
+#[memo]
+struct WatchedRow {
+    #[watch]
+    value: Signal<u32>,
+    label: String,
+}
+
+impl WatchedRow {
+    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
+        ROW_RENDERS.with(|count| count.set(count.get() + 1));
+        ui!(build {
+            <Frame>
+                <Text value={format!("{}={}", self.label, self.value.get())} />
+            </Frame>
+        })
+    }
+}
+
+/// 根订阅 version signal 的组件：使 `version.set` 标脏根 key 并唤醒宿主
+/// （`Signal` 不隐式追踪读取，订阅必须显式声明）。
+#[derive(DslComponent)]
+struct WatchedVersion {
+    #[watch]
+    version: Signal<u64>,
+}
+
+impl WatchedVersion {
+    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
+        ui!(build {
+            <Text value={format!("version={}", self.version.get())} />
+        })
+    }
 }
 
 struct CountingInvalidator {
@@ -48,11 +97,30 @@ fn render(
 ) -> ViewResult<ViewOutput<BenchmarkAction>> {
     ui!(build {
         <Column>
-            <Text value={format!("version={}", version.get())} />
+            <WatchedVersion version={version.clone()} />
             <For each={items} key={item.id}>
                 {|item|
                     <Frame>
                         <Text value={item.label.clone()} />
+                    </Frame>
+                }
+            </For>
+        </Column>
+    })
+}
+
+fn render_memoized(
+    build: &mut ViewBuild<BenchmarkAction>,
+    version: &Signal<u64>,
+    rows: &[BenchmarkRow],
+) -> ViewResult<ViewOutput<BenchmarkAction>> {
+    ui!(build {
+        <Column>
+            <WatchedVersion version={version.clone()} />
+            <For each={rows} key={row.id}>
+                {|row|
+                    <Frame>
+                        <WatchedRow value={row.value.clone()} label={row.label.clone()} />
                     </Frame>
                 }
             </For>
@@ -73,6 +141,26 @@ fn empty_frame() -> UiFrame {
 }
 
 fn publish(coordinator: &mut FrameCoordinator<BenchmarkAction>, root: ViewOutput<BenchmarkAction>) {
+    let prepared = coordinator
+        .prepare(root)
+        .expect("benchmark tree must be valid");
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("benchmark resolve must be infallible");
+    coordinator.commit(resolved);
+}
+
+/// 记忆化路径：以本帧 dirty 集构建、准备并提交；`memo_enabled` 控制是否启用缓存。
+fn publish_memoized(
+    coordinator: &mut FrameCoordinator<BenchmarkAction>,
+    dirty: BTreeSet<SemanticKey>,
+    memo_enabled: bool,
+    version: &Signal<u64>,
+    rows: &[BenchmarkRow],
+) {
+    let mut build = coordinator.begin_build_for_frame(dirty, memo_enabled);
+    let root = render_memoized(&mut build, version, rows).expect("memoized benchmark view");
+    drop(build);
     let prepared = coordinator
         .prepare(root)
         .expect("benchmark tree must be valid");
@@ -164,6 +252,104 @@ fn main() {
         u64::try_from(iterations).expect("iteration count must fit u64"),
         "one Signal update should request one Host frame",
     );
+
+    // 相同值写入被相等性短路：不标脏、不唤醒宿主。
+    let requests_before_noop = invalidator.requests.get();
+    for _ in 0..iterations {
+        version.set(u64::try_from(iterations).expect("iteration must fit u64"));
+    }
+    assert_eq!(
+        invalidator.requests.get(),
+        requests_before_noop,
+        "same-value writes must be short-circuited",
+    );
+
+    // 组件路径对照：同样的 WatchedRow 树，但每帧关闭记忆化（全部行重渲染）。
+    let rows = (0..nodes)
+        .map(|id| BenchmarkRow {
+            id: u32::try_from(id).expect("node count must fit the DSL demo item id"),
+            label: format!("item-{id}"),
+            value: Signal::new(0_u32),
+        })
+        .collect::<Vec<_>>();
+    let mut component_coordinator = FrameCoordinator::new();
+    publish_memoized(
+        &mut component_coordinator,
+        BTreeSet::new(),
+        false,
+        &version,
+        &rows,
+    );
+    let mut component_cost = Duration::ZERO;
+    for iteration in 1..=iterations {
+        let touched = rows
+            .get(iteration % rows.len())
+            .expect("row index must exist");
+        touched.value.set(u32::try_from(iteration).expect("iteration must fit u32"));
+        component_coordinator.runtime().begin_frame();
+        let dirty = component_coordinator.runtime().take_dirty();
+        assert_eq!(dirty.len(), 1, "one watched row should become dirty");
+
+        let component_started = Instant::now();
+        publish_memoized(
+            &mut component_coordinator,
+            dirty,
+            false,
+            &version,
+            &rows,
+        );
+        component_cost += component_started.elapsed();
+        black_box(
+            component_coordinator
+                .active()
+                .expect("published frame")
+                .tree()
+                .keys()
+                .len(),
+        );
+    }
+
+    // 记忆化路径：每行一个 #[memo] 组件订阅自己的 signal；每次只改一行，
+    // 其余行命中缓存跳过 render。
+    let mut memo_coordinator = FrameCoordinator::new();
+    publish_memoized(
+        &mut memo_coordinator,
+        BTreeSet::new(),
+        true,
+        &version,
+        &rows,
+    );
+    let mut memoized_cost = Duration::ZERO;
+    ROW_RENDERS.with(|count| count.set(0));
+    for iteration in 1..=iterations {
+        let touched = rows
+            .get(iteration % rows.len())
+            .expect("row index must exist");
+        // 偏移取值：避免与对照循环相同，否则被 Signal 相等性短路。
+        let fresh = u32::try_from(iterations + iteration).expect("iteration must fit u32");
+        touched.value.set(fresh);
+        memo_coordinator.runtime().begin_frame();
+        let dirty = memo_coordinator.runtime().take_dirty();
+        assert_eq!(dirty.len(), 1, "one watched row should become dirty");
+
+        let memoized_started = Instant::now();
+        publish_memoized(&mut memo_coordinator, dirty, true, &version, &rows);
+        memoized_cost += memoized_started.elapsed();
+        black_box(
+            memo_coordinator
+                .active()
+                .expect("published frame")
+                .tree()
+                .keys()
+                .len(),
+        );
+    }
+    let row_renders = ROW_RENDERS.with(Cell::get);
+    assert_eq!(
+        row_renders, iterations,
+        "memoized frames must re-render only the touched row",
+    );
+
     println!("nodes={nodes} iterations={iterations}");
     println!(
         "dirty_and_schedule_us_per_iteration={:.3}",
@@ -172,5 +358,13 @@ fn main() {
     println!(
         "build_prepare_reconcile_commit_us_per_iteration={:.3}",
         duration_per_iteration(rebuild_cost, iterations)
+    );
+    println!(
+        "component_rebuild_us_per_iteration={:.3}",
+        duration_per_iteration(component_cost, iterations)
+    );
+    println!(
+        "memoized_rebuild_us_per_iteration={:.3}",
+        duration_per_iteration(memoized_cost, iterations)
     );
 }

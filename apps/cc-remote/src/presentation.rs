@@ -15,10 +15,10 @@ use tela_mobile_ui_kit::{
     MobileLayout, MobileSearchField, MobileSurfaceStyle,
 };
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{Body, DslComponent, Signal, ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::Icon;
 
-use crate::application::{CcAction, Route};
+use crate::application::CcAction;
 use crate::domain::Session;
 
 const APP_BAR_H: f32 = 64.0;
@@ -60,6 +60,8 @@ pub struct ChatProps<'a> {
     pub title: &'a str,
     pub can_go_back: bool,
     pub draft: &'a str,
+    /// 草稿 signal：输入条组件订阅它，打字由订阅标脏驱动帧重建。
+    pub draft_signal: Signal<String>,
     pub draft_focused: bool,
     pub rows: Vec<ChatRow>,
     pub permission: Option<PermissionCardView>,
@@ -105,7 +107,6 @@ pub struct PermissionCardView {
 pub(crate) fn render_sessions_dsl(
     build: &mut ViewBuild<CcAction>,
     props: SessionsProps<'_>,
-    _route_signal: &Signal<Route>,
 ) -> ViewResult<ViewOutput<CcAction>> {
     let layout = MobileLayout::with_chrome(props.viewport, props.safe_area, APP_BAR_H, 0.0);
     let content_width = layout.content_width();
@@ -148,8 +149,6 @@ pub(crate) fn render_sessions_dsl(
 pub(crate) fn render_chat_dsl(
     build: &mut ViewBuild<CcAction>,
     props: ChatProps<'_>,
-    _route_signal: &Signal<Route>,
-    _draft_signal: &Signal<String>,
 ) -> ViewResult<ViewOutput<CcAction>> {
     let layout = MobileLayout::with_chrome(props.viewport, props.safe_area, APP_BAR_H, INPUT_BAR_H);
     let content_width = layout.content_width();
@@ -455,55 +454,74 @@ fn chat_rows_dsl(
     Ok(ViewOutput::opaque(list))
 }
 
+/// 受控草稿输入框：订阅草稿 signal，打字由订阅标脏驱动重建。
+///
+/// 节点本体不携带动作，动作路由由外层 `ActionTarget` 提供。
+#[derive(DslComponent)]
+struct DraftField {
+    #[watch]
+    draft: Signal<String>,
+    width: f32,
+    focused: bool,
+}
+
+impl DraftField {
+    fn view<A>(
+        &self,
+        _build: &mut ViewBuild<A>,
+        _children: Body<A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let draft = self.draft.get();
+        let label = if draft.is_empty() {
+            "给 Claude Code 发消息…"
+        } else {
+            draft.as_str()
+        };
+        let color = if draft.is_empty() { SECONDARY } else { TEXT };
+        let inner: UiNode = LayoutContainer::row([text(label, 16.0, color)])
+            .layout(LayoutConcern {
+                gap: 12.0,
+                cross_align: tela_contract::CrossAlign::Center,
+                ..LayoutConcern::default()
+            })
+            .into();
+
+        Ok(ViewOutput::opaque(
+            MobileSearchField::new(inner, "cc.draft")
+                .value(&draft)
+                .width(self.width)
+                .height(FIELD_H)
+                .padding(Insets {
+                    top: 0.0,
+                    right: 16.0,
+                    bottom: 0.0,
+                    left: 16.0,
+                })
+                .surfaces(
+                    MobileSurfaceStyle {
+                        fill: MUTED_SURFACE,
+                        border_color: Some(BORDER),
+                        border_width: 1.0,
+                        border_radius: BorderRadius::all(8.0),
+                    },
+                    MobileSurfaceStyle {
+                        fill: SURFACE,
+                        border_color: Some(PRIMARY),
+                        border_width: 2.0,
+                        border_radius: BorderRadius::all(8.0),
+                    },
+                )
+                .focused(self.focused)
+                .into_node(),
+        ))
+    }
+}
+
 fn chat_input_bar_dsl(
     build: &mut ViewBuild<CcAction>,
     props: &ChatProps<'_>,
     width: f32,
 ) -> ViewResult<ViewOutput<CcAction>> {
-    let label = if props.draft.is_empty() {
-        "给 Claude Code 发消息…"
-    } else {
-        props.draft
-    };
-    let color = if props.draft.is_empty() {
-        SECONDARY
-    } else {
-        TEXT
-    };
-    let inner: UiNode = LayoutContainer::row([text(label, 16.0, color)])
-        .layout(LayoutConcern {
-            gap: 12.0,
-            cross_align: tela_contract::CrossAlign::Center,
-            ..LayoutConcern::default()
-        })
-        .into();
-    let field = MobileSearchField::new(inner, "cc.draft")
-        .value(props.draft)
-        .width((width - CONTENT_INSET * 2.0 - 96.0).max(1.0))
-        .height(FIELD_H)
-        .padding(Insets {
-            top: 0.0,
-            right: 16.0,
-            bottom: 0.0,
-            left: 16.0,
-        })
-        .surfaces(
-            MobileSurfaceStyle {
-                fill: MUTED_SURFACE,
-                border_color: Some(BORDER),
-                border_width: 1.0,
-                border_radius: BorderRadius::all(8.0),
-            },
-            MobileSurfaceStyle {
-                fill: SURFACE,
-                border_color: Some(PRIMARY),
-                border_width: 2.0,
-                border_radius: BorderRadius::all(8.0),
-            },
-        )
-        .focused(props.draft_focused)
-        .into_node();
-
     ui!(build {
         <Frame
             width={width}
@@ -524,7 +542,11 @@ fn chat_input_bar_dsl(
                     on_submit={CcAction::SubmitDraft}
                     on_cancel={CcAction::ClearDraft}
                 >
-                    { field }
+                    <DraftField
+                        draft={props.draft_signal.clone()}
+                        width={(width - CONTENT_INSET * 2.0 - 96.0).max(1.0)}
+                        focused={props.draft_focused}
+                    />
                 </ActionTarget>
                 <ActionTarget action={CcAction::SendDraft}>
                     { pill_button("发送", PRIMARY, SURFACE) }

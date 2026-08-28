@@ -33,6 +33,9 @@ struct FieldSpec {
 
 pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
     let name = input.ident.clone();
+    // `#[memo]` 容器属性：opt-in 记忆化——指纹相等且子树订阅未标脏时跳过 render，
+    // 直接拼回上次输出（见 tela-ui-dsl 的 `memo` 模块）。
+    let memo = input.attrs.iter().any(|attr| attr.path().is_ident("memo"));
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => fields.named.clone(),
@@ -232,6 +235,76 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         }
     };
 
+    // `#[memo]`：生成 props 指纹结构与 render 记忆化分支。
+    let (memo_fp_impl, memo_render) = if memo {
+        let fp_name = format_ident!("{}MemoFingerprint", name);
+        let fp_fields = specs.iter().map(|spec| {
+            let ident = &spec.ident;
+            match spec.kind {
+                FieldKind::Watch => quote!(#ident: #dsl::SignalId,),
+                _ => {
+                    let ty = &spec.ty;
+                    quote!(#ident: #ty,)
+                }
+            }
+        });
+        let fp_build = specs.iter().map(|spec| {
+            let ident = &spec.ident;
+            match spec.kind {
+                FieldKind::Watch => quote!(#ident: self.#ident.id(),),
+                _ => quote!(#ident: self.#ident.clone(),),
+            }
+        });
+        (
+            quote! {
+                const _: () = {
+                    #[derive(Clone, PartialEq)]
+                    struct #fp_name {
+                        #(#fp_fields)*
+                    }
+
+                    impl #name {
+                        #[doc(hidden)]
+                        fn __tela_memo_fingerprint(&self) -> #fp_name {
+                            #fp_name {
+                                #(#fp_build)*
+                            }
+                        }
+                    }
+                };
+            },
+            quote! {
+                let __tela_memo = __tela_build.memo_enabled() && __tela_children.is_empty();
+                if __tela_memo {
+                    let __tela_fingerprint = __tela_inst.__tela_memo_fingerprint();
+                    if let Some(__tela_cached) = __tela_build.memo_hit(&__tela_fingerprint) {
+                        // 命中：缓存输出已携带 watch 声明，直接拼回，跳过 view 与重复 attach。
+                        return Ok(__tela_cached);
+                    }
+                    let mut __tela_out = #view_call?;
+                    #watch_attach
+                    // 记录必须发生在 watch attach 之后：缓存条目要携带组件自身的订阅，
+                    // 否则脏检查看不到它的 scope，signal 变化会被误命中。
+                    __tela_build.memo_record(__tela_fingerprint, &__tela_out);
+                    Ok(__tela_out)
+                } else {
+                    let mut __tela_out = #view_call?;
+                    #watch_attach
+                    Ok(__tela_out)
+                }
+            },
+        )
+    } else {
+        (
+            quote!(),
+            quote! {
+                let mut __tela_out = #view_call?;
+                #watch_attach
+                Ok(__tela_out)
+            },
+        )
+    };
+
     let impl_block = quote! {
         impl #dsl::DslComponent for #name {
             type Props = #props_name;
@@ -255,11 +328,11 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 let __tela_inst = #name {
                     #(#assembly)*
                 };
-                let mut __tela_out = #view_call?;
-                #watch_attach
-                Ok(__tela_out)
+                #memo_render
             }
         }
+
+        #memo_fp_impl
 
         #[doc(hidden)]
         const _: () = {

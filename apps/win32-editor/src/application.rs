@@ -81,7 +81,7 @@ pub enum EditorAction {
 }
 
 /// 应用设置（内存态，不持久化）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditorSettings {
     /// 字体大小（点）。
     pub font_size: u32,

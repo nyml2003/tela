@@ -286,7 +286,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     pub fn dispatch_action(&mut self, action: A) -> bool {
         let changed = self.apply_controller_action(action);
         if changed {
-            self.invalidate_frame();
+            self.invalidate_frame_unless_dirty();
         }
         changed
     }
@@ -295,7 +295,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     pub fn on_tick(&mut self) -> bool {
         let changed = self.controller.on_tick();
         if changed {
-            self.invalidate_frame();
+            self.invalidate_frame_unless_dirty();
         }
         changed
     }
@@ -386,6 +386,14 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     /// 使当前投影失效，下一次 `ensure_frame` 重建候选帧。
     pub fn invalidate_frame(&mut self) {
         self.projection_invalidated = true;
+    }
+
+    /// 控制器状态变化后的失效入口：Signal 订阅已标脏时不再全局失效，
+    /// 让 `ensure_frame` 走 dirty 驱动的细粒度路径（见其入口短路条件）。
+    fn invalidate_frame_unless_dirty(&mut self) {
+        if !self.frames.runtime().has_dirty() {
+            self.invalidate_frame();
+        }
     }
 
     /// 更新逻辑内容区（CSS 点）与 DPI；返回是否引起界面变化。
@@ -505,11 +513,14 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             }
         }
         let anchors = self.controller.anchor_actions();
+        // signal 驱动帧（无全局投影失效）启用 `#[memo]` 记忆化；
+        // viewport/焦点/悬停等宿主失效帧走全量渲染。
+        let memo_enabled = !self.projection_invalidated;
 
         let mut staged: Option<(ResolvedFrame<A>, Controls)> = None;
         for _ in 0..MAX_FRAME_FIXPOINT_ITERATIONS {
             let ctx = self.candidate_context(&candidate_state);
-            let provisional = match self.prepare_projection(&ctx, None) {
+            let provisional = match self.prepare_projection(&ctx, None, &dirty, memo_enabled) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     self.retain_previous_frame(dirty, error);
@@ -533,14 +544,15 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             } else {
                 let present_keys: BTreeSet<SemanticKey> =
                     provisional.tree().keys().iter().cloned().collect();
-                let prepared = match self.prepare_projection(&ctx, Some((&anchors, &present_keys)))
-                {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        self.retain_previous_frame(dirty, error);
-                        return false;
-                    }
-                };
+                let prepared =
+                    match self.prepare_projection(&ctx, Some((&anchors, &present_keys)), &dirty, memo_enabled)
+                    {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            self.retain_previous_frame(dirty, error);
+                            return false;
+                        }
+                    };
                 self.profile
                     .reconcile_tree(prepared.tree(), &mut candidate_state);
                 self.profile
@@ -645,7 +657,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             output_changed |= self.apply_controller_action(action);
         }
         if output_changed {
-            self.invalidate_frame();
+            self.invalidate_frame_unless_dirty();
         }
         session_trace!(
             "session_frame_presented result=committed frame_viewport={committed_viewport:?} output_changed={output_changed}"
@@ -703,10 +715,12 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let projected_pointer_state_changed =
             pressed_before != self.view_state.pressed_mouse_key().cloned();
         let framed_action_changed = self.handle_framed_actions(token, &actions);
-        let changed = projected_pointer_state_changed || framed_action_changed;
-        if changed {
+        if projected_pointer_state_changed {
             self.invalidate_frame();
+        } else if framed_action_changed {
+            self.invalidate_frame_unless_dirty();
         }
+        let changed = projected_pointer_state_changed || framed_action_changed;
         if !actions.is_empty()
             || matches!(
                 event.phase,
@@ -762,7 +776,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .dispatch(&mut self.view_state, &InputEvent::Keyboard(intent));
         let changed = self.handle_framed_actions(token, &actions);
         if changed {
-            self.invalidate_frame();
+            self.invalidate_frame_unless_dirty();
         }
         1
     }
@@ -1018,8 +1032,10 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         &mut self,
         ctx: &FrameContext,
         anchors: Option<AnchorPass<'_, A>>,
+        dirty: &std::collections::BTreeSet<SemanticKey>,
+        memo_enabled: bool,
     ) -> Result<PreparedFrame<A>, String> {
-        let mut build = self.frames.begin_build();
+        let mut build = self.frames.begin_build_for_frame(dirty.clone(), memo_enabled);
         build.set_animation_clock(self.animation_clock);
         let mut output = self
             .controller
@@ -1057,7 +1073,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let changed =
             self.handle_framed_actions(token, &[KernelInteraction::TextInput { node_id, event }]);
         if changed {
-            self.invalidate_frame();
+            self.invalidate_frame_unless_dirty();
         }
         changed
     }

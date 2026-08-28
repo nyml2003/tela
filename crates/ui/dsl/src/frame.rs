@@ -13,6 +13,7 @@ use crate::view::ResolvedPlans;
 use crate::{
     ActionFrame, ActionRegistry, AnimationSchedule, ComponentDispatch, ComponentInput,
     ComponentRuntime, FramedInteraction, InteractionIndex, ViewBuild, ViewBuildError, ViewOutput,
+    memo::{MemoCandidate, RenderMemoRuntime},
     owner::{
         ComponentActionRoute, ComponentEffectScope, ComponentLifecycleEvent, ComponentOwnerFrame,
         ComponentOwnerRuntime, ComponentRouteOutcome, OwnerFrameToken,
@@ -75,6 +76,7 @@ pub struct PreparedFrame<A> {
     component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
     interaction_index: InteractionIndex,
     animation_schedule: AnimationSchedule,
+    watch_scopes: Vec<(String, tela_contract::SemanticKey)>,
 }
 
 impl<A> PreparedFrame<A> {
@@ -197,6 +199,8 @@ pub struct FrameCoordinator<A: Clone + 'static> {
     pending_component_outputs: RefCell<Vec<A>>,
     committed_component_outputs: Vec<A>,
     committed_component_lifecycle: Vec<ComponentLifecycleEvent>,
+    memo: RenderMemoRuntime,
+    memo_candidate: Option<Rc<RefCell<MemoCandidate>>>,
     next_token: u64,
 }
 
@@ -212,13 +216,39 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             pending_component_outputs: RefCell::new(Vec::new()),
             committed_component_outputs: Vec::new(),
             committed_component_lifecycle: Vec::new(),
+            memo: RenderMemoRuntime::new(),
+            memo_candidate: None,
             next_token: 0,
         }
     }
 
-    /// 创建一个从空 Context 开始的本帧 `ViewBuild`。
-    pub fn begin_build(&self) -> ViewBuild<A> {
+    /// 创建一个从空 Context 开始的本帧 `ViewBuild`（不启用记忆化）。
+    pub fn begin_build(&mut self) -> ViewBuild<A> {
+        self.memo.discard_pending();
+        self.memo_candidate = None;
         ViewBuild::new().with_owner_frame(Rc::new(RefCell::new(self.owners.begin_frame())))
+    }
+
+    /// 创建一个携带记忆化上下文的本帧 `ViewBuild`。
+    ///
+    /// `enabled` 应只在 signal 驱动帧（无全局投影失效）为真；`dirty` 是宿主从
+    /// `ComponentRuntime::take_dirty` 取出的本帧脏 key 集。无论 `enabled` 为何，
+    /// 每个成功提交都会刷新"scope → 订阅 key"映射。
+    pub fn begin_build_for_frame(
+        &mut self,
+        dirty: std::collections::BTreeSet<tela_contract::SemanticKey>,
+        enabled: bool,
+    ) -> ViewBuild<A> {
+        let build = ViewBuild::new().with_owner_frame(Rc::new(RefCell::new(self.owners.begin_frame())));
+        if enabled {
+            let (candidate, watch_keys) = self.memo.begin_frame();
+            self.memo_candidate = Some(Rc::clone(&candidate));
+            build.with_memo(candidate, dirty, watch_keys)
+        } else {
+            self.memo.discard_pending();
+            self.memo_candidate = None;
+            build
+        }
     }
 
     /// 构建并验证候选 tree，再将随 [`ViewOutput`] 携带的锚点计划解析为最终 `SemanticKey`。
@@ -226,7 +256,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
     /// 此阶段使用当前 allocator 的副本。无论建树或计划校验在哪一步失败，现有 active
     /// allocator、watch 图和动作表都不会被替换。
     pub fn prepare(
-        &self,
+        &mut self,
         root: impl Into<ViewOutput<A>>,
     ) -> Result<PreparedFrame<A>, FramePrepareError> {
         let root = root.into();
@@ -249,6 +279,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         };
         let ResolvedPlans {
             watches,
+            watch_scopes,
             actions,
             component_actions: raw_component_actions,
         } = plans;
@@ -263,6 +294,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             InteractionIndex::from_tree(&tree, component_actions.keys().copied());
         let plans = ResolvedPlans {
             watches,
+            watch_scopes: Vec::new(),
             actions,
             component_actions: Vec::new(),
         };
@@ -274,6 +306,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             component_actions,
             interaction_index,
             animation_schedule,
+            watch_scopes,
         })
     }
 
@@ -321,6 +354,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             component_actions,
             interaction_index,
             animation_schedule,
+            watch_scopes,
         } = prepared;
         let token = FrameToken(
             self.next_token
@@ -343,6 +377,10 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         self.committed_component_lifecycle.extend(lifecycle);
         self.committed_component_outputs
             .append(self.pending_component_outputs.get_mut());
+        match self.memo_candidate.take() {
+            Some(candidate) => self.memo.commit(candidate, watch_scopes),
+            None => self.memo.refresh_watch_keys(watch_scopes),
+        }
         self.next_token = token.get();
         self.allocator = allocator;
         self.active = Some(ActiveFrame {
@@ -373,13 +411,15 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         &self.runtime
     }
 
-    /// 丢弃本次输入产生、但尚未随成功帧提交的组件 State 与 Output。
+    /// 丢弃本次输入产生、但尚未随成功帧提交的组件 State、Output 与 render 记忆。
     ///
     /// Host 在 layout、renderer preflight、surface 或 present 失败而保留旧 active frame 时
     /// 必须调用此方法。
-    pub fn abort_component_transaction(&self) {
+    pub fn abort_component_transaction(&mut self) {
         self.owners.discard_pending();
         self.pending_component_outputs.borrow_mut().clear();
+        self.memo.discard_pending();
+        self.memo_candidate = None;
     }
 
     /// 取得成功提交后才可见的组件 Output。

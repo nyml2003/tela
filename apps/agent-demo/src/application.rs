@@ -4,7 +4,7 @@ use tela_app_runtime::{
     AppController, Application, ApplicationConfig, ControllerOutcome, FrameContext,
 };
 use tela_contract::{FocusAppearance, UiResources, Viewport};
-use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult};
+use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult};
 
 use crate::agent::{Agent, MockChatModel, RunReport, Task};
 use crate::presentation::{AgentViewProps, render_agent};
@@ -51,13 +51,17 @@ pub enum AgentAction {
 }
 
 /// Agent application controller and persistent in-Wasm session state.
+///
+/// 可见状态全部持有为 `Signal`：写入相同值不触发帧，值变化由 `#[watch]` 组件
+/// 的订阅标脏驱动重建，而不是每次动作后全局失效投影。
 pub struct AgentDemoController {
     resources: &'static dyn UiResources,
     agent: Agent<MockChatModel>,
-    draft: String,
-    messages: Vec<DisplayMessage>,
-    last_report: Option<RunReport>,
-    last_error: Option<String>,
+    draft: Signal<String>,
+    messages: Signal<Vec<DisplayMessage>>,
+    last_report: Signal<Option<RunReport>>,
+    tasks: Signal<Vec<Task>>,
+    last_error: Signal<Option<String>>,
 }
 
 impl AgentDemoController {
@@ -66,33 +70,34 @@ impl AgentDemoController {
         let mut controller = Self {
             resources,
             agent: Agent::new(MockChatModel::new(), MODEL_ID),
-            draft: String::new(),
-            messages: Vec::new(),
-            last_report: None,
-            last_error: None,
+            draft: Signal::new(String::new()),
+            messages: Signal::new(Vec::new()),
+            last_report: Signal::new(None),
+            tasks: Signal::new(Vec::new()),
+            last_error: Signal::new(None),
         };
         controller.submit(INITIAL_GOAL.to_owned());
         controller
     }
 
     /// Controlled prompt value.
-    pub fn draft(&self) -> &str {
-        &self.draft
+    pub fn draft(&self) -> String {
+        self.draft.get()
     }
 
     /// Visible user/assistant conversation.
-    pub fn messages(&self) -> &[DisplayMessage] {
-        &self.messages
+    pub fn messages(&self) -> Vec<DisplayMessage> {
+        self.messages.get()
     }
 
     /// Most recent complete run, including its tool trace.
-    pub fn last_report(&self) -> Option<&RunReport> {
-        self.last_report.as_ref()
+    pub fn last_report(&self) -> Option<RunReport> {
+        self.last_report.get()
     }
 
     /// Persistent tasks created through the local tool runtime.
-    pub fn tasks(&self) -> &[Task] {
-        self.agent.tasks()
+    pub fn tasks(&self) -> Vec<Task> {
+        self.tasks.get()
     }
 
     fn submit(&mut self, value: String) -> bool {
@@ -100,38 +105,43 @@ impl AgentDemoController {
         if goal.is_empty() {
             return false;
         }
-        self.draft.clear();
-        self.messages.push(DisplayMessage {
+        let mut messages = self.messages.get();
+        messages.push(DisplayMessage {
             role: DisplayRole::User,
             content: goal.clone(),
         });
-        match self.agent.run(goal) {
+        let (report, error) = match self.agent.run(goal) {
             Ok(report) => {
-                self.messages.push(DisplayMessage {
+                messages.push(DisplayMessage {
                     role: DisplayRole::Assistant,
                     content: report.answer.clone(),
                 });
-                self.last_report = Some(report);
-                self.last_error = None;
+                (Some(report), None)
             }
             Err(error) => {
                 let message = error.to_string();
-                self.messages.push(DisplayMessage {
+                messages.push(DisplayMessage {
                     role: DisplayRole::Error,
                     content: message.clone(),
                 });
-                self.last_error = Some(message);
+                (None, Some(message))
             }
-        }
+        };
+        self.draft.set(String::new());
+        self.messages.set(messages);
+        self.last_report.set(report);
+        self.last_error.set(error);
+        self.tasks.set(self.agent.tasks().to_vec());
         true
     }
 
     fn reset(&mut self) {
         self.agent = Agent::new(MockChatModel::new(), MODEL_ID);
-        self.draft.clear();
-        self.messages.clear();
-        self.last_report = None;
-        self.last_error = None;
+        self.draft.set(String::new());
+        self.messages.set(Vec::new());
+        self.last_report.set(None);
+        self.tasks.set(Vec::new());
+        self.last_error.set(None);
         self.submit(INITIAL_GOAL.to_owned());
     }
 }
@@ -146,16 +156,16 @@ impl AppController<AgentAction> for AgentDemoController {
             build,
             AgentViewProps {
                 viewport: ctx.viewport,
-                draft: &self.draft,
+                draft: self.draft.clone(),
+                messages: self.messages.clone(),
+                report: self.last_report.clone(),
+                tasks: self.tasks.clone(),
+                error: self.last_error.clone(),
                 draft_focused: ctx
                     .focus_key
                     .as_ref()
                     .is_some_and(|key| key.0 == "agent.prompt"),
                 hover_key: ctx.hover_key.as_ref().map(|key| key.0.as_str()),
-                messages: &self.messages,
-                report: self.last_report.as_ref(),
-                tasks: self.agent.tasks(),
-                error: self.last_error.as_deref(),
                 icons: self.resources.icon_provider(),
             },
         )
@@ -164,15 +174,15 @@ impl AppController<AgentAction> for AgentDemoController {
     fn handle_action(&mut self, action: AgentAction) -> ControllerOutcome {
         let changed = match action {
             AgentAction::DraftChanged(value) => {
-                let changed = self.draft != value;
-                self.draft = value;
+                let changed = self.draft.get() != value;
+                self.draft.set(value);
                 changed
             }
             AgentAction::SubmitDraft(value) => self.submit(value),
-            AgentAction::SendDraft => self.submit(self.draft.clone()),
+            AgentAction::SendDraft => self.submit(self.draft.get()),
             AgentAction::ClearDraft => {
-                let changed = !self.draft.is_empty();
-                self.draft.clear();
+                let changed = self.draft.get() != String::new();
+                self.draft.set(String::new());
                 changed
             }
             AgentAction::RunExample => self.submit(EXAMPLE_GOAL.to_owned()),
@@ -261,5 +271,65 @@ mod tests {
         let publication = ApplicationSession::publish(&mut app).expect("mobile frame");
         assert_eq!(publication.frame.viewport.width, 390.0);
         assert_eq!(publication.frame.viewport.height, 844.0);
+    }
+
+    /// 宿主完整帧生命周期：publish 阶段 resolve，presented 阶段原子提交
+    /// （订阅安装、#[memo] 缓存提交都发生在 presented）。
+    fn publish_and_present(app: &mut AgentDemoApp) {
+        let token = ApplicationSession::publish(app).expect("publish").token;
+        ApplicationSession::presented(app, token).expect("presented");
+    }
+
+    #[test]
+    fn signal_write_renders_without_projection_invalidation() {
+        let mut app = new_agent_demo(&RESOURCES);
+        ApplicationSession::initialize(&mut app).expect("initialize");
+        publish_and_present(&mut app);
+        assert!(app.frame_is_current());
+
+        // 被订阅的 signal 写入：dirty 驱动失效，publish 后恢复 current。
+        app.dispatch_action(AgentAction::DraftChanged("列出当前任务".to_owned()));
+        assert!(!app.frame_is_current());
+        publish_and_present(&mut app);
+        assert!(app.frame_is_current());
+
+        // 相同值写入被相等性短路：无 dirty、无失效，帧保持 current。
+        app.dispatch_action(AgentAction::DraftChanged("列出当前任务".to_owned()));
+        assert!(app.frame_is_current());
+
+        // 未被订阅路径（重置重建全部状态）仍可靠全局失效兜底。
+        app.dispatch_action(AgentAction::Reset);
+        assert!(!app.frame_is_current());
+        publish_and_present(&mut app);
+        assert!(app.frame_is_current());
+    }
+
+    #[test]
+    fn memo_skips_unrelated_panels_on_signal_frames() {
+        let mut app = new_agent_demo(&RESOURCES);
+        ApplicationSession::initialize(&mut app).expect("initialize");
+        publish_and_present(&mut app);
+
+        // 首个 signal 驱动帧：记忆化开始记录（无缓存可命中，全量渲染）。
+        app.dispatch_action(AgentAction::DraftChanged("a".to_owned()));
+        publish_and_present(&mut app);
+        let baseline = crate::presentation::trace_renders();
+
+        // 再次打字：trace 面板的订阅与 props 均未变化，命中 #[memo] 缓存。
+        app.dispatch_action(AgentAction::DraftChanged("ab".to_owned()));
+        publish_and_present(&mut app);
+        assert_eq!(
+            crate::presentation::trace_renders(),
+            baseline,
+            "不相关面板命中 #[memo] 缓存"
+        );
+
+        // 运行示例改变了报告/任务 signal：缓存被脏标穿透。
+        app.dispatch_action(AgentAction::RunExample);
+        publish_and_present(&mut app);
+        assert!(
+            crate::presentation::trace_renders() > baseline,
+            "订阅的 signal 变化必须重渲染"
+        );
     }
 }

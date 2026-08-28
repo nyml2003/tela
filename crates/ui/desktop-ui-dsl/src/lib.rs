@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn virtual_window_is_available_before_lazy_children_are_built() {
-        let coordinator = FrameCoordinator::<()>::new();
+        let mut coordinator = FrameCoordinator::<()>::new();
         let mut build = coordinator.begin_build();
         let site = ViewSite::new(file!(), line!(), column!());
         let mut observed = None;
@@ -1148,7 +1148,7 @@ mod tests {
 
     #[test]
     fn title_bar_delivers_window_commands_only_after_commit() {
-        fn render(coordinator: &FrameCoordinator<Action>) -> ViewOutput<Action> {
+        fn render(coordinator: &mut FrameCoordinator<Action>) -> ViewOutput<Action> {
             let mut build = coordinator.begin_build();
             WindowsTitleBar::render_for(
                 &mut build,
@@ -1164,9 +1164,8 @@ mod tests {
         }
 
         let mut coordinator = FrameCoordinator::new();
-        let prepared = coordinator
-            .prepare(render(&coordinator))
-            .expect("prepared title");
+        let root = render(&mut coordinator);
+        let prepared = coordinator.prepare(root).expect("prepared title");
         let resolved = prepared
             .resolve(|_| {
                 Ok::<_, ()>(UiFrame {
@@ -1189,9 +1188,8 @@ mod tests {
         ));
         assert!(coordinator.take_component_outputs().is_empty());
 
-        let prepared = coordinator
-            .prepare(render(&coordinator))
-            .expect("prepared update");
+        let root = render(&mut coordinator);
+        let prepared = coordinator.prepare(root).expect("prepared update");
         let resolved = prepared
             .resolve(|_| {
                 Ok::<_, ()>(UiFrame {
@@ -1222,7 +1220,7 @@ mod tests {
             }
         }
 
-        fn render(coordinator: &FrameCoordinator<Action>) -> ViewOutput<Action> {
+        fn render(coordinator: &mut FrameCoordinator<Action>) -> ViewOutput<Action> {
             let mut build = coordinator.begin_build();
             DraftInputView::render_for(
                 &mut build,
@@ -1234,8 +1232,9 @@ mod tests {
         }
 
         fn publish(coordinator: &mut FrameCoordinator<Action>) {
+            let root = render(coordinator);
             let prepared = coordinator
-                .prepare(render(coordinator))
+                .prepare(root)
                 .expect("prepared draft");
             let resolved = prepared
                 .resolve(|_| {

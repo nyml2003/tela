@@ -607,7 +607,7 @@ impl App {
     // -----------------------------------------------------------------------
 
     fn prepare_projection(
-        &self,
+        &mut self,
         draft_focused: bool,
     ) -> Result<tela_ui_dsl::PreparedFrame<CcAction>, String> {
         let draft = self.draft.get();
@@ -623,7 +623,7 @@ impl App {
                     notices: &self.world.notices,
                     icons: self.resources.icon_provider(),
                 };
-                render_sessions_dsl(&mut self.frames.begin_build(), props, &self.route)
+                render_sessions_dsl(&mut self.frames.begin_build(), props)
                     .map_err(|error| error.to_string())?
             }
             Route::Chat(ref session_id) => {
@@ -642,18 +642,14 @@ impl App {
                     title: &title,
                     can_go_back: true,
                     draft: &draft,
+                    draft_signal: self.draft.clone(),
                     draft_focused,
                     rows,
                     permission,
                     icons: self.resources.icon_provider(),
                 };
-                render_chat_dsl(
-                    &mut self.frames.begin_build(),
-                    props,
-                    &self.route,
-                    &self.draft,
-                )
-                .map_err(|error| error.to_string())?
+                render_chat_dsl(&mut self.frames.begin_build(), props)
+                    .map_err(|error| error.to_string())?
             }
         };
         self.frames.prepare(root).map_err(|error| error.to_string())
@@ -940,7 +936,7 @@ impl App {
             .dispatch(&mut self.view_state, &InputEvent::Text(event));
         let changed = self.handle_framed_interactions(token, &actions);
         if changed {
-            self.invalidate_frame();
+            self.invalidate_frame_unless_dirty();
         }
         changed
     }
@@ -950,7 +946,7 @@ impl App {
             return false;
         }
         self.draft.set(value);
-        self.invalidate_frame();
+        self.invalidate_frame_unless_dirty();
         true
     }
 
@@ -1085,6 +1081,14 @@ impl App {
 
     fn invalidate_frame(&mut self) {
         self.projection_invalidated = true;
+    }
+
+    /// 控制器状态变化后的失效入口：Signal 订阅已标脏时不再全局失效，
+    /// 让 `ensure_frame` 走 dirty 驱动的重建路径（见其入口短路条件）。
+    fn invalidate_frame_unless_dirty(&mut self) {
+        if !self.frames.runtime().has_dirty() {
+            self.invalidate_frame();
+        }
     }
 }
 

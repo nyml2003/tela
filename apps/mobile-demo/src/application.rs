@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use tela_contract::{
-    FocusAppearance, InputEvent, Insets, KernelInteraction, NodeId, NodeKind, PhysicalKey,
-    PointerEvent, ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame, UiLayoutError,
-    UiNode, UiResources, Viewport,
+    FocusAppearance, IconProvider, InputEvent, Insets, KernelInteraction, NodeId, NodeKind,
+    PhysicalKey, PointerEvent, ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame,
+    UiLayoutError, UiNode, UiResources, Viewport,
 };
 use tela_core::{DefaultApplicationProfile, UiTree, ViewStateStore};
 use tela_ui_dsl::{
@@ -448,14 +448,15 @@ impl App {
     }
 
     fn prepare_projection(
-        &self,
+        &mut self,
         search_focused: bool,
     ) -> Result<tela_ui_dsl::PreparedFrame<MobileAction>, String> {
         let title = self.title();
         let query = self.query.get();
-        let entries = self.visible_entries();
-        let preview = self.preview_entry();
+        let entries = self.visible_entries().into_iter().cloned().collect();
+        let preview = self.preview_entry().cloned();
         let is_browse = preview.is_none();
+        let icons: &'static dyn IconProvider = self.resources.icon_provider();
         let props = MobileViewProps {
             viewport: self.viewport,
             title: &title,
@@ -465,7 +466,7 @@ impl App {
             safe_area: self.safe_area,
             entries,
             preview,
-            icons: self.resources.icon_provider(),
+            icons,
         };
         let mut build = self.frames.begin_build();
         build.set_animation_clock(self.animation_clock);

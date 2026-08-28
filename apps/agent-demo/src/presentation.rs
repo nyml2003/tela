@@ -7,7 +7,7 @@ use tela_contract::{
 };
 use tela_core::{LayoutContainer, Primitive};
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{Body, DslComponent, Signal, ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::{Button, ButtonPalette, Icon, Input};
 
 use crate::agent::{RunReport, Task, TraceEvent};
@@ -38,21 +38,212 @@ pub struct AgentViewProps<'a> {
     /// Current logical viewport.
     pub viewport: Viewport,
     /// Controlled composer value.
-    pub draft: &'a str,
+    pub draft: Signal<String>,
+    /// Visible conversation entries.
+    pub messages: Signal<Vec<DisplayMessage>>,
+    /// Most recent agent execution.
+    pub report: Signal<Option<RunReport>>,
+    /// Persistent local tasks.
+    pub tasks: Signal<Vec<Task>>,
+    /// Latest recoverable error.
+    pub error: Signal<Option<String>>,
     /// Whether the composer owns keyboard focus.
     pub draft_focused: bool,
     /// Hovered semantic key, if any.
     pub hover_key: Option<&'a str>,
-    /// Visible conversation entries.
-    pub messages: &'a [DisplayMessage],
-    /// Most recent agent execution.
-    pub report: Option<&'a RunReport>,
-    /// Persistent local tasks.
-    pub tasks: &'a [Task],
-    /// Latest recoverable error.
-    pub error: Option<&'a str>,
     /// Product-selected icon provider.
-    pub icons: &'a dyn IconProvider,
+    pub icons: &'static dyn IconProvider,
+}
+
+/// 对话面板：订阅消息列表，信号变化时由订阅标脏驱动重建。
+///
+/// 面板本身是纯展示组件；含 `ActionTarget` 的输入条由非泛型父级预构建后作为
+/// children 传入（动作值类型必须等于 build 的动作类型，泛型 view 内无法声明）。
+#[derive(DslComponent)]
+struct ChatPanel {
+    #[watch]
+    messages: Signal<Vec<DisplayMessage>>,
+    width: f32,
+    height: f32,
+}
+
+impl ChatPanel {
+    fn view<A>(
+        &self,
+        build: &mut ViewBuild<A>,
+        children: Body<A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let heading_h = 48.0;
+        let scroll_h = (self.height - heading_h - COMPOSER_H).max(1.0);
+        let inner_width = (self.width - 24.0).max(1.0);
+        let messages = self
+            .messages
+            .with(|messages| message_list(messages, inner_width));
+        let turns = self.messages.with(|messages| messages.len() / 2);
+
+        ui!(build {
+            <Column
+                width={self.width}
+                height={self.height}
+                fill={Fill::Solid(SURFACE)}
+                border_width={1.0}
+                border_color={BORDER}
+                border_radius={6.0}
+            >
+                <Row
+                    width={self.width}
+                    height={heading_h}
+                    padding={Insets { top: 10.0, right: 12.0, bottom: 8.0, left: 12.0 }}
+                    cross_align={CrossAlign::Center}
+                >
+                    <Column gap={1.0}>
+                        <Text value={"对话"} font_size={16.0} line_height={20.0} color={TEXT} />
+                        <Text value={"observe → decide → act"} font_size={10.0} line_height={13.0} color={MUTED} />
+                    </Column>
+                    <View />
+                    <Text value={format!("{} turns", turns)} font_size={11.0} line_height={15.0} color={MUTED} />
+                </Row>
+                <ScrollView
+                    key={"agent.messages"}
+                    width={self.width}
+                    height={scroll_h}
+                    padding={Insets { top: 8.0, right: 12.0, bottom: 8.0, left: 12.0 }}
+                    gap={8.0}
+                    overflow={Overflow::Scroll}
+                    clip={true}
+                    fill={Fill::Solid(PAGE)}
+                >
+                    { messages }
+                </ScrollView>
+                { build.fragment(children, tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))? }
+            </Column>
+        })
+    }
+}
+
+/// 受控输入框：订阅草稿 signal；节点本体不携带动作，动作路由由外层 ActionTarget 提供。
+#[derive(DslComponent)]
+#[memo]
+struct DraftField {
+    #[watch]
+    draft: Signal<String>,
+    width: f32,
+    focused: bool,
+}
+
+impl DraftField {
+    fn view<A>(
+        &self,
+        _build: &mut ViewBuild<A>,
+        _children: Body<A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let draft = self.draft.get();
+        Ok(ViewOutput::opaque(
+            Input::new()
+                .value(&draft)
+                .placeholder("输入目标，例如：列出当前任务")
+                .semantic_key("agent.prompt")
+                .width(self.width)
+                .height(44.0)
+                .focused(self.focused)
+                .border_radius(6.0)
+                .into_node(),
+        ))
+    }
+}
+
+/// 输入条：受控输入 + 发送按钮，携带 ActionTarget，必须在非泛型构建上下文中生成。
+fn composer_dsl(
+    build: &mut ViewBuild<AgentAction>,
+    props: &AgentViewProps<'_>,
+    width: f32,
+) -> ViewResult<ViewOutput<AgentAction>> {
+    let inner_width = (width - 24.0).max(1.0);
+    let field_width = (inner_width - 52.0).max(1.0);
+    let send = icon_action_button(
+        build,
+        IconName::ArrowUpward,
+        AgentAction::SendDraft,
+        "agent.send",
+        props.hover_key,
+        props.draft.get().trim().is_empty(),
+        props.icons,
+    )?;
+
+    ui!(build {
+        <Row
+            width={width}
+            height={COMPOSER_H}
+            padding={Insets { top: 12.0, right: 12.0, bottom: 12.0, left: 12.0 }}
+            gap={8.0}
+            cross_align={CrossAlign::Center}
+            fill={Fill::Solid(SURFACE)}
+            border_width={1.0}
+            border_color={BORDER}
+        >
+            <ActionTarget
+                on_input={AgentAction::DraftChanged}
+                on_submit={AgentAction::SubmitDraft}
+                on_cancel={AgentAction::ClearDraft}
+            >
+                <DraftField
+                    draft={props.draft.clone()}
+                    width={field_width}
+                    focused={props.draft_focused}
+                />
+            </ActionTarget>
+            { send }
+        </Row>
+    })
+}
+
+/// 执行轨迹面板：订阅报告、任务与错误快照；内容为纯展示子树。
+///
+/// `#[memo]`：signal 未变且 props 未变时跳过 render，直接拼回上次输出。
+#[derive(DslComponent)]
+#[memo]
+struct TracePanel {
+    #[watch]
+    report: Signal<Option<RunReport>>,
+    #[watch]
+    tasks: Signal<Vec<Task>>,
+    #[watch]
+    error: Signal<Option<String>>,
+    width: f32,
+    height: f32,
+}
+
+impl TracePanel {
+    fn view<A>(
+        &self,
+        _build: &mut ViewBuild<A>,
+        _children: Body<A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        #[cfg(test)]
+        bump_trace_renders();
+        Ok(ViewOutput::opaque(trace_panel_body(
+            self.report.get().as_ref(),
+            &self.tasks.get(),
+            self.error.get().as_deref(),
+            self.width,
+            self.height,
+        )))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRACE_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_trace_renders() {
+    TRACE_RENDERS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn trace_renders() -> usize {
+    TRACE_RENDERS.with(std::cell::Cell::get)
 }
 
 /// Builds the complete responsive agent workbench.
@@ -69,8 +260,7 @@ pub fn render_agent(
     if desktop {
         let chat_width = ((content_width - GAP) * 0.60).max(1.0);
         let trace_width = (content_width - GAP - chat_width).max(1.0);
-        let chat = chat_panel_dsl(build, &props, chat_width, content_height)?;
-        let trace = trace_panel(&props, trace_width, content_height);
+        let composer = composer_dsl(build, &props, chat_width)?;
         ui!(build {
             <Frame width={props.viewport.width} height={props.viewport.height} fill={Fill::Solid(PAGE)}>
                 <Column width={props.viewport.width} height={props.viewport.height}>
@@ -81,8 +271,20 @@ pub fn render_agent(
                         padding={Insets::all(PAGE_PAD)}
                         gap={GAP}
                     >
-                        { chat }
-                        { trace }
+                        <ChatPanel
+                            messages={props.messages.clone()}
+                            width={chat_width}
+                            height={content_height}
+                        >
+                            { composer }
+                        </ChatPanel>
+                        <TracePanel
+                            report={props.report.clone()}
+                            tasks={props.tasks.clone()}
+                            error={props.error.clone()}
+                            width={trace_width}
+                            height={content_height}
+                        />
                     </Row>
                 </Column>
             </Frame>
@@ -90,8 +292,7 @@ pub fn render_agent(
     } else {
         let chat_height = (content_height * 0.59).max(250.0).min(content_height);
         let trace_height = (content_height - GAP - chat_height).max(1.0);
-        let chat = chat_panel_dsl(build, &props, content_width, chat_height)?;
-        let trace = trace_panel(&props, content_width, trace_height);
+        let composer = composer_dsl(build, &props, content_width)?;
         ui!(build {
             <Frame width={props.viewport.width} height={props.viewport.height} fill={Fill::Solid(PAGE)}>
                 <Column width={props.viewport.width} height={props.viewport.height}>
@@ -102,8 +303,20 @@ pub fn render_agent(
                         padding={Insets::all(PAGE_PAD)}
                         gap={GAP}
                     >
-                        { chat }
-                        { trace }
+                        <ChatPanel
+                            messages={props.messages.clone()}
+                            width={content_width}
+                            height={chat_height}
+                        >
+                            { composer }
+                        </ChatPanel>
+                        <TracePanel
+                            report={props.report.clone()}
+                            tasks={props.tasks.clone()}
+                            error={props.error.clone()}
+                            width={content_width}
+                            height={trace_height}
+                        />
                     </Column>
                 </Column>
             </Frame>
@@ -199,101 +412,20 @@ fn header_dsl(
     }
 }
 
-fn chat_panel_dsl(
-    build: &mut ViewBuild<AgentAction>,
-    props: &AgentViewProps<'_>,
+fn trace_panel_body(
+    report: Option<&RunReport>,
+    tasks: &[Task],
+    error: Option<&str>,
     width: f32,
     height: f32,
-) -> ViewResult<ViewOutput<AgentAction>> {
-    let heading_h = 48.0;
-    let scroll_h = (height - heading_h - COMPOSER_H).max(1.0);
-    let inner_width = (width - 24.0).max(1.0);
-    let messages = message_list(props.messages, inner_width);
-    let field_width = (inner_width - 52.0).max(1.0);
-    let field = Input::new()
-        .value(props.draft)
-        .placeholder("输入目标，例如：列出当前任务")
-        .semantic_key("agent.prompt")
-        .width(field_width)
-        .height(44.0)
-        .focused(props.draft_focused)
-        .border_radius(6.0)
-        .into_node();
-    let send = icon_action_button(
-        build,
-        IconName::ArrowUpward,
-        AgentAction::SendDraft,
-        "agent.send",
-        props.hover_key,
-        props.draft.trim().is_empty(),
-        props.icons,
-    )?;
-
-    ui!(build {
-        <Column
-            width={width}
-            height={height}
-            fill={Fill::Solid(SURFACE)}
-            border_width={1.0}
-            border_color={BORDER}
-            border_radius={6.0}
-        >
-            <Row
-                width={width}
-                height={heading_h}
-                padding={Insets { top: 10.0, right: 12.0, bottom: 8.0, left: 12.0 }}
-                cross_align={CrossAlign::Center}
-            >
-                <Column gap={1.0}>
-                    <Text value={"对话"} font_size={16.0} line_height={20.0} color={TEXT} />
-                    <Text value={"observe → decide → act"} font_size={10.0} line_height={13.0} color={MUTED} />
-                </Column>
-                <View />
-                <Text value={format!("{} turns", props.messages.len() / 2)} font_size={11.0} line_height={15.0} color={MUTED} />
-            </Row>
-            <ScrollView
-                key={"agent.messages"}
-                width={width}
-                height={scroll_h}
-                padding={Insets { top: 8.0, right: 12.0, bottom: 8.0, left: 12.0 }}
-                gap={8.0}
-                overflow={Overflow::Scroll}
-                clip={true}
-                fill={Fill::Solid(PAGE)}
-            >
-                { messages }
-            </ScrollView>
-            <Row
-                width={width}
-                height={COMPOSER_H}
-                padding={Insets { top: 12.0, right: 12.0, bottom: 12.0, left: 12.0 }}
-                gap={8.0}
-                cross_align={CrossAlign::Center}
-                fill={Fill::Solid(SURFACE)}
-                border_width={1.0}
-                border_color={BORDER}
-            >
-                <ActionTarget
-                    on_input={AgentAction::DraftChanged}
-                    on_submit={AgentAction::SubmitDraft}
-                    on_cancel={AgentAction::ClearDraft}
-                >
-                    { field }
-                </ActionTarget>
-                { send }
-            </Row>
-        </Column>
-    })
-}
-
-fn trace_panel(props: &AgentViewProps<'_>, width: f32, height: f32) -> UiNode {
+) -> UiNode {
     let heading_h = 48.0;
     let mut entries = Vec::new();
-    if let Some(error) = props.error {
+    if let Some(error) = error {
         entries.push(info_card("ERROR", error, CORAL, CORAL_SOFT, width - 24.0));
     }
-    entries.push(task_summary(props.tasks, width - 24.0));
-    if let Some(report) = props.report {
+    entries.push(task_summary(tasks, width - 24.0));
+    if let Some(report) = report {
         entries.extend(
             report
                 .trace
@@ -309,7 +441,7 @@ fn trace_panel(props: &AgentViewProps<'_>, width: f32, height: f32) -> UiNode {
             ..LayoutConcern::default()
         })
         .into();
-    let metrics = props.report.map_or_else(
+    let metrics = report.map_or_else(
         || "idle".to_owned(),
         |report| format!("{} rounds · {} calls", report.rounds, report.tool_calls),
     );
