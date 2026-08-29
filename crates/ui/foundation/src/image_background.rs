@@ -99,7 +99,7 @@ mod tests {
         let node = ImageBackground::new("hero", content()).into_node();
         assert_eq!(node.kind, NodeKind::Stack);
         assert_eq!(node.children.len(), 2);
-        assert_eq!(node.children[0], content());
+        assert_eq!(*node.children[0], content());
 
         let overlay = &node.children[1];
         assert!(matches!(overlay.kind, NodeKind::Overlay(_)));

@@ -14,7 +14,7 @@
 
 pub mod keymap;
 
-use std::collections::{BTreeSet, HashMap};
+use std::{collections::{BTreeSet, HashMap}, rc::Rc};
 
 use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPublication,
@@ -1523,7 +1523,7 @@ mod tests {
             overflow: Overflow::Scroll,
             ..tela_contract::LayoutConcern::default()
         });
-        node.children = children;
+        node.children = children.into_iter().map(Rc::new).collect();
         keyed(node, key)
     }
 
@@ -1533,7 +1533,7 @@ mod tests {
             width: Some(Size::fixed(200.0)),
             ..tela_contract::LayoutConcern::default()
         });
-        node.children = children;
+        node.children = children.into_iter().map(Rc::new).collect();
         keyed(node, key)
     }
 

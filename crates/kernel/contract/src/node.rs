@@ -1,5 +1,7 @@
 //! 节点模型：`UiNode` 与五维度槽位、`NodeKind` 与容器配置（见 003-场景树与节点模型）。
 
+use std::rc::Rc;
+
 use crate::{BorderRadius, Color, Fill, Insets, KeymapScopeId, PixelOffset, ShadowSpec, Size};
 
 /// 结构 id：基座内部构建期分配，本帧内唯一有效（见 003-场景树与节点模型 4）。
@@ -336,6 +338,9 @@ pub struct VirtualListSpec {
 ///
 /// 按关注点维度拆成独立槽位：`layout`/`visual`/`interact`/`identity`/`content`。
 /// 树只描述"这帧该长什么样"；可变状态（焦点、光标、滚动、选中、弹窗）不放进树。
+///
+/// 子节点经 `Rc` 共享（002 §2 共享树）：未变子树跨帧是**同一指针**——
+/// "没变"从此是指针事实，克隆是句柄递增而非深拷，布局指纹按指针记忆。
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiNode {
     /// 节点类别：解释哪些维度、对后代产生什么影响。
@@ -350,8 +355,8 @@ pub struct UiNode {
     pub identity: Option<crate::IdentityConcern>,
     /// 内容维度：文本/纹理/几何。
     pub content: Option<ContentConcern>,
-    /// 子节点。
-    pub children: Vec<UiNode>,
+    /// 子节点（Rc 共享：克隆 = 句柄递增，未变子树跨帧同指针）。
+    pub children: Vec<Rc<UiNode>>,
 }
 
 impl UiNode {
@@ -368,8 +373,17 @@ impl UiNode {
         }
     }
 
-    /// 挂载子节点。
+    /// 挂载子节点（接受 owned 节点，内部包装为 Rc——构造方零改动）。
     pub fn with_children(mut self, children: impl IntoIterator<Item = UiNode>) -> Self {
+        self.children = children.into_iter().map(Rc::new).collect();
+        self
+    }
+
+    /// 挂载已共享的子节点（splice/拼接路径：直接复用 Rc，零拷贝）。
+    pub fn with_shared_children(
+        mut self,
+        children: impl IntoIterator<Item = Rc<UiNode>>,
+    ) -> Self {
         self.children = children.into_iter().collect();
         self
     }

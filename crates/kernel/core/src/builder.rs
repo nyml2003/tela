@@ -5,6 +5,8 @@
 //! - 布局容器（`LayoutContainer`）构造必须带 children；
 //! - 原语（`Primitive`）构造必须带匹配的 `content`。
 
+use std::rc::Rc;
+
 use tela_contract::{
     ContentConcern, FocusScopeSpec, IdentityConcern, ImageContent, InteractConcern, LayoutConcern,
     NinePatchContent, NodeKind, OverlaySpec, Point, ShortcutScopeSpec, TeleportSpec, TextContent,
@@ -81,7 +83,7 @@ impl LogicalContainer {
         C: IntoIterator,
         C::Item: Into<UiNode>,
     {
-        self.node.children = children.into_iter().map(Into::into).collect();
+        self.node.children = children.into_iter().map(|child| Rc::new(child.into())).collect();
         self
     }
 }

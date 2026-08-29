@@ -91,6 +91,10 @@ impl<M: TextMeasurer + ?Sized> ChildMeasurer<M> for DirtyChildMeasurer<'_> {
 }
 
 /// 递归内容指纹 + Full 覆盖标记。布局几何只依赖 kind、layout、content 和子树结构。
+///
+/// 子节点哈希经 `engine.fingerprint_memo` 按 Rc 指针记忆（002 §2 共享树）：
+/// 共享子树（retained 拼接产生）整次 resolve 只哈希一次。记忆的键是活节点
+/// 的地址，引擎每次 resolve 新建，跨帧无地址复用风险。
 fn subtree_fingerprint(node: &UiNode, hasher: &mut FnvHasher) -> bool {
     hash_kind(&node.kind, hasher);
     if let Some(layout) = &node.layout {
@@ -162,10 +166,33 @@ fn subtree_fingerprint(node: &UiNode, hasher: &mut FnvHasher) -> bool {
         .as_ref()
         .is_some_and(|identity| identity.update_mode == UpdateMode::Full);
     hasher.write_u64(node.children.len() as u64);
-    for child in &node.children {
-        has_full_override |= subtree_fingerprint(child, hasher);
-    }
     has_full_override
+}
+
+/// 计算节点子树指纹（含 ptr 记忆）：本节点槽位哈希 + 各子子树内容哈希的混合。
+///
+/// 子贡献是**内容哈希**（跨帧稳定，LayoutCache 命中依赖这一点）；
+/// 记忆只发生在"同一 Rc 指针的重复出现"上（共享子树，单次 resolve 内不变）。
+fn memoized_subtree_fingerprint(
+    node: &UiNode,
+    memo: &mut HashMap<usize, (u64, bool)>,
+) -> (u64, bool) {
+    let key = node as *const UiNode as usize;
+    if let Some(cached) = memo.get(&key) {
+        return *cached;
+    }
+    let mut hasher = FnvHasher::new();
+    let mut has_full_override = subtree_fingerprint(node, &mut hasher);
+    hasher.write_u64(node.children.len() as u64);
+    for child in &node.children {
+        let (child_hash, child_override) = memoized_subtree_fingerprint(child, memo);
+        hasher.write_u64(child_hash);
+        hasher.write_u64(child_override as u64);
+        has_full_override |= child_override;
+    }
+    let result = (hasher.finish(), has_full_override);
+    memo.insert(key, result);
+    result
 }
 
 fn hash_kind(kind: &NodeKind, hasher: &mut FnvHasher) {

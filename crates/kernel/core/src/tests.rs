@@ -3,6 +3,7 @@
 //! （见 010-落地路线 M1、M2）。
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use tela_contract::{
     BaseSize, ClipRect, Color, Constraints, ContentConcern, CrossAlign, Fill, FocusAppearance,
     GridAlign, GridItemPlacement, GridSpec, GridTrack, IdentityConcern, Insets, InteractConcern,
@@ -1702,7 +1703,7 @@ fn nested_scroll_and_clip_rect_intersection() {
         clip: true,
         ..LayoutConcern::default()
     });
-    inner_clip.children.push(inner_rect);
+    inner_clip.children.push(Rc::new(inner_rect));
     let tree = UiTree::new(
         LayoutContainer::scroll_view([inner_clip]).layout(LayoutConcern {
             width: Some(Size::fixed(100.0)),
@@ -1737,7 +1738,7 @@ fn clip_container_clips_descendants() {
         clip: true,
         ..LayoutConcern::default()
     });
-    clip_node.children.push(child);
+    clip_node.children.push(Rc::new(child));
     let tree = UiTree::new(clip_node).unwrap();
     let frame = resolve(&tree);
     assert_eq!(

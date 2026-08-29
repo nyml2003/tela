@@ -26,6 +26,9 @@ pub struct DefaultLayoutEngine<'a, M: TextMeasurer + ?Sized> {
     text_measurer: &'a M,
     cache: MeasureCache,
     visits: HashMap<usize, usize>,
+    /// 子树指纹按 Rc 指针记忆（单次 resolve 生命周期）：共享子树只哈希一次。
+    /// 引擎每次 resolve 新建，天然按遍清空——不存在跨帧地址复用风险。
+    pub(crate) fingerprint_memo: HashMap<usize, (u64, bool)>,
 }
 
 /// 容器调度时对子树的唯一入口。
@@ -80,6 +83,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             text_measurer,
             cache: MeasureCache::default(),
             visits: HashMap::new(),
+            fingerprint_memo: HashMap::new(),
         }
     }
 
@@ -383,7 +387,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             .into_iter()
             .map(|box_| box_.expect("布局形状已在构建期校验"))
             .collect();
-        let margins: Vec<Insets> = node.children.iter().map(margin_of).collect();
+        let margins: Vec<Insets> = node.children.iter().map(|child| margin_of(child)).collect();
         let content_main = boxes
             .iter()
             .zip(&margins)

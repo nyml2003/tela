@@ -234,7 +234,7 @@ mod tests {
         if let Some(ContentConcern::Text(text)) = node.content.as_ref() {
             return Some(text.text.as_str());
         }
-        node.children.iter().find_map(first_text)
+        node.children.iter().find_map(|child| first_text(child))
     }
 
     #[test]
@@ -243,7 +243,7 @@ mod tests {
         let labels = node
             .children
             .iter()
-            .filter_map(first_text)
+            .filter_map(|child| first_text(child))
             .collect::<Vec<_>>();
         assert_eq!(
             labels,

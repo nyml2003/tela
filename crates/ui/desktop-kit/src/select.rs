@@ -4,6 +4,8 @@ use tela_contract::{
     Color, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, OverlaySpec, SemanticKey,
     UiNode, UpdateMode,
 };
+use std::rc::Rc;
+
 use tela_core::LayoutContainer;
 
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
@@ -196,6 +198,7 @@ impl Select {
         if !self.disabled
             && let Some(trigger) = node.children.first_mut()
         {
+            let trigger = Rc::make_mut(trigger);
             trigger.interact = Some(InteractConcern {
                 clickable: true,
                 hoverable: true,
@@ -413,6 +416,7 @@ impl Cascader {
         if !self.disabled
             && let Some(trigger) = node.children.first_mut()
         {
+            let trigger = Rc::make_mut(trigger);
             trigger.interact = Some(InteractConcern {
                 clickable: true,
                 hoverable: true,

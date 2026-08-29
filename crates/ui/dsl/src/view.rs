@@ -1492,7 +1492,7 @@ impl<A> ViewBuild<A> {
             merged_component_actions.extend(child.component_actions);
             animation_schedule.merge(child.animation_schedule);
         }
-        node.children = lowered_children;
+        node.children = lowered_children.into_iter().map(Rc::new).collect();
         let node = Self::attach_body_watches(
             ViewNode {
                 node,
@@ -1766,7 +1766,7 @@ mod tests {
             clickable: true,
             ..InteractConcern::default()
         });
-        button.children.push(UiNode::new(NodeKind::Rect));
+        button.children.push(std::rc::Rc::new(UiNode::new(NodeKind::Rect)));
         let target = build
             .action_target(
                 Body::new(vec![ViewChild::node(button)], Vec::new()),
