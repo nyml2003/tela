@@ -52,6 +52,13 @@ impl<T> Clone for Signal<T> {
     }
 }
 
+impl<T> std::fmt::Debug for Signal<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 只打印订阅身份：值可能很大或不满足 Debug，且调试关注的是"是不是同一个节点"。
+        formatter.debug_tuple("Signal").field(&self.id()).finish()
+    }
+}
+
 impl<T> Signal<T> {
     /// 用初始值创建 Signal。
     pub fn new(value: T) -> Self {

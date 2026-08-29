@@ -1,4 +1,9 @@
 //! Responsive Tela DSL presentation for the agent workbench.
+//!
+//! 契约（docs/001）：derive 组件输入只有 `#[watch]` 的 Signal/Computed 边。
+//! ChatPanel 携带 children（ActionTarget 所在的 composer 由非泛型根预构建），
+//! 自动退出 retained；TracePanel 无 children，默认 retained（入边无脏即命中）。
+//! viewport 经 `#[watch] viewport: Signal<Viewport>` 进入，宽高在组件内派生。
 
 use tela_contract::{
     BorderRadius, Color, CrossAlign, Fill, IconName, IconProvider, IdentityConcern, Insets,
@@ -7,7 +12,7 @@ use tela_contract::{
 };
 use tela_core::{LayoutContainer, Primitive};
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{Body, DslComponent, Signal, ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{Body, Computed, DslComponent, Signal, ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::{Button, ButtonPalette, Icon, Input};
 
 use crate::agent::{RunReport, Task, TraceEvent};
@@ -37,10 +42,14 @@ const COMPOSER_H: f32 = 68.0;
 pub struct AgentViewProps<'a> {
     /// Current logical viewport.
     pub viewport: Viewport,
+    /// viewport 的图节点：组件经 `#[watch]` 订阅，宽高在组件内派生。
+    pub viewport_signal: Signal<Viewport>,
     /// Controlled composer value.
     pub draft: Signal<String>,
     /// Visible conversation entries.
     pub messages: Signal<Vec<DisplayMessage>>,
+    /// 派生节点（Computed 活样例）：`turns = messages.len() / 2`。
+    pub turns: Computed<u32>,
     /// Most recent agent execution.
     pub report: Signal<Option<RunReport>>,
     /// Persistent local tasks.
@@ -55,16 +64,59 @@ pub struct AgentViewProps<'a> {
     pub icons: &'static dyn IconProvider,
 }
 
-/// 对话面板：订阅消息列表，信号变化时由订阅标脏驱动重建。
+/// 页面几何派生（viewport → 各面板宽高）；根与面板共用，保证口径一致。
+struct PageMetrics {
+    desktop: bool,
+    header_height: f32,
+    chat_width: f32,
+    chat_height: f32,
+    trace_width: f32,
+    trace_height: f32,
+}
+
+fn page_metrics(viewport: &Viewport) -> PageMetrics {
+    let desktop = viewport.width >= DESKTOP_BREAKPOINT;
+    let header_height = if desktop { 78.0 } else { 106.0 };
+    let content_width = (viewport.width - PAGE_PAD * 2.0).max(1.0);
+    let content_height = (viewport.height - header_height - PAGE_PAD * 2.0).max(1.0);
+    if desktop {
+        let chat_width = ((content_width - GAP) * 0.60).max(1.0);
+        PageMetrics {
+            desktop,
+            header_height,
+            chat_width,
+            chat_height: content_height,
+            trace_width: (content_width - GAP - chat_width).max(1.0),
+            trace_height: content_height,
+        }
+    } else {
+        let chat_height = (content_height * 0.59).max(250.0).min(content_height);
+        PageMetrics {
+            desktop,
+            header_height,
+            chat_width: content_width,
+            chat_height,
+            trace_width: content_width,
+            trace_height: (content_height - GAP - chat_height).max(1.0),
+        }
+    }
+}
+
+/// 对话面板：订阅消息/草稿/viewport/派生 turns。
 ///
-/// 面板本身是纯展示组件；含 `ActionTarget` 的输入条由非泛型父级预构建后作为
-/// children 传入（动作值类型必须等于 build 的动作类型，泛型 view 内无法声明）。
+/// 携带 children（composer 含 ActionTarget，动作值类型必须等于 build 的动作类型，
+/// 泛型 view 内无法声明，故由非泛型根预构建传入）→ 自动退出 retained；
+/// watch 声明仍生效：任一边变脏即驱动重建（含子树展示的 draft）。
 #[derive(DslComponent)]
 struct ChatPanel {
     #[watch]
     messages: Signal<Vec<DisplayMessage>>,
-    width: f32,
-    height: f32,
+    #[watch]
+    draft: Signal<String>,
+    #[watch]
+    viewport: Signal<Viewport>,
+    #[watch]
+    turns: Computed<u32>,
 }
 
 impl ChatPanel {
@@ -73,25 +125,28 @@ impl ChatPanel {
         build: &mut ViewBuild<A>,
         children: Body<A>,
     ) -> ViewResult<ViewOutput<A>> {
+        let metrics = page_metrics(&self.viewport.get());
+        let width = metrics.chat_width;
+        let height = metrics.chat_height;
         let heading_h = 48.0;
-        let scroll_h = (self.height - heading_h - COMPOSER_H).max(1.0);
-        let inner_width = (self.width - 24.0).max(1.0);
+        let scroll_h = (height - heading_h - COMPOSER_H).max(1.0);
+        let inner_width = (width - 24.0).max(1.0);
         let messages = self
             .messages
             .with(|messages| message_list(messages, inner_width));
-        let turns = self.messages.with(|messages| messages.len() / 2);
+        let turns = self.turns.get();
 
         ui!(build {
             <Column
-                width={self.width}
-                height={self.height}
+                width={width}
+                height={height}
                 fill={Fill::Solid(SURFACE)}
                 border_width={1.0}
                 border_color={BORDER}
                 border_radius={6.0}
             >
                 <Row
-                    width={self.width}
+                    width={width}
                     height={heading_h}
                     padding={Insets { top: 10.0, right: 12.0, bottom: 8.0, left: 12.0 }}
                     cross_align={CrossAlign::Center}
@@ -105,7 +160,7 @@ impl ChatPanel {
                 </Row>
                 <ScrollView
                     key={"agent.messages"}
-                    width={self.width}
+                    width={width}
                     height={scroll_h}
                     padding={Insets { top: 8.0, right: 12.0, bottom: 8.0, left: 12.0 }}
                     gap={8.0}
@@ -121,87 +176,9 @@ impl ChatPanel {
     }
 }
 
-/// 受控输入框：订阅草稿 signal；节点本体不携带动作，动作路由由外层 ActionTarget 提供。
+/// 执行轨迹面板：订阅报告、任务、错误与 viewport；内容为纯展示子树，默认 retained
+/// （入边无脏 → 不重求值，缓存输出原样拼回；宽高在组件内从 viewport 派生）。
 #[derive(DslComponent)]
-#[memo]
-struct DraftField {
-    #[watch]
-    draft: Signal<String>,
-    width: f32,
-    focused: bool,
-}
-
-impl DraftField {
-    fn view<A>(
-        &self,
-        _build: &mut ViewBuild<A>,
-        _children: Body<A>,
-    ) -> ViewResult<ViewOutput<A>> {
-        let draft = self.draft.get();
-        Ok(ViewOutput::opaque(
-            Input::new()
-                .value(&draft)
-                .placeholder("输入目标，例如：列出当前任务")
-                .semantic_key("agent.prompt")
-                .width(self.width)
-                .height(44.0)
-                .focused(self.focused)
-                .border_radius(6.0)
-                .into_node(),
-        ))
-    }
-}
-
-/// 输入条：受控输入 + 发送按钮，携带 ActionTarget，必须在非泛型构建上下文中生成。
-fn composer_dsl(
-    build: &mut ViewBuild<AgentAction>,
-    props: &AgentViewProps<'_>,
-    width: f32,
-) -> ViewResult<ViewOutput<AgentAction>> {
-    let inner_width = (width - 24.0).max(1.0);
-    let field_width = (inner_width - 52.0).max(1.0);
-    let send = icon_action_button(
-        build,
-        IconName::ArrowUpward,
-        AgentAction::SendDraft,
-        "agent.send",
-        props.hover_key,
-        props.draft.get().trim().is_empty(),
-        props.icons,
-    )?;
-
-    ui!(build {
-        <Row
-            width={width}
-            height={COMPOSER_H}
-            padding={Insets { top: 12.0, right: 12.0, bottom: 12.0, left: 12.0 }}
-            gap={8.0}
-            cross_align={CrossAlign::Center}
-            fill={Fill::Solid(SURFACE)}
-            border_width={1.0}
-            border_color={BORDER}
-        >
-            <ActionTarget
-                on_input={AgentAction::DraftChanged}
-                on_submit={AgentAction::SubmitDraft}
-                on_cancel={AgentAction::ClearDraft}
-            >
-                <DraftField
-                    draft={props.draft.clone()}
-                    width={field_width}
-                    focused={props.draft_focused}
-                />
-            </ActionTarget>
-            { send }
-        </Row>
-    })
-}
-
-/// 执行轨迹面板：订阅报告、任务与错误快照；内容为纯展示子树。
-///
-/// `#[memo]`：signal 未变且 props 未变时跳过 render，直接拼回上次输出。
-#[derive(DslComponent)]
-#[memo]
 struct TracePanel {
     #[watch]
     report: Signal<Option<RunReport>>,
@@ -209,8 +186,8 @@ struct TracePanel {
     tasks: Signal<Vec<Task>>,
     #[watch]
     error: Signal<Option<String>>,
-    width: f32,
-    height: f32,
+    #[watch]
+    viewport: Signal<Viewport>,
 }
 
 impl TracePanel {
@@ -221,12 +198,13 @@ impl TracePanel {
     ) -> ViewResult<ViewOutput<A>> {
         #[cfg(test)]
         bump_trace_renders();
+        let metrics = page_metrics(&self.viewport.get());
         Ok(ViewOutput::opaque(trace_panel_body(
             self.report.get().as_ref(),
             &self.tasks.get(),
             self.error.get().as_deref(),
-            self.width,
-            self.height,
+            metrics.trace_width,
+            metrics.trace_height,
         )))
     }
 }
@@ -246,77 +224,115 @@ pub(crate) fn trace_renders() -> usize {
     TRACE_RENDERS.with(std::cell::Cell::get)
 }
 
+/// 输入条：受控输入 + 发送按钮，携带 ActionTarget，必须在非泛型构建上下文中生成。
+/// 输入框本体是普通节点（常量与宿主派生值直接内联；draft 由面板的 watch 驱动刷新）。
+fn composer_dsl(
+    build: &mut ViewBuild<AgentAction>,
+    props: &AgentViewProps<'_>,
+    width: f32,
+) -> ViewResult<ViewOutput<AgentAction>> {
+    let inner_width = (width - 24.0).max(1.0);
+    let field_width = (inner_width - 52.0).max(1.0);
+    let draft = props.draft.get();
+    let field = Input::new()
+        .value(&draft)
+        .placeholder("输入目标，例如：列出当前任务")
+        .semantic_key("agent.prompt")
+        .width(field_width)
+        .height(44.0)
+        .focused(props.draft_focused)
+        .border_radius(6.0)
+        .into_node();
+    let send = icon_action_button(
+        build,
+        IconName::ArrowUpward,
+        AgentAction::SendDraft,
+        "agent.send",
+        props.hover_key,
+        draft.trim().is_empty(),
+        props.icons,
+    )?;
+
+    ui!(build {
+        <Row
+            width={width}
+            height={COMPOSER_H}
+            padding={Insets { top: 12.0, right: 12.0, bottom: 12.0, left: 12.0 }}
+            gap={8.0}
+            cross_align={CrossAlign::Center}
+            fill={Fill::Solid(SURFACE)}
+            border_width={1.0}
+            border_color={BORDER}
+        >
+            <ActionTarget
+                on_input={AgentAction::DraftChanged}
+                on_submit={AgentAction::SubmitDraft}
+                on_cancel={AgentAction::ClearDraft}
+            >
+                { field }
+            </ActionTarget>
+            { send }
+        </Row>
+    })
+}
+
 /// Builds the complete responsive agent workbench.
 pub fn render_agent(
     build: &mut ViewBuild<AgentAction>,
     props: AgentViewProps<'_>,
 ) -> ViewResult<ViewOutput<AgentAction>> {
-    let desktop = props.viewport.width >= DESKTOP_BREAKPOINT;
-    let header_height = if desktop { 78.0 } else { 106.0 };
-    let content_width = (props.viewport.width - PAGE_PAD * 2.0).max(1.0);
-    let content_height = (props.viewport.height - header_height - PAGE_PAD * 2.0).max(1.0);
-    let header = header_dsl(build, &props, header_height, desktop)?;
+    let metrics = page_metrics(&props.viewport);
+    let header = header_dsl(build, &props, metrics.header_height, metrics.desktop)?;
+    let composer = composer_dsl(build, &props, metrics.chat_width)?;
+    let chat = ui!(build {
+        <ChatPanel
+            messages={props.messages.clone()}
+            draft={props.draft.clone()}
+            viewport={props.viewport_signal.clone()}
+            turns={props.turns.clone()}
+        >
+            { composer }
+        </ChatPanel>
+    });
+    let trace = ui!(build {
+        <TracePanel
+            report={props.report.clone()}
+            tasks={props.tasks.clone()}
+            error={props.error.clone()}
+            viewport={props.viewport_signal.clone()}
+        />
+    });
 
-    if desktop {
-        let chat_width = ((content_width - GAP) * 0.60).max(1.0);
-        let trace_width = (content_width - GAP - chat_width).max(1.0);
-        let composer = composer_dsl(build, &props, chat_width)?;
+    if metrics.desktop {
         ui!(build {
             <Frame width={props.viewport.width} height={props.viewport.height} fill={Fill::Solid(PAGE)}>
                 <Column width={props.viewport.width} height={props.viewport.height}>
                     { header }
                     <Row
                         width={props.viewport.width}
-                        height={(props.viewport.height - header_height).max(1.0)}
+                        height={(props.viewport.height - metrics.header_height).max(1.0)}
                         padding={Insets::all(PAGE_PAD)}
                         gap={GAP}
                     >
-                        <ChatPanel
-                            messages={props.messages.clone()}
-                            width={chat_width}
-                            height={content_height}
-                        >
-                            { composer }
-                        </ChatPanel>
-                        <TracePanel
-                            report={props.report.clone()}
-                            tasks={props.tasks.clone()}
-                            error={props.error.clone()}
-                            width={trace_width}
-                            height={content_height}
-                        />
+                        { chat }
+                        { trace }
                     </Row>
                 </Column>
             </Frame>
         })
     } else {
-        let chat_height = (content_height * 0.59).max(250.0).min(content_height);
-        let trace_height = (content_height - GAP - chat_height).max(1.0);
-        let composer = composer_dsl(build, &props, content_width)?;
         ui!(build {
             <Frame width={props.viewport.width} height={props.viewport.height} fill={Fill::Solid(PAGE)}>
                 <Column width={props.viewport.width} height={props.viewport.height}>
                     { header }
                     <Column
                         width={props.viewport.width}
-                        height={(props.viewport.height - header_height).max(1.0)}
+                        height={(props.viewport.height - metrics.header_height).max(1.0)}
                         padding={Insets::all(PAGE_PAD)}
                         gap={GAP}
                     >
-                        <ChatPanel
-                            messages={props.messages.clone()}
-                            width={content_width}
-                            height={chat_height}
-                        >
-                            { composer }
-                        </ChatPanel>
-                        <TracePanel
-                            report={props.report.clone()}
-                            tasks={props.tasks.clone()}
-                            error={props.error.clone()}
-                            width={content_width}
-                            height={trace_height}
-                        />
+                        { chat }
+                        { trace }
                     </Column>
                 </Column>
             </Frame>
@@ -391,7 +407,7 @@ fn header_dsl(
             <Column
                 width={props.viewport.width}
                 height={height}
-                padding={Insets { top: 10.0, right: 14.0, bottom: 10.0, left: 14.0 }} 
+                padding={Insets { top: 10.0, right: 14.0, bottom: 10.0, left: 14.0 }}
                 gap={7.0}
                 fill={Fill::Solid(HEADER)}
             >

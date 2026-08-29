@@ -1,6 +1,7 @@
 //! `ViewBuild`、词法 Context、临时锚点与 DSL 附属帧计划。
 
 use std::{
+    any::Any,
     cell::RefCell,
     collections::{BTreeSet, HashMap},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -15,14 +16,14 @@ use tela_contract::{
 use tela_core::UiTree;
 
 use crate::{
-    AnimationClock, AnimationSchedule, DslTrigger, ProvidedValue, Signal, TextActionMap,
+    AnimationClock, AnimationSchedule, DslTrigger, ProvidedValue, SignalId, TextActionMap,
     ViewContext,
     action::PendingAction,
     owner::{
         ComponentActionRoute, ComponentIdentity, ComponentOwnerFrame, ComponentRoute,
         ComponentState,
     },
-    runtime::{ResolvedWatch, SignalWatch, WatchSource},
+    runtime::{ResolvedWatch, WatchSource},
 };
 
 /// 视图构建返回的结构化结果。
@@ -308,6 +309,10 @@ impl NodeAnchor {
 /// 不把 path 提升为跨帧身份或 Kernel 公开契约。
 struct AnchorResolver<'tree> {
     keys_by_path: HashMap<Vec<usize>, &'tree SemanticKey>,
+    /// 语义 key → 树 key 表槽位的哈希索引：显式 semantic_key 锚点一次命中，
+    /// 不做 O(节点数) 的线性字符串扫描。
+    slots_by_key: HashMap<&'tree SemanticKey, usize>,
+    tree_keys: &'tree [SemanticKey],
 }
 
 impl<'tree> AnchorResolver<'tree> {
@@ -318,20 +323,23 @@ impl<'tree> AnchorResolver<'tree> {
             keys: &'keys [SemanticKey],
             next_key: &mut usize,
             keys_by_path: &mut HashMap<Vec<usize>, &'keys SemanticKey>,
+            slots_by_key: &mut HashMap<&'keys SemanticKey, usize>,
         ) {
             let key = keys
                 .get(*next_key)
                 .expect("validated UiTree key table must align with its DFS node tree");
             keys_by_path.insert(path.clone(), key);
+            slots_by_key.entry(key).or_insert(*next_key);
             *next_key += 1;
             for (index, child) in node.children.iter().enumerate() {
                 path.push(index);
-                visit(child, path, keys, next_key, keys_by_path);
+                visit(child, path, keys, next_key, keys_by_path, slots_by_key);
                 path.pop();
             }
         }
 
         let mut keys_by_path = HashMap::with_capacity(tree.keys().len());
+        let mut slots_by_key = HashMap::with_capacity(tree.keys().len());
         let mut path = Vec::new();
         let mut next_key = 0;
         visit(
@@ -340,18 +348,20 @@ impl<'tree> AnchorResolver<'tree> {
             tree.keys(),
             &mut next_key,
             &mut keys_by_path,
+            &mut slots_by_key,
         );
         debug_assert_eq!(next_key, tree.keys().len());
-        Self { keys_by_path }
+        Self {
+            keys_by_path,
+            slots_by_key,
+            tree_keys: tree.keys(),
+        }
     }
 
     fn resolve(&self, anchor: &NodeAnchor) -> Option<&'tree SemanticKey> {
         if let Some(key) = &anchor.semantic_key {
-            return self
-                .keys_by_path
-                .values()
-                .find(|candidate| ***candidate == *key)
-                .copied();
+            let slot = *self.slots_by_key.get(key)?;
+            return self.tree_keys.get(slot);
         }
         self.keys_by_path.get(anchor.child_path()).copied()
     }
@@ -419,8 +429,9 @@ pub(crate) struct PendingWatch {
     anchor: NodeAnchor,
     source: Box<dyn WatchSource>,
     site: ViewSite,
-    /// 创建该 watch 时最内层组件的 scope 段；`#[memo]` 记忆化用它关联组件与解析 key。
-    scope: String,
+    /// 创建该 watch 时最内层组件的 scope 句柄（Copy）；retained 命中判定用它
+    /// 关联组件与解析 key——纯整数比较。
+    scope: crate::owner::ScopeId,
 }
 
 impl Clone for PendingWatch {
@@ -429,7 +440,7 @@ impl Clone for PendingWatch {
             anchor: self.anchor.clone(),
             source: self.source.clone_box(),
             site: self.site,
-            scope: self.scope.clone(),
+            scope: self.scope,
         }
     }
 }
@@ -445,7 +456,7 @@ impl PendingWatch {
 pub struct WatchHandle {
     source: Box<dyn WatchSource>,
     site: ViewSite,
-    scope: String,
+    scope: crate::owner::ScopeId,
 }
 
 impl Clone for WatchHandle {
@@ -453,7 +464,7 @@ impl Clone for WatchHandle {
         Self {
             source: self.source.clone_box(),
             site: self.site,
-            scope: self.scope.clone(),
+            scope: self.scope,
         }
     }
 }
@@ -1097,7 +1108,7 @@ pub(crate) struct ResolvedPlans<A> {
     pub(crate) watches: Vec<ResolvedWatch>,
     /// 每个声明 watch 的组件 scope 段与其解析 key 的配对；
     /// `#[memo]` 记忆化用它判定"该组件订阅的 key 本帧是否被标脏"。
-    pub(crate) watch_scopes: Vec<(String, SemanticKey)>,
+    pub(crate) watch_scopes: Vec<(crate::owner::ScopeId, SemanticKey)>,
     pub(crate) actions: Vec<crate::action::ResolvedAction<A>>,
     pub(crate) component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
 }
@@ -1157,13 +1168,13 @@ where
 pub(crate) struct MemoFrameCtx {
     candidate: Rc<RefCell<crate::memo::MemoCandidate>>,
     dirty: BTreeSet<SemanticKey>,
-    watch_keys: crate::memo::WatchKeysByScope,
+    watch_keys: Rc<crate::memo::WatchKeysByScope>,
 }
 
 /// 一次 `ui!(build)` 调用的 Application 构建上下文。
 pub struct ViewBuild<A> {
     scope: Arc<ViewContext>,
-    component_identity_scopes: Vec<String>,
+    component_identity_scopes: Vec<crate::owner::ScopeId>,
     pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
     animation_clock: AnimationClock,
     animation_schedule: AnimationSchedule,
@@ -1226,7 +1237,7 @@ impl<A> ViewBuild<A> {
         mut self,
         candidate: Rc<RefCell<crate::memo::MemoCandidate>>,
         dirty: BTreeSet<SemanticKey>,
-        watch_keys: crate::memo::WatchKeysByScope,
+        watch_keys: Rc<crate::memo::WatchKeysByScope>,
     ) -> Self {
         self.memo = Some(MemoFrameCtx {
             candidate,
@@ -1242,15 +1253,19 @@ impl<A> ViewBuild<A> {
         self.memo.is_some()
     }
 
-    /// 尝试命中当前组件的 render 记忆。
+    /// 尝试命中当前组件的 render 记忆（retained 求值语义：入边无脏 → 不重求值）。
     ///
-    /// 命中条件：候选条目存在、指纹相等、缓存子树内任何组件订阅的 key 都不在本帧
-    /// dirty 集（嵌套子组件的 signal 变化必须让父级缓存失效，否则会拼回陈旧子树）。
-    /// 命中时补登记 owner `seen`、标记候选条目为 seen、把缓存子树身份并入当前收集帧，
-    /// 并重新声明缓存输出（节点 + watch 计划，供 reconcile 复用订阅）。
+    /// 命中条件：候选条目存在、`matches` 对上次实例快照判定相等（宏生成的
+    /// `SignalId` 纯身份比较）、缓存子树内任何订阅的 key 都不在本帧 dirty 集
+    /// （嵌套子组件的 signal 变化必须让父级缓存失效，否则会拼回陈旧子树）。
+    /// 命中时补登记 owner `seen`、标记候选条目为 seen、把缓存子树身份并入当前
+    /// 收集帧，并重新声明缓存输出（节点 + watch 计划，供 reconcile 复用订阅）。
     #[doc(hidden)]
-    pub fn memo_hit<F: PartialEq + 'static>(&mut self, fingerprint: &F) -> Option<ViewOutput<A>> {
-        let scope = self.component_identity_scopes.last().cloned()?;
+    pub fn memo_hit(
+        &mut self,
+        matches: impl FnOnce(&dyn Any) -> bool,
+    ) -> Option<ViewOutput<A>> {
+        let scope = self.component_identity_scopes.last().copied()?;
         let matched: Option<(Rc<crate::memo::MemoEntry>, bool)> = {
             let memo = self.memo.as_ref()?;
             let entry = Rc::clone(memo.candidate.borrow().entries.get(&scope)?);
@@ -1265,7 +1280,7 @@ impl<A> ViewBuild<A> {
         if dirty_subtree {
             return None;
         }
-        if entry.fingerprint.downcast_ref::<F>() != Some(fingerprint) {
+        if !matches(entry.inputs.as_ref()) {
             return None;
         }
         if let Some(owner) = self.owner_frame.as_ref() {
@@ -1275,7 +1290,7 @@ impl<A> ViewBuild<A> {
             let mut candidate = self.memo.as_ref()?.candidate.borrow_mut();
             candidate.seen.insert(scope);
             for identity in &entry.subtree {
-                candidate.seen.insert(identity.scope_segment());
+                candidate.seen.insert(identity.scope());
             }
         }
         if let Some(frame) = self.memo_identities.last_mut() {
@@ -1293,16 +1308,18 @@ impl<A> ViewBuild<A> {
         })
     }
 
-    /// 记录当前组件的一次 render 输出，供后续帧命中。
+    /// 记录当前组件的一次实例快照与 render 输出，供后续帧命中。
     ///
-    /// v1 只缓存纯 watch 输出：动作 / 组件动作 / 动画调度请求不参与
+    /// 快照即自包含的 retained element：输入边（Signal/Computed 句柄）+ 坐标（身份）
+    /// + 求值器（view 静态函数），可在不经过父级的情况下独立重入（3A 地基）。
+    /// 只缓存纯 watch 输出：动作 / 组件动作 / 动画调度请求不参与
     /// （动作载荷没有 `PartialEq` 保证，动画依赖时钟推进）。
     #[doc(hidden)]
-    pub fn memo_record<F: 'static>(&mut self, fingerprint: F, output: &ViewOutput<A>) {
+    pub fn memo_record<S: 'static>(&mut self, snapshot: S, output: &ViewOutput<A>) {
         let Some(memo) = self.memo.as_ref() else {
             return;
         };
-        let Some(scope) = self.component_identity_scopes.last().cloned() else {
+        let Some(scope) = self.component_identity_scopes.last().copied() else {
             return;
         };
         if !output.plans.actions.is_empty()
@@ -1317,7 +1334,7 @@ impl<A> ViewBuild<A> {
             .cloned()
             .unwrap_or_default();
         let entry = Rc::new(crate::memo::MemoEntry {
-            fingerprint: Rc::new(fingerprint),
+            inputs: Rc::new(snapshot),
             node: output.node.clone(),
             watches: output.plans.watches.clone(),
             subtree,
@@ -1352,15 +1369,20 @@ impl<A> ViewBuild<A> {
         owner_frame.borrow_mut().state_at(identity, initial)
     }
 
-    /// 为当前 DSL 调用点生成包含外围集合业务 key 的组件身份。
+    /// 为当前 DSL 调用点生成包含外围集合业务 key 的组件身份（整数驻留，无字符串分配）。
     #[doc(hidden)]
     pub fn component_identity(
         &self,
-        type_name: impl Into<String>,
+        kind: &'static str,
         site: ViewSite,
-        key: Option<impl Into<String>>,
+        key: Option<&str>,
     ) -> ComponentIdentity {
-        ComponentIdentity::from_scoped_site(type_name, &self.component_identity_scopes, site, key)
+        let parent = self
+            .component_identity_scopes
+            .last()
+            .copied()
+            .unwrap_or(crate::owner::ScopeId::ROOT);
+        ComponentIdentity::from_scoped_site(kind, parent, site, key)
     }
 
     /// 在一个 `<For>` item 的业务身份范围内惰性构造子树。
@@ -1371,9 +1393,16 @@ impl<A> ViewBuild<A> {
         key: &T,
         operation: impl FnOnce(&mut Self) -> ViewResult<R>,
     ) -> ViewResult<R> {
-        self.component_identity_scopes.push(format!(
-            "collection:{collection_scope}:{}",
-            key.encode_item_key()
+        let parent = self
+            .component_identity_scopes
+            .last()
+            .copied()
+            .unwrap_or(crate::owner::ScopeId::ROOT);
+        let encoded = key.encode_item_key();
+        self.component_identity_scopes.push(crate::owner::intern_collection_scope(
+            parent,
+            collection_scope,
+            &encoded,
         ));
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.component_identity_scopes
@@ -1390,8 +1419,7 @@ impl<A> ViewBuild<A> {
         identity: &ComponentIdentity,
         operation: impl FnOnce(&mut Self) -> ViewResult<R>,
     ) -> ViewResult<R> {
-        self.component_identity_scopes
-            .push(identity.scope_segment());
+        self.component_identity_scopes.push(identity.scope());
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.component_identity_scopes
             .pop()
@@ -1419,16 +1447,32 @@ impl<A> ViewBuild<A> {
         }
     }
 
-    /// 创建一个在当前节点根上登记的显式 Signal watch。
-    pub fn watch_source<T: 'static>(&self, signal: &Signal<T>, site: ViewSite) -> WatchHandle {
+    /// 创建一个在当前节点根上登记的显式 watch；`Signal`/`Computed` 均可订阅。
+    pub fn watch_source<S: crate::runtime::WatchSignal>(
+        &self,
+        source: &S,
+        site: ViewSite,
+    ) -> WatchHandle {
+        struct WatchableSource<S: crate::runtime::WatchSignal>(S);
+        impl<S: crate::runtime::WatchSignal> WatchSource for WatchableSource<S> {
+            fn signal_id(&self) -> SignalId {
+                crate::runtime::WatchSignal::signal_id(&self.0)
+            }
+            fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any> {
+                crate::runtime::WatchSignal::subscribe_erased(&self.0, callback)
+            }
+            fn clone_box(&self) -> Box<dyn WatchSource> {
+                Box::new(WatchableSource(self.0.clone()))
+            }
+        }
         WatchHandle {
-            source: Box::new(SignalWatch::new(signal)),
+            source: Box::new(WatchableSource(source.clone())),
             site,
             scope: self
                 .component_identity_scopes
                 .last()
-                .cloned()
-                .unwrap_or_default(),
+                .copied()
+                .unwrap_or(crate::owner::ScopeId::ROOT),
         }
     }
 

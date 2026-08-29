@@ -11,7 +11,7 @@ use tela_ui_dsl::{Body, ViewBuild, ViewOutput, ViewResult, ViewSite, into_view_c
 
 use crate::application::{EditorAction, IconCategory};
 
-use super::nav_button::NavButton;
+use super::nav_button::nav_button_node;
 use super::theme::{
     ACCENT_SOFT, BAR_BORDER, CONTENT_BACKGROUND, CONTENT_INSET, SECONDARY, TEXT, TITLE_BAR_H,
 };
@@ -219,15 +219,10 @@ fn category_buttons(
     for (category, label, suffix) in categories {
         let key = format!("editor.icons.category.{suffix}");
         let hovered = hover_key.map(String::as_str) == Some(key.as_str());
+        let button = nav_button_node(build, key, 48.0, label, category == selected, hovered, false)?;
         let button = ui!(build {
             <ActionTarget action={EditorAction::SetIconCategory(category)}>
-                <NavButton
-                    key={key}
-                    label={label}
-                    width={48.0}
-                    selected={category == selected}
-                    hovered={hovered}
-                />
+                { button }
             </ActionTarget>
         })?;
         children.push(into_view_child(button)?);

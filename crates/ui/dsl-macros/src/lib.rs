@@ -25,7 +25,7 @@ mod derive;
 ///
 /// The public spelling is `ui!(build { ... })`.
 /// 派生 `DslComponent`：struct 字段即 Props，生成 Props 镜像与 render 脚手架。
-#[proc_macro_derive(DslComponent, attributes(prop, inject, provide, watch, memo))]
+#[proc_macro_derive(DslComponent, attributes(prop, inject, provide, watch))]
 pub fn dsl_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
     match derive::expand_derive(input) {

@@ -4,7 +4,7 @@ use tela_app_runtime::{
     AppController, Application, ApplicationConfig, ControllerOutcome, FrameContext,
 };
 use tela_contract::{FocusAppearance, UiResources, Viewport};
-use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult};
+use tela_ui_dsl::{Computed, Signal, ViewBuild, ViewOutput, ViewResult, computed};
 
 use crate::agent::{Agent, MockChatModel, RunReport, Task};
 use crate::presentation::{AgentViewProps, render_agent};
@@ -53,12 +53,14 @@ pub enum AgentAction {
 /// Agent application controller and persistent in-Wasm session state.
 ///
 /// 可见状态全部持有为 `Signal`：写入相同值不触发帧，值变化由 `#[watch]` 组件
-/// 的订阅标脏驱动重建，而不是每次动作后全局失效投影。
+/// 的订阅标脏驱动重建，而不是每次动作后全局失效投影。派生值（turns）经
+/// `computed` 建为图节点：依赖即构造参数，源变重算、值等零传播。
 pub struct AgentDemoController {
     resources: &'static dyn UiResources,
     agent: Agent<MockChatModel>,
     draft: Signal<String>,
     messages: Signal<Vec<DisplayMessage>>,
+    turns: Computed<u32>,
     last_report: Signal<Option<RunReport>>,
     tasks: Signal<Vec<Task>>,
     last_error: Signal<Option<String>>,
@@ -67,11 +69,16 @@ pub struct AgentDemoController {
 impl AgentDemoController {
     /// Creates the workbench and performs a first inspect-tool run.
     pub fn new(resources: &'static dyn UiResources) -> Self {
+        let draft = Signal::new(String::new());
+        let messages = Signal::new(Vec::new());
+        // 派生节点：依赖（messages）即构造参数；setup 期创建、控制器持有。
+        let turns = computed(&messages, |messages| (messages.len() / 2) as u32);
         let mut controller = Self {
             resources,
             agent: Agent::new(MockChatModel::new(), MODEL_ID),
-            draft: Signal::new(String::new()),
-            messages: Signal::new(Vec::new()),
+            draft,
+            messages,
+            turns,
             last_report: Signal::new(None),
             tasks: Signal::new(Vec::new()),
             last_error: Signal::new(None),
@@ -156,8 +163,10 @@ impl AppController<AgentAction> for AgentDemoController {
             build,
             AgentViewProps {
                 viewport: ctx.viewport,
+                viewport_signal: ctx.viewport_signal.clone(),
                 draft: self.draft.clone(),
                 messages: self.messages.clone(),
+                turns: self.turns.clone(),
                 report: self.last_report.clone(),
                 tasks: self.tasks.clone(),
                 error: self.last_error.clone(),

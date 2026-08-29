@@ -30,7 +30,7 @@ use tela_core::{
 };
 use tela_ui_dsl::{
     AnimationClock, AnimationSchedule, FrameCoordinator, FrameToken, FramedInteraction,
-    PreparedFrame, ResolvedFrame, ViewBuild, ViewOutput, ViewResult, ViewSite,
+    PreparedFrame, ResolvedFrame, Signal, ViewBuild, ViewOutput, ViewResult, ViewSite,
 };
 
 use crate::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
@@ -39,10 +39,13 @@ use crate::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
 ///
 /// [`PartialEq`] 用于收敛循环判定：reconcile 之后投影仍与渲染输入一致时，候选才算
 /// 稳定。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FrameContext {
     /// 当前逻辑内容区尺寸（CSS 点）。
     pub viewport: Viewport,
+    /// viewport 的图节点（001 §2 宿主态收编）：组件以 `#[watch] viewport` 声明
+    /// 依赖，宽高变化驱动重建而无需普通 props 通道。与 `viewport` 字段同源。
+    pub viewport_signal: Signal<Viewport>,
     /// 原生窗口是否最大化（自绘标题栏投影需要）。
     pub window_maximized: bool,
     /// 当前悬停节点的语义 key（组件高亮需要）。
@@ -53,6 +56,20 @@ pub struct FrameContext {
     pub focus_key: Option<SemanticKey>,
     /// 已发现滚动容器（提交序）的当前 offset_y（虚拟列表窗口化需要）。
     pub scroll_offsets: Vec<(SemanticKey, f32)>,
+}
+
+// PartialEq 用于收敛循环判定（reconcile 后投影与渲染输入一致才算稳定）。
+// viewport_signal 恒为同一对象（构造一次），按 SignalId 比较即可。
+impl PartialEq for FrameContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.viewport == other.viewport
+            && self.viewport_signal.id() == other.viewport_signal.id()
+            && self.window_maximized == other.window_maximized
+            && self.hover_key == other.hover_key
+            && self.pressed_key == other.pressed_key
+            && self.focus_key == other.focus_key
+            && self.scroll_offsets == other.scroll_offsets
+    }
 }
 
 /// 应用会话配置（壳无关，由产品装配时注入）。
@@ -200,6 +217,9 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     controller: C,
     config: ApplicationConfig,
     viewport: Viewport,
+    /// viewport 的图节点（宿主态收编）：`set_viewport` 同步写入，组件经
+    /// `#[watch] viewport` 订阅（相等性短路防同值帧）。
+    viewport_signal: Signal<Viewport>,
     window_maximized: bool,
     profile: DefaultApplicationProfile,
     view_state: ViewStateStore,
@@ -257,6 +277,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             resources,
             controller,
             config,
+            viewport_signal: Signal::new(viewport),
             viewport,
             window_maximized: false,
             profile: DefaultApplicationProfile::new(),
@@ -419,6 +440,9 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             viewport.height
         );
         self.viewport = viewport;
+        // 宿主态收编（001 §2）：viewport 同步进图节点；相等性短路防同值帧。
+        // 全局失效路径保留（scroll 钳制、虚拟列表窗口等宿主逻辑仍需全量重建）。
+        self.viewport_signal.set(viewport);
         self.invalidate_frame();
         true
     }
@@ -1016,6 +1040,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     fn candidate_context(&self, state: &ViewStateStore) -> FrameContext {
         FrameContext {
             viewport: self.viewport,
+            viewport_signal: self.viewport_signal.clone(),
             window_maximized: self.window_maximized,
             hover_key: state.hover_key().cloned(),
             pressed_key: state.pressed_mouse_key().cloned(),

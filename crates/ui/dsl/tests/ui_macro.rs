@@ -67,52 +67,16 @@ impl WatchedCount {
     }
 }
 
-/// 测试组件：从 Context 注入（替代旧 `@inject` 指令）。
-#[derive(DslComponent)]
-struct InjectLabel {
-    #[inject]
-    label: String,
-}
-
-impl InjectLabel {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        ui!(build { <Text value={self.label.clone()} /> })
-    }
-}
-
-/// 测试组件：把值压入子作用域（替代旧 `@provide` 指令）。
-#[derive(DslComponent)]
-struct ProvideString {
-    #[provide]
-    value: String,
-}
-
-impl ProvideString {
-    fn view<A>(&self, build: &mut ViewBuild<A>, children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        ui!(build {
-            <Column>
-                <Text value={self.value.clone()} />
-                { build.fragment(children, tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))? }
-            </Column>
-        })
-    }
-}
-
-/// 测试组件：inject + provide 组合（作用域遮蔽测试）。
-#[allow(dead_code)]
-#[derive(DslComponent)]
-struct ProvideInject {
-    #[provide]
-    value: String,
-    #[inject]
-    label: String,
-}
-
-#[allow(dead_code)]
-impl ProvideInject {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        ui!(build { <Text value={format!("{}:{}", self.value, self.label)} /> })
-    }
+/// 从当前词法作用域读取一个 `String` 并渲染为文本。
+///
+/// derive 契约（001 §2）下作用域注入不再作为 derive 字段通道；此普通函数
+/// 直接消费 `ViewContext::inject`，验证 provide/inject 机制本身仍然可用。
+fn inject_label(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
+    let label: String = build
+        .current_scope()
+        .inject::<String>(tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))?
+        .clone();
+    ui!(build { <Text value={label} /> })
 }
 
 fn render_basics(build: &mut ViewBuild<Action>, state: &State) -> ViewResult<ViewOutput<Action>> {
@@ -161,11 +125,18 @@ fn render_node_scoped_watch(
 }
 
 fn render_explicit_child_scope(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ProvideString value={"outer".to_owned()}>
-            <InjectLabel label={"inner".to_owned()} />
-        </ProvideString>
-    })
+    let site = tela_ui_dsl::ViewSite::new(file!(), line!(), column!());
+    build.with_scope(
+        vec![tela_ui_dsl::ProvidedValue::new::<String>("outer".to_owned())],
+        site,
+        |build| {
+            build.with_scope(
+                vec![tela_ui_dsl::ProvidedValue::new::<String>("inner".to_owned())],
+                tela_ui_dsl::ViewSite::new(file!(), line!(), column!()),
+                |build| ui!(build { <Frame>{ inject_label(build)? }</Frame> }),
+            )
+        },
+    )
 }
 
 fn render_nested(build: &mut ViewBuild<Action>, state: &State) -> ViewResult<ViewOutput<Action>> {
@@ -747,13 +718,11 @@ fn nested_explicit_ui_scope_inherits_its_parent_context() {
     let tree = UiTree::new(view.node().clone())
         .expect("nested explicit scope must resolve the parent provider");
 
+    // Frame > Text 两层；嵌套 with_scope（outer→inner）不添加树层，
+    // inject_label 解析最近作用域的 "inner"（缺失则构建失败）。
     assert_eq!(
         tree.keys(),
-        [
-            SemanticKey("/".to_owned()),
-            SemanticKey("/0/".to_owned()),
-            SemanticKey("/1/".to_owned()),
-        ]
+        [SemanticKey("/".to_owned()), SemanticKey("/0/".to_owned()),]
     );
 }
 

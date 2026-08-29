@@ -35,6 +35,9 @@ impl ComponentSetupContext {
 pub struct ComponentRenderContext<'a, A> {
     build: &'a mut ViewBuild<A>,
     site: ViewSite,
+    /// 身份由 render_component 的 scope 栈承载（整数句柄）；此字段保留给
+    /// 未来组件级 API（如 transition 精细锚定），当前仅作 Debug。
+    #[allow(dead_code)]
     identity: ComponentIdentity,
 }
 
@@ -73,14 +76,11 @@ impl<'a, A> ComponentRenderContext<'a, A> {
     where
         T: Interpolate + PartialEq + Clone + 'static,
     {
+        let transition_key = format!("transition:{}", key.into());
         let transition_identity = self.build.component_identity(
             std::any::type_name::<AnimationController<T>>(),
             self.site,
-            Some(format!(
-                "{}:transition:{}",
-                self.identity.path(),
-                key.into()
-            )),
+            Some(transition_key.as_str()),
         );
         let state = self.build.local_state_for(transition_identity, || {
             AnimationController::new(target.value().clone())
@@ -113,8 +113,11 @@ pub fn render_component<'a, C, A>(
 where
     C: DslComponent,
 {
-    let key = C::identity_key(&props);
-    let identity = build.component_identity(std::any::type_name::<C>(), site, key);
+    let identity = build.component_identity(
+        std::any::type_name::<C>(),
+        site,
+        C::identity_key(&props).as_deref(),
+    );
     let memo_active = build.memo_enabled();
     if memo_active {
         build.memo_component_started(identity.clone());
@@ -158,8 +161,13 @@ where
     C::Props: Clone + 'static,
     A: 'static,
 {
-    let identity =
-        build.component_identity(std::any::type_name::<C>(), site, C::identity_key(&props));
+    // render_component 内部已形成同一身份；这里重新形成一次（整数驻留，成本为一次
+    // 哈希查找）供路由绑定——避免跨函数传递改动公共协议。
+    let identity = build.component_identity(
+        std::any::type_name::<C>(),
+        site,
+        C::identity_key(&props).as_deref(),
+    );
     let route_props = props.clone();
     let view = render_component::<C, A>(build, props, children, site)?;
     C::bind_output(view, identity, &route_props, output, site)

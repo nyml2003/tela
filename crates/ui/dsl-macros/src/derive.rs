@@ -28,14 +28,14 @@ struct FieldSpec {
     ident: Ident,
     ty: Type,
     kind: FieldKind,
+    /// `#[inject]` 叠加在 `#[watch]` 字段上：props 显式传入优先，否则从作用域
+    /// 解析 Signal/Computed（inject 边化：provide 的响应式节点直达注入点）。
+    watch_inject: bool,
     default_expr: Option<Expr>,
 }
 
 pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
     let name = input.ident.clone();
-    // `#[memo]` 容器属性：opt-in 记忆化——指纹相等且子树订阅未标脏时跳过 render，
-    // 直接拼回上次输出（见 tela-ui-dsl 的 `memo` 模块）。
-    let memo = input.attrs.iter().any(|attr| attr.path().is_ident("memo"));
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => fields.named.clone(),
@@ -57,6 +57,24 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
     let mut specs = Vec::new();
     for field in fields.iter() {
         specs.push(parse_field(field)?);
+    }
+
+    // 契约（001 §2）：derive 组件的输入只能是图上的边——`#[watch]` 字段
+    // （Signal/Computed，可叠加 `#[inject]` 从作用域解析）或身份用的 `key`。
+    // 普通值 props / 渲染期 inject / provide 一律编译错误：会变的值以节点传递，
+    // 恒定能力在 setup 期注入，常量写进 view 体。
+    for spec in &specs {
+        if spec.kind != FieldKind::Watch && spec.ident != "key" {
+            return Err(Error::new_spanned(
+                spec.ty.clone(),
+                format!(
+                    "derive 组件字段 '{}' 只允许 #[watch]（Signal/Computed）或 `key`；\
+                     动态数据用 Signal/Computed 传递（可叠加 #[inject] 从作用域解析），\
+                     恒定能力在 setup 期注入，常量写进 view 体",
+                    spec.ident
+                ),
+            ));
+        }
     }
 
     // `#[tela(tag = "...")]` 别名不支持（033 定稿：默认标签名 = struct 名）。
@@ -89,19 +107,19 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         }
     });
 
-    // ---- 组装表达式 ----
-    let assembly = specs.iter().map(|spec| {
+    // ---- 组装表达式（纯借用：可重复执行，供快照再构造一次实例）----
+    let assembly: Vec<_> = specs.iter().map(|spec| {
         let ident = &spec.ident;
         match spec.kind {
-            FieldKind::Plain => quote!(#ident: props.#ident.unwrap_or_default(),),
+            FieldKind::Plain => quote!(#ident: props.#ident.clone().unwrap_or_default(),),
             FieldKind::Defaulted => {
                 let default = spec.default_expr.as_ref().expect("defaulted has expr");
-                quote!(#ident: props.#ident.unwrap_or(#default),)
+                quote!(#ident: props.#ident.clone().unwrap_or(#default),)
             }
-            FieldKind::Option => quote!(#ident: props.#ident,),
+            FieldKind::Option => quote!(#ident: props.#ident.clone(),),
             FieldKind::Inject => {
                 let binding = format_ident!("__tela_inject_{ident}");
-                quote!(#ident: #binding,)
+                quote!(#ident: #binding.clone(),)
             }
             FieldKind::Provide => {
                 let binding = format_ident!("__tela_provide_{ident}");
@@ -112,7 +130,8 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 quote!(#ident: #binding.clone(),)
             }
         }
-    });
+    })
+    .collect();
 
     // ---- inject 绑定 ----
     let inject_code = specs.iter().filter_map(|spec| {
@@ -131,21 +150,36 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
     });
 
     // ---- watch 绑定 ----
-    // ---- watch 绑定：缺失时整帧返回错误（不 panic）----
+    // ---- watch 绑定：缺失时整帧返回错误（不 panic）；#[inject] 叠加时从作用域解析 ----
     let dsl = dsl_path();
     let watch_code = specs.iter().filter_map(|spec| {
         if spec.kind != FieldKind::Watch {
             return None;
         }
         let ident = &spec.ident;
+        let ty = &spec.ty;
         let binding = format_ident!("__tela_watch_{ident}");
+        let fallback = if spec.watch_inject {
+            // inject 边化：props 显式传入优先，否则从作用域解析 Signal/Computed——
+            // provide 的响应式节点越过中间节点直达注入点（001 §2）。
+            quote! {
+                __tela_build
+                    .current_scope()
+                    .inject::<#ty>(__tela_site)?
+                    .clone()
+            }
+        } else {
+            quote! {
+                return Err(#dsl::ViewBuildError::MissingRequiredProp {
+                    name: stringify!(#ident),
+                    site: __tela_site,
+                })
+            }
+        };
         Some(quote! {
             let #binding = match props.#ident {
                 Some(value) => value,
-                None => return Err(#dsl::ViewBuildError::MissingRequiredProp {
-                    name: stringify!(#ident),
-                    site: __tela_site,
-                }),
+                None => #fallback,
             };
         })
     });
@@ -186,19 +220,18 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         });
 
     // ---- 类型 assert：仅定义检查函数并在未执行的 __check 中引用（编译期强制）----
-    let assert_calls = specs.iter().map(|spec| {
-        let ty = &spec.ty;
-        match spec.kind {
-            FieldKind::Plain => {
-                quote!(__assert_default::<#ty>();)
+    // 装配为借用式（clone + unwrap），所有字段需要 Clone；Plain 另需 Default 兜底。
+    let assert_calls: Vec<_> = specs
+        .iter()
+        .map(|spec| {
+            let ty = &spec.ty;
+            let clone = quote!(__assert_clone::<#ty>(););
+            match spec.kind {
+                FieldKind::Plain => quote!(__assert_default::<#ty>(); #clone),
+                _ => clone,
             }
-            FieldKind::Watch => quote!(),
-            FieldKind::Inject | FieldKind::Provide => {
-                quote!(__assert_clone::<#ty>();)
-            }
-            FieldKind::Defaulted | FieldKind::Option => quote!(),
-        }
-    });
+        })
+        .collect();
 
     // ---- render 主体 ----
     let has_provide = specs.iter().any(|spec| spec.kind == FieldKind::Provide);
@@ -235,74 +268,48 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         }
     };
 
-    // `#[memo]`：生成 props 指纹结构与 render 记忆化分支。
-    let (memo_fp_impl, memo_render) = if memo {
-        let fp_name = format_ident!("{}MemoFingerprint", name);
-        let fp_fields = specs.iter().map(|spec| {
+    // ---- retained 求值语义（默认，001 §2）：入边无脏 → 不重求值 ----
+    // 命中判定 = 上次实例快照的纯身份比较（watch 字段比 SignalId，key 已含于身份）。
+    // 携带 children 内容的调用点自动退出（Children::empty 判定在运行时完成）。
+    let memo_field_matches = specs
+        .iter()
+        .filter(|spec| spec.kind == FieldKind::Watch)
+        .map(|spec| {
             let ident = &spec.ident;
-            match spec.kind {
-                FieldKind::Watch => quote!(#ident: #dsl::SignalId,),
-                _ => {
-                    let ty = &spec.ty;
-                    quote!(#ident: #ty,)
+            quote!(self.#ident.id() == cached.#ident.id())
+        });
+    let memo_matches_impl = quote! {
+        const _: () = {
+            impl #name {
+                #[doc(hidden)]
+                fn __tela_memo_matches(&self, cached: &dyn ::core::any::Any) -> bool {
+                    cached
+                        .downcast_ref::<#name>()
+                        .is_some_and(|cached| true #(&& #memo_field_matches)*)
                 }
             }
-        });
-        let fp_build = specs.iter().map(|spec| {
-            let ident = &spec.ident;
-            match spec.kind {
-                FieldKind::Watch => quote!(#ident: self.#ident.id(),),
-                _ => quote!(#ident: self.#ident.clone(),),
+        };
+    };
+    let memo_render = quote! {
+        let __tela_memo = __tela_build.memo_enabled() && __tela_children.is_empty();
+        if __tela_memo {
+            if let Some(__tela_cached) =
+                __tela_build.memo_hit(|cached| __tela_inst.__tela_memo_matches(cached))
+            {
+                // 命中：缓存输出已携带 watch 声明，直接拼回，跳过 view 与重复 attach。
+                return Ok(__tela_cached);
             }
-        });
-        (
-            quote! {
-                const _: () = {
-                    #[derive(Clone, PartialEq)]
-                    struct #fp_name {
-                        #(#fp_fields)*
-                    }
-
-                    impl #name {
-                        #[doc(hidden)]
-                        fn __tela_memo_fingerprint(&self) -> #fp_name {
-                            #fp_name {
-                                #(#fp_build)*
-                            }
-                        }
-                    }
-                };
-            },
-            quote! {
-                let __tela_memo = __tela_build.memo_enabled() && __tela_children.is_empty();
-                if __tela_memo {
-                    let __tela_fingerprint = __tela_inst.__tela_memo_fingerprint();
-                    if let Some(__tela_cached) = __tela_build.memo_hit(&__tela_fingerprint) {
-                        // 命中：缓存输出已携带 watch 声明，直接拼回，跳过 view 与重复 attach。
-                        return Ok(__tela_cached);
-                    }
-                    let mut __tela_out = #view_call?;
-                    #watch_attach
-                    // 记录必须发生在 watch attach 之后：缓存条目要携带组件自身的订阅，
-                    // 否则脏检查看不到它的 scope，signal 变化会被误命中。
-                    __tela_build.memo_record(__tela_fingerprint, &__tela_out);
-                    Ok(__tela_out)
-                } else {
-                    let mut __tela_out = #view_call?;
-                    #watch_attach
-                    Ok(__tela_out)
-                }
-            },
-        )
-    } else {
-        (
-            quote!(),
-            quote! {
-                let mut __tela_out = #view_call?;
-                #watch_attach
-                Ok(__tela_out)
-            },
-        )
+        }
+        let mut __tela_out = #view_call?;
+        #watch_attach
+        if __tela_memo {
+            // 记录上次实例快照（自包含 retained element：全 watch 句柄 + 坐标 + view）。
+            // 快照由绑定重新构造（句柄 clone = Rc 递增），不要求组件结构体 Clone。
+            // 必须发生在 watch attach 之后：缓存条目要携带组件自身的订阅，
+            // 否则脏检查看不到它的 scope，signal 变化会被误命中。
+            __tela_build.memo_record(#name { #(#assembly)* }, &__tela_out);
+        }
+        Ok(__tela_out)
     };
 
     let impl_block = quote! {
@@ -332,7 +339,7 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
             }
         }
 
-        #memo_fp_impl
+        #memo_matches_impl
 
         #[doc(hidden)]
         const _: () = {
@@ -359,12 +366,18 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
         .ok_or_else(|| Error::new_spanned(field, "component fields must be named"))?;
     let ty = field.ty.clone();
     let mut kind = FieldKind::Plain;
+    let mut watch_inject = false;
     let mut default_expr = None;
 
     for attr in &field.attrs {
         if !attr.path().is_ident("prop") {
             if attr.path().is_ident("inject") {
-                set_kind(&mut kind, FieldKind::Inject, attr, &ident)?;
+                // `#[inject]` 叠加在 `#[watch]` 上：作用域解析响应式节点（边化 inject）。
+                if kind == FieldKind::Watch {
+                    watch_inject = true;
+                } else {
+                    set_kind(&mut kind, FieldKind::Inject, attr, &ident)?;
+                }
                 continue;
             }
             if attr.path().is_ident("provide") {
@@ -372,7 +385,12 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
                 continue;
             }
             if attr.path().is_ident("watch") {
-                set_kind(&mut kind, FieldKind::Watch, attr, &ident)?;
+                if kind == FieldKind::Inject {
+                    kind = FieldKind::Watch;
+                    watch_inject = true;
+                } else {
+                    set_kind(&mut kind, FieldKind::Watch, attr, &ident)?;
+                }
                 match &attr.meta {
                     syn::Meta::Path(_) => {}
                     other => {
@@ -401,17 +419,20 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
         })?;
     }
 
-    // 类型校验：option 字段必须是 Option<U>；watch 字段必须是 Signal<T>。
+    // 类型校验：option 字段必须是 Option<U>；watch 字段必须是 Signal<T> 或 Computed<T>。
     if kind == FieldKind::Option && !is_option_type(&ty) {
         return Err(Error::new_spanned(
             &ty,
             "#[prop(option)] field must have type Option<U>",
         ));
     }
-    if kind == FieldKind::Watch && !is_named_generic(&ty, "Signal") {
+    if kind == FieldKind::Watch
+        && !is_named_generic(&ty, "Signal")
+        && !is_named_generic(&ty, "Computed")
+    {
         return Err(Error::new_spanned(
             &ty,
-            "#[watch] field must have type Signal<T>",
+            "#[watch] field must have type Signal<T> or Computed<T>",
         ));
     }
 
@@ -419,6 +440,7 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
         ident,
         ty,
         kind,
+        watch_inject,
         default_expr,
     })
 }

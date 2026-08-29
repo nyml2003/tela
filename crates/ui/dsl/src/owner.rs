@@ -7,7 +7,7 @@
 use std::{
     any::Any,
     cell::{Ref, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
 };
 
@@ -28,6 +28,89 @@ impl<T: 'static> StateCell for TypedStateCell<T> {
         self
     }
 }
+
+// ---------------------------------------------------------------------------
+// 整数身份（001 §2"坐标"）：字符串只存在于节点业务 key 与 Debug 输出。
+// ---------------------------------------------------------------------------
+
+/// 组件调用点的静态坐标句柄：`(file: &'static str, line, column)` 一次性驻留。
+/// 每帧形成身份时只做一次哈希查找，无分配。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SiteId(u32);
+
+thread_local! {
+    static SITE_INTERNER: RefCell<HashMap<(&'static str, u32, u32), SiteId>> =
+        RefCell::new(HashMap::new());
+}
+
+fn intern_site(site: ViewSite) -> SiteId {
+    SITE_INTERNER.with(|table| {
+        let mut table = table.borrow_mut();
+        let next = u32::try_from(table.len()).expect("site id exhausted after u32::MAX sites");
+        *table.entry((site.file(), site.line(), site.column())).or_insert(SiteId(next))
+    })
+}
+
+/// 组件 scope 的整数句柄：父 scope + 调用点 + 类型 +（可选）业务 key 的整数值。
+/// 相同输入跨帧返回相同 id——身份匹配从此是 u64 比较，不再是字符串比较。
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ScopeId(u64);
+
+impl ScopeId {
+    /// 根 scope（顶层组件的父）。
+    pub const ROOT: ScopeId = ScopeId(0);
+
+    #[cfg(test)]
+    pub(crate) fn test_id(value: u64) -> Self {
+        ScopeId(value)
+    }
+}
+
+/// interner 查找键。`kind`/`site` 是静态数据；`key` 是节点业务 key
+/// （`For` 行身份），是热路径上唯一允许的字符串（按内容哈希/相等）。
+#[derive(Eq, Hash, PartialEq)]
+enum ScopeKey {
+    Component {
+        parent: ScopeId,
+        site: SiteId,
+        kind: &'static str,
+        key: Option<Rc<str>>,
+    },
+    /// `<For>` item 的集合身份段（替代旧的 `format!("collection:{n}:{key}")`）。
+    Collection {
+        parent: ScopeId,
+        collection: u32,
+        key: Rc<str>,
+    },
+}
+
+thread_local! {
+    static SCOPE_INTERNER: RefCell<HashMap<ScopeKey, ScopeId>> = RefCell::new(HashMap::new());
+}
+
+fn intern_scope(key: ScopeKey) -> ScopeId {
+    SCOPE_INTERNER.with(|table| {
+        let mut table = table.borrow_mut();
+        if let Some(id) = table.get(&key) {
+            return *id;
+        }
+        let next =
+            u64::try_from(table.len() + 1).expect("scope id exhausted after u64::MAX scopes");
+        let id = ScopeId(next);
+        table.insert(key, id);
+        id
+    })
+}
+
+/// 驻留一个 `<For>` item 身份段。
+pub(crate) fn intern_collection_scope(parent: ScopeId, collection: u32, key: &str) -> ScopeId {
+    intern_scope(ScopeKey::Collection {
+        parent,
+        collection,
+        key: Rc::from(key),
+    })
+}
+
 
 /// 类型擦除的组件本地事件路由。
 pub(crate) trait ComponentActionRoute<A> {
@@ -169,11 +252,55 @@ where
 /// `path` 表示组件在声明式树中的稳定位置，`type_name` 防止同一位置的组件类型替换时
 /// 误复用旧状态，`key` 用于动态列表中的业务项身份。调用方不应使用临时对象地址作为
 /// 身份。
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+///
+/// 身份本体是整数 [`ScopeId`]（父 scope + 调用点 + 类型 + 业务 key 的驻留值），
+/// 相等与排序即 u64 比较；`site`/`kind`/`key` 仅保留作 Debug 呈现。
+#[derive(Clone, Debug)]
 pub struct ComponentIdentity {
-    path: String,
-    type_name: String,
-    key: Option<String>,
+    scope: ScopeId,
+    /// Debug 呈现用（身份本体是 scope）。
+    #[allow(dead_code)]
+    site: SiteId,
+    kind: &'static str,
+    key: Option<Rc<str>>,
+}
+
+impl Eq for ComponentIdentity {}
+
+impl PartialEq for ComponentIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.scope == other.scope
+    }
+}
+
+impl Ord for ComponentIdentity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.scope.cmp(&other.scope)
+    }
+}
+
+impl PartialOrd for ComponentIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for ComponentIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.scope.hash(state);
+    }
+}
+
+impl ComponentIdentity {
+    /// 身份的整数句柄。
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+
+    /// 动态列表业务 key。
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
 }
 
 /// 组件实例在成功发布帧时发生的生命周期变化。
@@ -252,57 +379,41 @@ impl ComponentLifecycleEvent {
 }
 
 impl ComponentIdentity {
-    /// 创建一个有状态组件身份。
-    pub(crate) fn new(
-        path: impl Into<String>,
-        type_name: impl Into<String>,
-        key: Option<impl Into<String>>,
+    /// 以整数 scope 构造身份（site/kind/key 仅作 Debug 呈现）。
+    pub(crate) fn from_scope(
+        scope: ScopeId,
+        site: SiteId,
+        kind: &'static str,
+        key: Option<Rc<str>>,
     ) -> Self {
         Self {
-            path: path.into(),
-            type_name: type_name.into(),
-            key: key.map(Into::into),
+            scope,
+            site,
+            kind,
+            key,
         }
     }
 
-    /// 声明式树中的路径。
-    pub fn path(&self) -> &str {
-        &self.path
+    /// 组件类型名（Debug）。
+    pub fn kind(&self) -> &'static str {
+        self.kind
     }
 
-    /// 组件类型名称。
-    pub fn type_name(&self) -> &str {
-        &self.type_name
-    }
-
-    /// 动态列表业务 key。
-    pub fn key(&self) -> Option<&str> {
-        self.key.as_deref()
-    }
-
-    pub(crate) fn scope_segment(&self) -> String {
-        format!(
-            "component:{}:{}:{}",
-            self.type_name,
-            self.path,
-            self.key.as_deref().unwrap_or("")
-        )
-    }
-
-    /// 从 DSL 调用点和外围集合身份路径生成稳定身份。
+    /// 从 DSL 调用点与父 scope 驻留生成稳定身份（整数，无字符串分配）。
     pub(crate) fn from_scoped_site(
-        type_name: impl Into<String>,
-        scopes: &[String],
+        kind: &'static str,
+        parent: ScopeId,
         site: ViewSite,
-        key: Option<impl Into<String>>,
+        key: Option<&str>,
     ) -> Self {
-        let call_site = format!("{}:{}:{}", site.file(), site.line(), site.column());
-        let path = if scopes.is_empty() {
-            call_site
-        } else {
-            format!("{}/{}", scopes.join("/"), call_site)
-        };
-        Self::new(path, type_name, key)
+        let site_id = intern_site(site);
+        let scope = intern_scope(ScopeKey::Component {
+            parent,
+            site: site_id,
+            kind,
+            key: key.map(|key| Rc::from(key)),
+        });
+        Self::from_scope(scope, site_id, kind, key.map(Rc::from))
     }
 }
 
@@ -559,10 +670,26 @@ impl ComponentOwnerRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComponentIdentity, ComponentOwnerRuntime, OwnerFrameToken};
+    use super::{ComponentIdentity, ComponentOwnerRuntime, OwnerFrameToken, ScopeId};
 
     fn id(path: &str, key: Option<&str>) -> ComponentIdentity {
-        ComponentIdentity::new(path, "Transfer", key)
+        // path 充当唯一调用点坐标（site 由字符串驻留），保持用例语义不变。
+        let site = crate::ViewSite::new(
+            Box::leak(path.to_owned().into_boxed_str()),
+            1,
+            1,
+        );
+        ComponentIdentity::from_scoped_site("Transfer", ScopeId::ROOT, site, key)
+    }
+
+    #[test]
+    fn same_site_and_key_resolve_to_the_same_identity() {
+        let site = crate::ViewSite::new("a.rs", 10, 4);
+        let first = ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("7"));
+        let second = ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("7"));
+        assert_eq!(first, second);
+        let other_key = ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("8"));
+        assert_ne!(first, other_key);
     }
 
     #[test]

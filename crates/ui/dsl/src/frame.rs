@@ -76,7 +76,7 @@ pub struct PreparedFrame<A> {
     component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
     interaction_index: InteractionIndex,
     animation_schedule: AnimationSchedule,
-    watch_scopes: Vec<(String, tela_contract::SemanticKey)>,
+    watch_scopes: Vec<(crate::owner::ScopeId, tela_contract::SemanticKey)>,
 }
 
 impl<A> PreparedFrame<A> {

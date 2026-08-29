@@ -45,6 +45,11 @@ pub struct UiTree {
     /// 按深度优先前序遍历序保存的逻辑父级；当前值语义树中 Teleport 的逻辑父级仍是
     /// 声明位置，视觉提升由 resolve 层单独处理。
     pub(crate) parent_ids: Vec<Option<NodeId>>,
+    /// 惰性一次性 key → DFS 槽位哈希索引：key 查询从 O(n) 线性字符串比较
+    /// 变为一次哈希命中。仅在首次 key 查询时构建（每树至多一次）。
+    key_index: std::cell::OnceCell<HashMap<SemanticKey, u32>>,
+    /// 惰性一次性 NodeId → DFS 槽位索引（整数键，构建廉价）。
+    id_index: std::cell::OnceCell<HashMap<NodeId, u32>>,
 }
 
 impl UiTree {
@@ -78,6 +83,8 @@ impl UiTree {
             keys: result.keys,
             node_ids: result.ids,
             parent_ids,
+            key_index: std::cell::OnceCell::new(),
+            id_index: std::cell::OnceCell::new(),
         })
     }
 
@@ -98,10 +105,55 @@ impl UiTree {
 
     /// 查询当前节点在逻辑树中的直接父级。
     pub fn logical_parent_node_id(&self, node_id: NodeId) -> Option<NodeId> {
-        self.node_ids
-            .iter()
-            .position(|candidate| *candidate == node_id)
-            .and_then(|index| self.parent_ids.get(index).copied().flatten())
+        let index = self.id_slot(node_id)? as usize;
+        self.parent_ids.get(index).copied().flatten()
+    }
+
+    /// NodeId → DFS 槽位（惰性一次性索引，整数键）。
+    fn id_slot(&self, node_id: NodeId) -> Option<u32> {
+        let index = self.id_index.get_or_init(|| {
+            self.node_ids
+                .iter()
+                .enumerate()
+                .map(|(slot, id)| (*id, slot as u32))
+                .collect()
+        });
+        index.get(&node_id).copied()
+    }
+
+    /// 语义 key → DFS 槽位（惰性一次性索引；key 是节点业务身份，字符串哈希仅在此发生）。
+    fn key_slot(&self, key: &SemanticKey) -> Option<u32> {
+        let index = self.key_index.get_or_init(|| {
+            self.keys
+                .iter()
+                .enumerate()
+                .map(|(slot, key)| (key.clone(), slot as u32))
+                .collect()
+        });
+        index.get(key).copied()
+    }
+
+    /// 按 DFS 槽位取节点（惰性遍历，无整树 Vec 重建）。
+    fn node_at_slot(&self, slot: usize) -> Option<&UiNode> {
+        fn visit<'a>(
+            node: &'a UiNode,
+            slot: usize,
+            cursor: &mut usize,
+        ) -> Option<&'a UiNode> {
+            let current = *cursor;
+            *cursor += 1;
+            if current == slot {
+                return Some(node);
+            }
+            for child in &node.children {
+                if let Some(found) = visit(child, slot, cursor) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let mut cursor = 0;
+        visit(&self.root, slot, &mut cursor)
     }
 
     /// 返回从根到目标节点的逻辑父链（包含目标节点）。
@@ -124,18 +176,14 @@ impl UiTree {
     /// NodeId 只在当前树有效；调用者若需要跨帧保存身份，必须保存返回的
     /// SemanticKey，不能保存 NodeId。
     pub fn key_for_node_id(&self, node_id: NodeId) -> Option<&SemanticKey> {
-        self.node_ids
-            .iter()
-            .position(|candidate| *candidate == node_id)
-            .and_then(|index| self.keys.get(index))
+        self.id_slot(node_id)
+            .and_then(|slot| self.keys.get(slot as usize))
     }
 
     /// 按跨帧稳定语义 key 查询本帧结构 id。
     pub fn node_id_for_key(&self, key: &SemanticKey) -> Option<NodeId> {
-        self.keys
-            .iter()
-            .position(|candidate| candidate == key)
-            .and_then(|index| self.node_ids.get(index).copied())
+        self.key_slot(key)
+            .and_then(|slot| self.node_ids.get(slot as usize).copied())
     }
 
     /// DFS 序节点表（交互层用：节点引用 + 结构 id + key 对齐）。
@@ -243,10 +291,8 @@ impl UiTree {
     /// 应用可据此把当前焦点投影为宿主行为（例如隐藏 DOM 文本编辑器），无需保存或构造
     /// 组件自己的 focus key。返回的引用只在本树存活期间有效。
     pub fn interact_for_key(&self, key: &SemanticKey) -> Option<&InteractConcern> {
-        let index = self.keys.iter().position(|candidate| candidate == key)?;
-        let mut nodes = Vec::with_capacity(self.node_ids.len());
-        collect_nodes(&self.root, &mut nodes);
-        nodes.get(index).and_then(|node| node.interact.as_ref())
+        let slot = self.key_slot(key)? as usize;
+        self.node_at_slot(slot).and_then(|node| node.interact.as_ref())
     }
 
     /// 当前焦点沿焦点链遇到的键位作用域（由内向外）。

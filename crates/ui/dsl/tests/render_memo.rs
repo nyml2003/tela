@@ -1,7 +1,8 @@
-//! `#[memo]` 组件记忆化的一致性与粒度集成测试。
+//! retained 求值语义（默认，无注解）的一致性与粒度集成测试。
 //!
 //! 对齐 `m5_update.rs` 的 Full/Dirty 一致性风格：同一 signal 变更序列下，
-//! 记忆化帧与全量渲染帧必须产出完全相同的树，且 render 只重跑订阅被标脏的组件。
+//! retained 帧与全量渲染帧必须产出完全相同的树，且 render 只重跑订阅被标脏的
+//! 组件（derive 契约：输入只有 `#[watch]` 边，命中判定是纯 SignalId 比较）。
 
 use std::{cell::Cell, collections::BTreeSet};
 
@@ -21,6 +22,7 @@ enum Action {
 thread_local! {
     static RENDER_A: Cell<usize> = const { Cell::new(0) };
     static RENDER_B: Cell<usize> = const { Cell::new(0) };
+    static RENDER_INNER: Cell<usize> = const { Cell::new(0) };
 }
 
 fn bump_a() {
@@ -31,6 +33,10 @@ fn bump_b() {
     RENDER_B.with(|count| count.set(count.get() + 1));
 }
 
+fn bump_inner() {
+    RENDER_INNER.with(|count| count.set(count.get() + 1));
+}
+
 fn renders_a() -> usize {
     RENDER_A.with(Cell::get)
 }
@@ -39,54 +45,84 @@ fn renders_b() -> usize {
     RENDER_B.with(Cell::get)
 }
 
-/// 面板 A：订阅 `shared`，`#[memo]` 记忆化。
+fn renders_inner() -> usize {
+    RENDER_INNER.with(Cell::get)
+}
+
+/// 面板 A：订阅独立 signal；默认 retained（无 children 即参与缓存）。
 #[derive(DslComponent)]
-#[memo]
 struct PanelA {
     #[watch]
     value: Signal<u32>,
-    label: u32,
 }
 
 impl PanelA {
     fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
         bump_a();
         ui!(build {
-            <Text value={format!("A{}:{}", self.label, self.value.get())} />
+            <Text value={format!("A:{}", self.value.get())} />
         })
     }
 }
 
-/// 面板 B：独立 signal，与 A 互为"不相关兄弟组件"。
+/// 面板 B：A 的不相关兄弟组件。
 #[derive(DslComponent)]
-#[memo]
 struct PanelB {
     #[watch]
     value: Signal<u32>,
-    label: u32,
 }
 
 impl PanelB {
     fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
         bump_b();
         ui!(build {
-            <Text value={format!("B{}:{}", self.label, self.value.get())} />
+            <Text value={format!("B:{}", self.value.get())} />
         })
     }
 }
 
-fn render_root_with_labels(
-    build: &mut ViewBuild<Action>,
-    a: &Signal<u32>,
-    b: &Signal<u32>,
-    label_a: u32,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <PanelA value={a.clone()} label={label_a} />
-            <PanelB value={b.clone()} label={2_u32} />
-        </Column>
-    })
+/// 嵌套内层：Outer 的直接子组件，订阅独立的 b。
+#[derive(DslComponent)]
+struct InnerPanel {
+    #[watch]
+    value: Signal<u32>,
+}
+
+impl InnerPanel {
+    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
+        bump_inner();
+        ui!(build {
+            <Text value={format!("I:{}", self.value.get())} />
+        })
+    }
+}
+
+/// 嵌套外层：订阅 a，body 内包含 InnerPanel——Outer 的缓存子树携带 Inner 的订阅。
+#[derive(DslComponent)]
+struct OuterPanel {
+    #[watch]
+    value: Signal<u32>,
+}
+
+impl OuterPanel {
+    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
+        bump_a();
+        ui!(build {
+            <Column>
+                <Text value={format!("O:{}", self.value.get())} />
+                <InnerPanel value={self.inner_source()} />
+            </Column>
+        })
+    }
+
+    // Outer 不拥有 Inner 的 signal（由测试在 props 之外注入）：为让嵌套用例使用
+    // 独立 b 源，这里经全局槽传递，见 nested fixture。
+}
+
+// 嵌套用例的 Inner signal 槽：Outer 构造时从这里取（thread_local 保存 Rc 句柄）。
+thread_local! {
+    static NESTED_INNER: std::cell::RefCell<Option<Signal<u32>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn render_root(
@@ -94,7 +130,35 @@ fn render_root(
     a: &Signal<u32>,
     b: &Signal<u32>,
 ) -> ViewResult<ViewOutput<Action>> {
-    render_root_with_labels(build, a, b, 1)
+    ui!(build {
+        <Column>
+            <PanelA value={a.clone()} />
+            <PanelB value={b.clone()} />
+        </Column>
+    })
+}
+
+fn render_nested(
+    build: &mut ViewBuild<Action>,
+    outer: &Signal<u32>,
+    inner: &Signal<u32>,
+) -> ViewResult<ViewOutput<Action>> {
+    NESTED_INNER.with(|slot| *slot.borrow_mut() = Some(inner.clone()));
+    ui!(build {
+        <Column>
+            <OuterPanel value={outer.clone()} />
+        </Column>
+    })
+}
+
+impl OuterPanel {
+    fn inner_source(&self) -> Signal<u32> {
+        NESTED_INNER.with(|slot| {
+            slot.borrow()
+                .clone()
+                .expect("nested fixture installs the inner signal before render")
+        })
+    }
 }
 
 fn empty_frame() -> UiFrame {
@@ -125,10 +189,10 @@ impl Fixture {
     }
 
     /// 用指定 dirty 集发布一帧；signal 写入后由调用方取走 dirty。
-    fn publish(&mut self, dirty: BTreeSet<SemanticKey>, memo_enabled: bool) {
+    fn publish(&mut self, dirty: BTreeSet<SemanticKey>, retained_enabled: bool) {
         let mut build = self
             .coordinator
-            .begin_build_for_frame(dirty, memo_enabled);
+            .begin_build_for_frame(dirty, retained_enabled);
         let root = render_root(&mut build, &self.a, &self.b).expect("root view");
         let prepared = self.coordinator.prepare(root).expect("candidate frame");
         let resolved = prepared
@@ -149,12 +213,15 @@ impl Fixture {
     }
 
     fn tree_debug(&self) -> String {
-        format!("{:?}", self.coordinator.active().expect("active frame").tree().root())
+        format!(
+            "{:?}",
+            self.coordinator.active().expect("active frame").tree().root()
+        )
     }
 }
 
 #[test]
-fn memoized_frame_renders_only_the_dirty_component() {
+fn retained_frame_renders_only_the_dirty_component() {
     let mut fixture = Fixture::new(1, 1);
     RENDER_A.with(|c| c.set(0));
     RENDER_B.with(|c| c.set(0));
@@ -164,7 +231,7 @@ fn memoized_frame_renders_only_the_dirty_component() {
     assert_eq!(renders_a(), 1);
     assert_eq!(renders_b(), 1);
 
-    // A 的 signal 变化：只重跑 A，B 命中缓存。
+    // A 的 signal 变化：只重跑 A，B 命中缓存（纯 SignalId + 脏集判定）。
     let dirty = fixture.touch_a(5);
     assert_eq!(dirty.len(), 1, "只有一个组件的订阅被标脏");
     fixture.publish(dirty, true);
@@ -187,40 +254,40 @@ fn memoized_frame_renders_only_the_dirty_component() {
 }
 
 #[test]
-fn memoized_frames_match_full_renders_tree_for_tree() {
-    let mut memoized = Fixture::new(1, 1);
+fn retained_frames_match_full_renders_tree_for_tree() {
+    let mut retained = Fixture::new(1, 1);
     let mut full = Fixture::new(1, 1);
 
-    memoized.publish(BTreeSet::new(), true);
+    retained.publish(BTreeSet::new(), true);
     full.publish(BTreeSet::new(), false);
-    assert_eq!(memoized.tree_debug(), full.tree_debug());
+    assert_eq!(retained.tree_debug(), full.tree_debug());
 
-    let dirty = memoized.touch_a(5);
+    let dirty = retained.touch_a(5);
     full.a.set(5);
     let _ = full.coordinator.runtime().take_dirty();
-    memoized.publish(dirty, true);
+    retained.publish(dirty, true);
     full.publish(BTreeSet::new(), false);
-    assert_eq!(memoized.tree_debug(), full.tree_debug());
+    assert_eq!(retained.tree_debug(), full.tree_debug());
 
-    let dirty = memoized.touch_b(9);
-    let dirty_b = memoized.touch_a(11);
+    let dirty_b = retained.touch_b(9);
+    let dirty_a = retained.touch_a(11);
     full.b.set(9);
     full.a.set(11);
     let _ = full.coordinator.runtime().take_dirty();
-    let merged: BTreeSet<SemanticKey> = dirty.union(&dirty_b).cloned().collect();
-    memoized.publish(merged, true);
+    let merged: BTreeSet<SemanticKey> = dirty_b.union(&dirty_a).cloned().collect();
+    retained.publish(merged, true);
     full.publish(BTreeSet::new(), false);
-    assert_eq!(memoized.tree_debug(), full.tree_debug());
+    assert_eq!(retained.tree_debug(), full.tree_debug());
 }
 
 #[test]
 fn disabled_frames_refresh_watch_keys_and_do_not_pollute_cache() {
     let mut fixture = Fixture::new(1, 1);
 
-    // 记忆化帧记录缓存。
+    // retained 帧记录缓存。
     fixture.publish(BTreeSet::new(), true);
 
-    // 关闭记忆化的全量帧：watch keys 仍随提交刷新。
+    // 关闭 retained 的全量帧：watch keys 仍随提交刷新。
     fixture.publish(BTreeSet::new(), false);
 
     // 重新启用且无脏：两个组件都应命中（树结构未变，key 映射未陈旧）。
@@ -272,23 +339,44 @@ fn rejected_candidate_discards_pending_memo_entries() {
 }
 
 #[test]
-fn props_change_invalidates_the_cache_without_any_dirty_key() {
-    let mut fixture = Fixture::new(1, 1);
-    fixture.publish(BTreeSet::new(), true);
+fn nested_retained_inner_stays_frozen_when_outer_renders() {
+    let mut coordinator = FrameCoordinator::<Action>::new();
+    let outer_source = Signal::new(1_u32);
+    let inner_source = Signal::new(1_u32);
 
-    // label 是普通 props：只要变化，即使没有任何 signal 脏标也必须重渲染。
-    // 这里通过重建 root（label 随构造传入）验证指纹比较路径。
+    let publish = |coordinator: &mut FrameCoordinator<Action>,
+                   outer: &Signal<u32>,
+                   inner: &Signal<u32>,
+                   dirty: BTreeSet<SemanticKey>,
+                   enabled: bool| {
+        let mut build = coordinator.begin_build_for_frame(dirty, enabled);
+        let root = render_nested(&mut build, outer, inner).expect("nested root");
+        let prepared = coordinator.prepare(root).expect("candidate frame");
+        let resolved = prepared
+            .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
+            .expect("resolved frame");
+        coordinator.commit(resolved);
+    };
+
+    // 首帧：Outer 与 Inner 各渲染一次并记录。
     RENDER_A.with(|c| c.set(0));
-    RENDER_B.with(|c| c.set(0));
-    let mut build = fixture
-        .coordinator
-        .begin_build_for_frame(BTreeSet::new(), true);
-    let root = render_root_with_labels(&mut build, &fixture.a, &fixture.b, 9).expect("root view");
-    let prepared = fixture.coordinator.prepare(root).expect("candidate frame");
-    let resolved = prepared
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("resolved frame");
-    fixture.coordinator.commit(resolved);
-    assert_eq!(renders_a(), 1, "props 变化穿透缓存");
-    assert_eq!(renders_b(), 0, "props 未变的组件仍命中");
+    RENDER_INNER.with(|c| c.set(0));
+    publish(&mut coordinator, &outer_source, &inner_source, BTreeSet::new(), true);
+    assert_eq!(renders_a(), 1);
+    assert_eq!(renders_inner(), 1);
+
+    // Outer 的 signal 变化：Outer miss 重渲染，Inner 的边未脏 → 命中冻结。
+    outer_source.set(2);
+    let dirty = coordinator.runtime().take_dirty();
+    publish(&mut coordinator, &outer_source, &inner_source, dirty, true);
+    assert_eq!(renders_a(), 2, "Outer 的订阅脏 → 重渲染");
+    assert_eq!(renders_inner(), 1, "嵌套内层命中缓存（判定与父行为解耦）");
+
+    // Inner 的 signal 变化：Outer 的缓存子树携带 Inner 的订阅 → Outer 同帧 miss，
+    // Inner 重渲染拿到新值。
+    inner_source.set(3);
+    let dirty = coordinator.runtime().take_dirty();
+    publish(&mut coordinator, &outer_source, &inner_source, dirty, true);
+    assert_eq!(renders_a(), 3, "外层缓存子树含内层订阅 → 同帧失效");
+    assert_eq!(renders_inner(), 2, "内层重渲染");
 }

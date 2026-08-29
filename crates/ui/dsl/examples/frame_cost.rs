@@ -33,32 +33,39 @@ struct BenchmarkItem {
     label: String,
 }
 
-/// 记忆化基准行：每行订阅自己的 signal。
+/// 记忆化基准行：每行订阅自己的 row signal（label 并入数据，满足 watch-only 契约）。
+#[derive(Clone, PartialEq)]
+struct RowData {
+    #[allow(dead_code)]
+    label: String,
+    value: u32,
+}
+
 struct BenchmarkRow {
     id: u32,
-    label: String,
-    value: Signal<u32>,
+    row: Signal<RowData>,
 }
 
 thread_local! {
     static ROW_RENDERS: Cell<usize> = const { Cell::new(0) };
 }
 
-/// `#[memo]` 行组件：signal 与 props 未变时跳过 render。
+/// retained 行组件（默认，无注解）：入边无脏 → 不重求值。
 #[derive(DslComponent)]
-#[memo]
 struct WatchedRow {
     #[watch]
-    value: Signal<u32>,
-    label: String,
+    row: Signal<RowData>,
 }
 
 impl WatchedRow {
     fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
         ROW_RENDERS.with(|count| count.set(count.get() + 1));
+        let text = self
+            .row
+            .with(|row| format!("{}={}", row.label, row.value));
         ui!(build {
             <Frame>
-                <Text value={format!("{}={}", self.label, self.value.get())} />
+                <Text value={text} />
             </Frame>
         })
     }
@@ -120,7 +127,7 @@ fn render_memoized(
             <For each={rows} key={row.id}>
                 {|row|
                     <Frame>
-                        <WatchedRow value={row.value.clone()} label={row.label.clone()} />
+                        <WatchedRow row={row.row.clone()} />
                     </Frame>
                 }
             </For>
@@ -148,6 +155,12 @@ fn publish(coordinator: &mut FrameCoordinator<BenchmarkAction>, root: ViewOutput
         .resolve(|_| Ok::<_, ()>(empty_frame()))
         .expect("benchmark resolve must be infallible");
     coordinator.commit(resolved);
+}
+
+/// 只更新行的 value 字段（label 恒定），保持脏标语义与旧版一致。
+fn set_row_value(row: &BenchmarkRow, value: u32) {
+    let label = row.row.with(|data| data.label.clone());
+    row.row.set(RowData { label, value });
 }
 
 /// 记忆化路径：以本帧 dirty 集构建、准备并提交；`memo_enabled` 控制是否启用缓存。
@@ -268,8 +281,10 @@ fn main() {
     let rows = (0..nodes)
         .map(|id| BenchmarkRow {
             id: u32::try_from(id).expect("node count must fit the DSL demo item id"),
-            label: format!("item-{id}"),
-            value: Signal::new(0_u32),
+            row: Signal::new(RowData {
+                label: format!("item-{id}"),
+                value: 0,
+            }),
         })
         .collect::<Vec<_>>();
     let mut component_coordinator = FrameCoordinator::new();
@@ -285,7 +300,7 @@ fn main() {
         let touched = rows
             .get(iteration % rows.len())
             .expect("row index must exist");
-        touched.value.set(u32::try_from(iteration).expect("iteration must fit u32"));
+        set_row_value(touched, u32::try_from(iteration).expect("iteration must fit u32"));
         component_coordinator.runtime().begin_frame();
         let dirty = component_coordinator.runtime().take_dirty();
         assert_eq!(dirty.len(), 1, "one watched row should become dirty");
@@ -327,7 +342,7 @@ fn main() {
             .expect("row index must exist");
         // 偏移取值：避免与对照循环相同，否则被 Signal 相等性短路。
         let fresh = u32::try_from(iterations + iteration).expect("iteration must fit u32");
-        touched.value.set(fresh);
+        set_row_value(touched, fresh);
         memo_coordinator.runtime().begin_frame();
         let dirty = memo_coordinator.runtime().take_dirty();
         assert_eq!(dirty.len(), 1, "one watched row should become dirty");

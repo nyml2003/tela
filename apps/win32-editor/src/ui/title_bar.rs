@@ -6,7 +6,7 @@ use tela_contract::{
 };
 use tela_icon_resources::MaterialIconFontProvider;
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{Body, DslComponent, ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{Body, DslComponent, Signal, ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::{Button, ButtonPalette, ButtonState};
 
 use crate::application::EditorAction;
@@ -28,10 +28,11 @@ const CLOSE_PALETTE: ButtonPalette = ButtonPalette {
 /// 自绘标题栏：导航按钮 + 窗口控制按钮一行式。
 ///
 /// children 为调用点组合的导航项 + 窗口按钮（EditorAction 上下文）。
+/// 携带 children → 自动退出 retained（001 §2）。
 #[derive(DslComponent)]
-#[allow(missing_docs)]
 pub struct TitleBar {
-    pub width: f32,
+    #[watch]
+    pub viewport: Signal<tela_contract::Viewport>,
 }
 
 impl TitleBar {
@@ -44,7 +45,7 @@ impl TitleBar {
         ui!(build {
             <Row
                 key={"editor.titlebar"}
-                width={self.width}
+                width={self.viewport.get().width}
                 height={TITLE_BAR_H}
                 padding={Insets { top: 0.0, right: 0.0, bottom: 0.0, left: 8.0 }}
                 gap={4.0}
@@ -71,14 +72,10 @@ pub fn window_item(
     let key = format!("editor.window.{key_suffix}");
     let hovered = hover_key.as_deref() == Some(key.as_str());
     let icon = window_icon(command, window_maximized);
+    let button = window_button_node(key, icon, command == WindowCommand::Close, hovered);
     ui!(build {
         <ActionTarget action={EditorAction::Window(command)}>
-            <WindowButton
-                key={key}
-                icon={icon}
-                close={command == WindowCommand::Close}
-                hovered={hovered}
-            />
+            { button }
         </ActionTarget>
     })
 }
@@ -97,57 +94,35 @@ fn window_icon(command: WindowCommand, window_maximized: bool) -> IconName {
     }
 }
 
-/// 窗口控制按钮组件：foundation Button 包装 Material 图标（关闭按钮 hover 红色）。
-#[derive(DslComponent)]
-#[allow(missing_docs)]
-pub struct WindowButton {
-    pub key: Option<String>,
-    pub icon: IconName,
-    pub close: bool,
-    pub hovered: bool,
-}
-
-impl WindowButton {
-    /// 组件渲染（由 `DslComponent::render` 脚手架调用）。
-    pub fn view<A>(
-        &self,
-        _build: &mut ViewBuild<A>,
-        _children: Body<A>,
-    ) -> ViewResult<ViewOutput<A>> {
-        let glyph = MaterialIconFontProvider
-            .resolve(IconRequest {
-                key: self.icon.into(),
-                size: 18.0,
-                color: TEXT,
-            })
-            .expect("标准窗口控制图标必须可解析")
-            .into_node();
-        let mut node = Button::new("")
-            .content(glyph)
-            .width(40.0)
-            .height(TITLE_BAR_H - 8.0)
-            .border_radius(0.0)
-            .state(ButtonState {
-                hovered: self.hovered,
-                selected: false,
-                disabled: false,
-            })
-            .palette(if self.close {
-                CLOSE_PALETTE
-            } else {
-                NAV_PALETTE
-            })
-            .into_node();
-        if let Some(key) = &self.key {
-            node.identity = Some(IdentityConcern {
-                key_strategy: KeyStrategy::SemanticId,
-                semantic_key: Some(SemanticKey(key.clone())),
-                key_segment: None,
-                update_mode: UpdateMode::Dirty,
-            });
-        }
-        Ok(ViewOutput::opaque(node))
-    }
+/// 窗口控制按钮节点（foundation Button 包装 Material 图标；hover 为宿主帧级值）。
+fn window_button_node<A>(key: String, icon: IconName, close: bool, hovered: bool) -> ViewOutput<A> {
+    let glyph = MaterialIconFontProvider
+        .resolve(IconRequest {
+            key: icon.into(),
+            size: 18.0,
+            color: TEXT,
+        })
+        .expect("标准窗口控制图标必须可解析")
+        .into_node();
+    let mut node = Button::new("")
+        .content(glyph)
+        .width(40.0)
+        .height(TITLE_BAR_H - 8.0)
+        .border_radius(0.0)
+        .state(ButtonState {
+            hovered,
+            selected: false,
+            disabled: false,
+        })
+        .palette(if close { CLOSE_PALETTE } else { NAV_PALETTE })
+        .into_node();
+    node.identity = Some(IdentityConcern {
+        key_strategy: KeyStrategy::SemanticId,
+        semantic_key: Some(SemanticKey(key)),
+        key_segment: None,
+        update_mode: UpdateMode::Dirty,
+    });
+    ViewOutput::opaque(node)
 }
 
 #[cfg(test)]

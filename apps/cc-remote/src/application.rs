@@ -129,7 +129,8 @@ impl NetScheduler {
 /// A complete CC Remote application session.
 pub struct App {
     resources: &'static dyn UiResources,
-    world: World,
+    /// 世界状态节点：写入经相等性短路，读取方（呈现）经 `.get()` 取快照。
+    world: Signal<World>,
     route: Signal<Route>,
     history: Vec<Route>,
     draft: Signal<String>,
@@ -149,7 +150,7 @@ impl App {
     pub fn new(resources: &'static dyn UiResources) -> Self {
         Self {
             resources,
-            world: World::default(),
+            world: Signal::new(World::default()),
             route: Signal::new(Route::Sessions),
             history: Vec::new(),
             draft: Signal::new(String::new()),
@@ -186,7 +187,7 @@ impl App {
                 method: NetHttpMethod::Get,
                 path: format!(
                     "/v1/sync?since={}&limit={}",
-                    self.world.cursor, SYNC_DEFAULT_LIMIT
+                    self.world.get().cursor, SYNC_DEFAULT_LIMIT
                 ),
                 body: None,
             });
@@ -613,14 +614,15 @@ impl App {
         let draft = self.draft.get();
         let root = match self.route.get() {
             Route::Sessions => {
-                let mut sessions: Vec<&domain::Session> = self.world.sessions.iter().collect();
+                let world = self.world.get();
+                let mut sessions: Vec<&domain::Session> = world.sessions.iter().collect();
                 sessions.sort_by_key(|session| std::cmp::Reverse(session.last_seq));
                 let props = SessionsProps {
                     viewport: self.viewport,
                     safe_area: self.safe_area,
-                    agent_online: self.world.agent_online,
+                    agent_online: world.agent_online,
                     sessions,
-                    notices: &self.world.notices,
+                    notices: &world.notices,
                     icons: self.resources.icon_provider(),
                 };
                 render_sessions_dsl(&mut self.frames.begin_build(), props)
@@ -629,6 +631,7 @@ impl App {
             Route::Chat(ref session_id) => {
                 let title = self
                     .world
+                    .get()
                     .sessions
                     .iter()
                     .find(|session| session.id == *session_id)
@@ -642,7 +645,6 @@ impl App {
                     title: &title,
                     can_go_back: true,
                     draft: &draft,
-                    draft_signal: self.draft.clone(),
                     draft_focused,
                     rows,
                     permission,
@@ -659,7 +661,8 @@ impl App {
     fn chat_rows(&self, session_id: &str) -> Vec<ChatRow> {
         use crate::domain::ChatItem;
         let mut rows = Vec::new();
-        let chat = self.world.chats.get(session_id);
+        let world = self.world.get();
+        let chat = world.chats.get(session_id);
         if let Some(chat) = chat {
             for item in &chat.items {
                 match item {
@@ -727,16 +730,17 @@ impl App {
     }
 
     fn permission_view(&self, session_id: &str) -> Option<PermissionCardView> {
-        let card = self
-            .world
-            .chats
-            .get(session_id)
-            .and_then(|chat| chat.permission.as_ref())?;
-        Some(PermissionCardView {
-            permission_id: card.permission_id.clone(),
-            tool_name: card.tool_name.clone(),
-            input_summary: card.input_summary.clone(),
-            resolution: card.resolution,
+        self.world.with(|world| {
+            world
+                .chats
+                .get(session_id)
+                .and_then(|chat| chat.permission.as_ref())
+                .map(|card| PermissionCardView {
+                    permission_id: card.permission_id.clone(),
+                    tool_name: card.tool_name.clone(),
+                    input_summary: card.input_summary.clone(),
+                    resolution: card.resolution.clone(),
+                })
         })
     }
 
@@ -793,7 +797,9 @@ impl App {
         self.net.sync_in_flight = false;
         let mut changed = false;
         for event in &response.events {
-            changed |= domain::apply_event(&mut self.world, event);
+            changed |= self
+                .world
+                .update(|world| domain::apply_event(world, event));
         }
         if response.truncated {
             self.net.next_poll_ms = now_ms;
@@ -801,14 +807,15 @@ impl App {
             self.net.recover();
             self.net.next_poll_ms = now_ms.saturating_add(self.net.interval_ms);
         }
-        let online_changed = self.world.agent_online != response.agent_online;
+        let online_changed = self.world.get().agent_online != response.agent_online;
         if online_changed {
-            self.world.agent_online = response.agent_online;
+            self.world
+                .update(|world| world.agent_online = response.agent_online);
             changed = true;
         }
         self.reconcile_optimistic();
         let route_lost =
-            matches!(self.route.get(), Route::Chat(id) if !self.world.chats.contains_key(&id));
+            matches!(self.route.get(), Route::Chat(id) if !self.world.get().chats.contains_key(&id));
         if route_lost {
             self.route.set(Route::Sessions);
             self.history.clear();
@@ -822,7 +829,7 @@ impl App {
 
     fn resync_from_scratch(&mut self, now_ms: u64) {
         // 中继日志重启：本地投影作废，从 0 全量重拉（v1 取舍，见 docs/038）。
-        self.world = World::default();
+        self.world.set(World::default());
         if matches!(self.route.get(), Route::Chat(_)) {
             self.route.set(Route::Sessions);
             self.history.clear();
@@ -835,9 +842,9 @@ impl App {
 
     fn reconcile_optimistic(&mut self) {
         // turn_started 已经落成事件侧 UserText；同文本的乐观消息即可销账。
+        let confirmed = self.world.get();
         self.net.optimistic.retain(|message| {
-            !self
-                .world
+            !confirmed
                 .chats
                 .get(&message.session_id)
                 .is_some_and(|chat| {
@@ -850,7 +857,7 @@ impl App {
 
     fn push_notice(&mut self, text: &str) {
         let event = Event {
-            seq: self.world.cursor + 1,
+            seq: self.world.get().cursor + 1,
             ts_ms: self.animation_clock.timestamp_ms,
             kind: tela_cc_protocol::EventKind::Notice {
                 level: tela_cc_protocol::NoticeLevel::Error,
@@ -858,8 +865,10 @@ impl App {
             },
         };
         // 本地通知不入真实游标：直接借用 reducer 的去重与容量逻辑。
-        let _ = domain::apply_event(&mut self.world, &event);
-        self.world.cursor -= 1;
+        let _ = self
+            .world
+            .update(|world| domain::apply_event(world, &event));
+        self.world.update(|world| world.cursor -= 1);
     }
 
     fn current_frame_token(&mut self) -> Option<FrameToken> {
@@ -951,8 +960,9 @@ impl App {
     }
 
     fn open_session(&mut self, session_id: &str) -> bool {
-        if !self.world.chats.contains_key(session_id)
-            && !self.world.sessions.iter().any(|s| s.id == session_id)
+        let world = self.world.get();
+        if !world.chats.contains_key(session_id)
+            && !world.sessions.iter().any(|s| s.id == session_id)
         {
             return false;
         }
@@ -1002,12 +1012,16 @@ impl App {
         let Route::Chat(session_id) = self.route.get() else {
             return false;
         };
-        let Some(card) = self
+        let card_snapshot = self
             .world
-            .chats
-            .get(&session_id)
-            .and_then(|chat| chat.permission.as_ref())
-        else {
+            .with(|world| {
+                world
+                    .chats
+                    .get(&session_id)
+                    .and_then(|chat| chat.permission.as_ref())
+                    .cloned()
+            });
+        let Some(card) = card_snapshot else {
             return false;
         };
         if card.resolution.is_some() {
@@ -1397,10 +1411,10 @@ mod tests {
     // 测试辅助：私有状态访问。
     impl App {
         fn world_cursor(&self) -> u64 {
-            self.world.cursor
+            self.world.get().cursor
         }
         fn agent_online(&self) -> bool {
-            self.world.agent_online
+            self.world.get().agent_online
         }
         fn route_snapshot(&self) -> Route {
             self.route.get()
@@ -1424,7 +1438,7 @@ mod tests {
             self.safe_area
         }
         fn world_notices(&self) -> usize {
-            self.world.notices.len()
+            self.world.get().notices.len()
         }
     }
 

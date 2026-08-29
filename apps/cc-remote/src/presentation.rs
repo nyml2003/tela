@@ -15,7 +15,7 @@ use tela_mobile_ui_kit::{
     MobileLayout, MobileSearchField, MobileSurfaceStyle,
 };
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{Body, DslComponent, Signal, ViewBuild, ViewOutput, ViewResult, ui};
+use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, ui};
 use tela_ui_foundation::Icon;
 
 use crate::application::CcAction;
@@ -60,8 +60,6 @@ pub struct ChatProps<'a> {
     pub title: &'a str,
     pub can_go_back: bool,
     pub draft: &'a str,
-    /// 草稿 signal：输入条组件订阅它，打字由订阅标脏驱动帧重建。
-    pub draft_signal: Signal<String>,
     pub draft_focused: bool,
     pub rows: Vec<ChatRow>,
     pub permission: Option<PermissionCardView>,
@@ -454,67 +452,49 @@ fn chat_rows_dsl(
     Ok(ViewOutput::opaque(list))
 }
 
-/// 受控草稿输入框：订阅草稿 signal，打字由订阅标脏驱动重建。
-///
-/// 节点本体不携带动作，动作路由由外层 `ActionTarget` 提供。
-#[derive(DslComponent)]
-struct DraftField {
-    #[watch]
-    draft: Signal<String>,
-    width: f32,
-    focused: bool,
-}
+/// 受控草稿输入框（普通节点）：常量与宿主派生值直接内联，draft 值经 props 传入。
+/// cc-remote 尚未整体接入图节点（P1 后续迁移项），打字走全局失效兜底。
+fn draft_field_node(draft: &str, width: f32, focused: bool) -> UiNode {
+    let label = if draft.is_empty() {
+        "给 Claude Code 发消息…"
+    } else {
+        draft
+    };
+    let color = if draft.is_empty() { SECONDARY } else { TEXT };
+    let inner: UiNode = LayoutContainer::row([text(label, 16.0, color)])
+        .layout(LayoutConcern {
+            gap: 12.0,
+            cross_align: tela_contract::CrossAlign::Center,
+            ..LayoutConcern::default()
+        })
+        .into();
 
-impl DraftField {
-    fn view<A>(
-        &self,
-        _build: &mut ViewBuild<A>,
-        _children: Body<A>,
-    ) -> ViewResult<ViewOutput<A>> {
-        let draft = self.draft.get();
-        let label = if draft.is_empty() {
-            "给 Claude Code 发消息…"
-        } else {
-            draft.as_str()
-        };
-        let color = if draft.is_empty() { SECONDARY } else { TEXT };
-        let inner: UiNode = LayoutContainer::row([text(label, 16.0, color)])
-            .layout(LayoutConcern {
-                gap: 12.0,
-                cross_align: tela_contract::CrossAlign::Center,
-                ..LayoutConcern::default()
-            })
-            .into();
-
-        Ok(ViewOutput::opaque(
-            MobileSearchField::new(inner, "cc.draft")
-                .value(&draft)
-                .width(self.width)
-                .height(FIELD_H)
-                .padding(Insets {
-                    top: 0.0,
-                    right: 16.0,
-                    bottom: 0.0,
-                    left: 16.0,
-                })
-                .surfaces(
-                    MobileSurfaceStyle {
-                        fill: MUTED_SURFACE,
-                        border_color: Some(BORDER),
-                        border_width: 1.0,
-                        border_radius: BorderRadius::all(8.0),
-                    },
-                    MobileSurfaceStyle {
-                        fill: SURFACE,
-                        border_color: Some(PRIMARY),
-                        border_width: 2.0,
-                        border_radius: BorderRadius::all(8.0),
-                    },
-                )
-                .focused(self.focused)
-                .into_node(),
-        ))
-    }
+    MobileSearchField::new(inner, "cc.draft")
+        .value(draft)
+        .width(width)
+        .height(FIELD_H)
+        .padding(Insets {
+            top: 0.0,
+            right: 16.0,
+            bottom: 0.0,
+            left: 16.0,
+        })
+        .surfaces(
+            MobileSurfaceStyle {
+                fill: MUTED_SURFACE,
+                border_color: Some(BORDER),
+                border_width: 1.0,
+                border_radius: BorderRadius::all(8.0),
+            },
+            MobileSurfaceStyle {
+                fill: SURFACE,
+                border_color: Some(PRIMARY),
+                border_width: 2.0,
+                border_radius: BorderRadius::all(8.0),
+            },
+        )
+        .focused(focused)
+        .into_node()
 }
 
 fn chat_input_bar_dsl(
@@ -522,6 +502,11 @@ fn chat_input_bar_dsl(
     props: &ChatProps<'_>,
     width: f32,
 ) -> ViewResult<ViewOutput<CcAction>> {
+    let field = draft_field_node(
+        props.draft,
+        (width - CONTENT_INSET * 2.0 - 96.0).max(1.0),
+        props.draft_focused,
+    );
     ui!(build {
         <Frame
             width={width}
@@ -542,11 +527,7 @@ fn chat_input_bar_dsl(
                     on_submit={CcAction::SubmitDraft}
                     on_cancel={CcAction::ClearDraft}
                 >
-                    <DraftField
-                        draft={props.draft_signal.clone()}
-                        width={(width - CONTENT_INSET * 2.0 - 96.0).max(1.0)}
-                        focused={props.draft_focused}
-                    />
+                    { field }
                 </ActionTarget>
                 <ActionTarget action={CcAction::SendDraft}>
                     { pill_button("发送", PRIMARY, SURFACE) }

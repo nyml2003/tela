@@ -1,0 +1,5 @@
+error: derive 组件字段 'width' 只允许 #[watch]（Signal/Computed）或 `key`；动态数据用 Signal/Computed 传递（可叠加 #[inject] 从作用域解析），恒定能力在 setup 期注入，常量写进 view 体
+ --> tests/ui/derive_rejects_plain_props.rs:8:12
+  |
+8 |     width: f32,
+  |            ^^^

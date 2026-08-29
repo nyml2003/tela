@@ -112,13 +112,14 @@ pub struct EditorController {
     document: Signal<String>,
     icon_query: Signal<String>,
     icon_category: Signal<IconCategory>,
-    about_cache: Vec<(String, String)>,
+    /// 恒定数据节点：构造期一次查询后永不变（有身份、永不脏）。
+    about_cache: Signal<Vec<(String, String)>>,
 }
 
 impl EditorController {
     /// 创建编辑器控制器；关于页构建信息在构造时经桥一次查询并缓存。
     pub fn new(resources: &'static dyn UiResources, mut bridge: BridgeDispatcher) -> Self {
-        let about_cache = query_about_rows(&mut bridge);
+        let about_cache = Signal::new(query_about_rows(&mut bridge));
         Self {
             resources,
             route: Signal::new(Route::Editor),
@@ -197,11 +198,12 @@ impl AppController<EditorAction> for EditorController {
         render_root(
             build,
             ctx.viewport,
+            ctx.viewport_signal.clone(),
             ctx.window_maximized,
             self.route.get(),
-            self.settings.get(),
-            &self.document.get(),
-            &self.about_cache,
+            self.settings.clone(),
+            self.document.clone(),
+            self.about_cache.clone(),
             self.icon_query.get(),
             self.icon_category.get(),
             self.resources.icon_provider(),

@@ -6,7 +6,7 @@ use tela_contract::{
     IconProvider, PixelOffset, Point, SemanticKey, ShadowSpec, Viewport, WindowCommand,
 };
 use tela_ui_dsl::prelude::*;
-use tela_ui_dsl::{TextActionMap, ViewBuild, ViewOutput, ViewResult, ViewSite, ui};
+use tela_ui_dsl::{Signal, TextActionMap, ViewBuild, ViewOutput, ViewResult, ViewSite, ui};
 
 use crate::application::{EditorAction, EditorSettings, IconCategory, Route};
 
@@ -22,11 +22,12 @@ use crate::ui::{
 pub fn render_root(
     build: &mut ViewBuild<EditorAction>,
     viewport: Viewport,
+    viewport_signal: Signal<Viewport>,
     window_maximized: bool,
     route: Route,
-    settings: EditorSettings,
-    document: &str,
-    about_rows: &[(String, String)],
+    settings: Signal<EditorSettings>,
+    document: Signal<String>,
+    about_rows: Signal<Vec<(String, String)>>,
     icon_query: String,
     icon_category: IconCategory,
     icon_provider: &dyn IconProvider,
@@ -36,6 +37,7 @@ pub fn render_root(
 ) -> ViewResult<ViewOutput<EditorAction>> {
     let hover = hover_key.map(|key| key.0.clone());
     let pressed = pressed_key.map(|key| key.0.clone());
+    let settings_value = settings.get();
     let output = ui!(build {
         <Frame
             key={"editor.root"}
@@ -59,7 +61,7 @@ pub fn render_root(
             }}
         >
             <Column width={viewport.width} height={viewport.height}>
-                <TitleBar width={viewport.width}>
+                <TitleBar viewport={viewport_signal.clone()}>
                     { nav_item(build, Route::Editor, "编辑器", route, &hover, &pressed) }
                     { nav_item(build, Route::Icons, "图标", route, &hover, &pressed) }
                     { nav_item(build, Route::Settings, "设置", route, &hover, &pressed) }
@@ -71,24 +73,24 @@ pub fn render_root(
                 </TitleBar>
                 { match route {
                     Route::Editor => ui!(build {
-                        <EditorPage viewport={viewport} settings={settings.clone()} document={document} />
+                        <EditorPage viewport={viewport_signal.clone()} settings={settings.clone()} document={document.clone()} />
                     }),
                     Route::Settings => ui!(build {
-                        <SettingsPage viewport={viewport}>
+                        <SettingsPage viewport={viewport_signal.clone()}>
                             <Row gap={8.0} cross_align={CrossAlign::Center}>
                                 <For each={fonts.iter().filter(|font| font.role == FontRole::Text)} key={font.text_style}>
-                                    {|font| { font_item(build, font, &settings.font, &hover) }}
+                                    {|font| { font_item(build, font, &settings_value.font, &hover) }}
                                 </For>
                             </Row>
                             <Row gap={12.0} cross_align={CrossAlign::Center}>
-                                { step_item(build, "font.small", "减小", EditorAction::SetFontSize(settings.font_size.saturating_sub(2).max(10)), &hover) }
-                                <Text value={format!("{} pt", settings.font_size)} font_size={16.0} color={TEXT} />
-                                { step_item(build, "font.large", "增大", EditorAction::SetFontSize((settings.font_size + 2).min(32)), &hover) }
+                                { step_item(build, "font.small", "减小", EditorAction::SetFontSize(settings_value.font_size.saturating_sub(2).max(10)), &hover) }
+                                <Text value={format!("{} pt", settings_value.font_size)} font_size={16.0} color={TEXT} />
+                                { step_item(build, "font.large", "增大", EditorAction::SetFontSize((settings_value.font_size + 2).min(32)), &hover) }
                             </Row>
                             <Row gap={12.0} cross_align={CrossAlign::Center}>
-                                { step_item(build, "line.small", "减小", EditorAction::SetLineHeight(settings.line_height.saturating_sub(10).max(100)), &hover) }
-                                <Text value={format!("{:.1}", settings.line_height as f32 / 100.0)} font_size={16.0} color={TEXT} />
-                                { step_item(build, "line.large", "增大", EditorAction::SetLineHeight((settings.line_height + 10).min(220)), &hover) }
+                                { step_item(build, "line.small", "减小", EditorAction::SetLineHeight(settings_value.line_height.saturating_sub(10).max(100)), &hover) }
+                                <Text value={format!("{:.1}", settings_value.line_height as f32 / 100.0)} font_size={16.0} color={TEXT} />
+                                { step_item(build, "line.large", "增大", EditorAction::SetLineHeight((settings_value.line_height + 10).min(220)), &hover) }
                             </Row>
                         </SettingsPage>
                     }),
@@ -101,7 +103,7 @@ pub fn render_root(
                         hover.as_ref(),
                     ),
                     Route::About => ui!(build {
-                        <AboutPage viewport={viewport} rows={about_rows} />
+                        <AboutPage viewport={viewport_signal.clone()} rows={about_rows.clone()} />
                     }),
                 } }
             </Column>

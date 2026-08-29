@@ -3,17 +3,22 @@
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
+    rc::Rc,
     sync::Arc,
 };
 
 use crate::{ViewBuildError, ViewResult, ViewSite};
 
-/// 供 `@provide(value: Type)` 写入一个词法 Context 的已拥有能力值。
+/// 供 `provide` 写入一个词法 Context 的已拥有能力值。
+///
+/// 单线程 `Rc` 体系（与 `Signal` 一致）：作用域可以携带 `Signal<T>` / `Computed<T>`，
+/// 使 provide/inject 成为响应式边的另一种源端发现方式（001 §2）——但注意
+/// 恒定值与信号都可注入；**会变的值必须以信号节点注入**，普通值注入即契约恒定。
 #[derive(Clone)]
 pub struct ProvidedValue {
     type_id: TypeId,
     type_name: &'static str,
-    value: Arc<dyn Any + Send + Sync>,
+    value: Rc<dyn Any>,
 }
 
 impl ProvidedValue {
@@ -21,11 +26,11 @@ impl ProvidedValue {
     ///
     /// 泛型参数由宏的 `@provide(value: Type)` 直接给出，因此表达式类型不依赖使用处
     /// 的隐式推导。
-    pub fn new<T: Send + Sync + 'static>(value: T) -> Self {
+    pub fn new<T: 'static>(value: T) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
-            value: Arc::new(value),
+            value: Rc::new(value),
         }
     }
 }
@@ -70,7 +75,7 @@ impl ViewContext {
     }
 
     /// 从当前作用域开始向父链查询一个能力值。
-    pub fn inject<T: Send + Sync + 'static>(&self, site: ViewSite) -> ViewResult<&T> {
+    pub fn inject<T: 'static>(&self, site: ViewSite) -> ViewResult<&T> {
         let type_id = TypeId::of::<T>();
         let mut current = Some(self);
         while let Some(scope) = current {

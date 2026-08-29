@@ -86,8 +86,9 @@ impl ComponentRuntime {
     ///
     /// 此入口用于不通过 `ui!` 构建的既有 Application。它只接受 `SemanticKey`，不产生
     /// 初始 dirty；每帧 DSL 视图应改用内部 reconcile 路径，以便卸载不存在的节点订阅。
-    pub fn watch<T: 'static>(&mut self, key: SemanticKey, signal: &Signal<T>) {
-        let signal_id = signal.id();
+    /// 源与派生节点（`Signal`/`Computed`）均可订阅。
+    pub fn watch<S: WatchSignal>(&mut self, key: SemanticKey, signal: &S) {
+        let signal_id = WatchSignal::signal_id(signal);
         if self
             .subscriptions
             .get(&key)
@@ -101,7 +102,7 @@ impl ComponentRuntime {
         self.subscriptions
             .entry(key)
             .or_default()
-            .insert(signal_id, signal.subscribe_erased(callback));
+            .insert(signal_id, WatchSignal::subscribe_erased(signal, callback));
     }
 
     /// 显式标记一个已解析节点为脏，而不建立 Signal 订阅。
@@ -241,15 +242,41 @@ pub(crate) struct ResolvedWatch {
 pub(crate) trait WatchSource {
     fn signal_id(&self) -> SignalId;
     fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any>;
-    /// 克隆来源，供 `#[memo]` 组件的 render 输出缓存重新声明订阅。
+    /// 克隆来源，供 retained 组件的 render 输出缓存重新声明订阅。
     fn clone_box(&self) -> Box<dyn WatchSource>;
 }
 
+/// 可被 `#[watch]` 订阅的信号句柄。
+///
+/// 仅 `Signal<T>`（源节点）与 `Computed<T>`（派生节点）实现——两类图节点统一经此
+/// 进入订阅入口（`ViewBuild::watch_source` 与 `ComponentRuntime::watch`），
+/// 依赖声明语义一致（001 §2：边即参数/字段）。
+pub trait WatchSignal: Clone + 'static {
+    /// 内部订阅身份；clone 共享同一 id。
+    fn signal_id(&self) -> SignalId;
+    /// 类型擦除订阅；返回的令牌 drop 即退订。
+    fn subscribe_erased(&self, listener: Rc<dyn Fn()>) -> Box<dyn Any>;
+}
+
+impl<T: 'static> WatchSignal for Signal<T> {
+    fn signal_id(&self) -> SignalId {
+        self.id()
+    }
+
+    fn subscribe_erased(&self, listener: Rc<dyn Fn()>) -> Box<dyn Any> {
+        Signal::subscribe_erased(self, listener)
+    }
+}
+
+/// 直接包一个 `Signal` 的 [`WatchSource`]（测试入口使用；`#[watch]` 脚手架经
+/// `WatchSignal` 的泛型适配器走统一路径）。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SignalWatch<T> {
     signal: Signal<T>,
 }
 
 impl<T> SignalWatch<T> {
+    #[cfg(test)]
     pub(crate) fn new(signal: &Signal<T>) -> Self {
         Self {
             signal: signal.clone(),
