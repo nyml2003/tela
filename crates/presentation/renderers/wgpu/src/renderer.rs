@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tela_contract::{
-    BackendCapabilities, BorderRadius, ClipRect, Color, ColorStop, DrawPayload, Fill, Gradient,
-    GradientKind, Rect, TextureRef, UiFrame,
+    BackendCapabilities, BorderRadius, ClipRect, Color, ColorStop, DrawPayload, Fill, FrameDamage,
+    Gradient, GradientKind, Rect, TextureRef, UiFrame,
 };
 
 #[cfg(test)]
@@ -84,6 +84,81 @@ struct GpuImage {
     bind_group: wgpu::BindGroup,
 }
 
+/// Persistent render attachment used for damage-based repaint across swapchain images.
+///
+/// A surface drawable cannot be used as the cache because its previous contents are undefined
+/// after present. This texture owns the rendered base frame; the target copies it into each newly
+/// acquired surface image after applying the candidate frame's damage.
+pub struct RetainedFrameTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    initialized: bool,
+}
+
+impl RetainedFrameTarget {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+        let (texture, view) = Self::texture_and_view(device, format, width.max(1), height.max(1));
+        Self {
+            texture,
+            view,
+            width: width.max(1),
+            height: height.max(1),
+            initialized: false,
+        }
+    }
+
+    fn ensure_size(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.width == width && self.height == height {
+            return false;
+        }
+        let (texture, view) = Self::texture_and_view(device, format, width, height);
+        self.texture = texture;
+        self.view = view;
+        self.width = width;
+        self.height = height;
+        self.initialized = false;
+        true
+    }
+
+    fn texture_and_view(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tela retained frame target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+}
+
+fn damage_covers_viewport(damage: &FrameDamage, width: f32, height: f32) -> bool {
+    damage.rects.iter().any(|rect| {
+        rect.x <= 0.0 && rect.y <= 0.0 && rect.x + rect.w >= width && rect.y + rect.h >= height
+    })
+}
+
 /// 支持 Solid Rect、RoundedRect、Image 与矩形 clip 的 WebGPU renderer。
 pub struct WgpuRenderer {
     device: wgpu::Device,
@@ -95,6 +170,7 @@ pub struct WgpuRenderer {
     gradient_images: BTreeMap<TextureRef, String>,
     in_flight_frames: VecDeque<SubmittedFrame>,
     background: wgpu::Color,
+    background_color: Color,
     viewport: Rect,
     pixel_w: u32,
     pixel_h: u32,
@@ -127,6 +203,7 @@ impl WgpuRenderer {
                 b: background.b as f64,
                 a: background.a as f64,
             },
+            background_color: background,
             viewport: Rect {
                 x: 0.0,
                 y: 0.0,
@@ -304,6 +381,70 @@ impl WgpuRenderer {
         self.queue.present(surface_texture);
     }
 
+    /// Creates a retained backing texture for one physical surface size.
+    pub fn retained_target(&self, width: u32, height: u32) -> RetainedFrameTarget {
+        RetainedFrameTarget::new(&self.device, self.format, width, height)
+    }
+
+    /// Repaints a persistent backing texture. The first frame, a resize, and full damage take
+    /// the ordinary full-frame path; otherwise only damage rectangles are cleared and redrawn.
+    pub fn render_retained_frame(
+        &mut self,
+        frame: &UiFrame,
+        damage: &FrameDamage,
+        target: &mut RetainedFrameTarget,
+        pixel_w: u32,
+        pixel_h: u32,
+    ) {
+        let pixel_w = pixel_w.max(1);
+        let pixel_h = pixel_h.max(1);
+        if target.ensure_size(&self.device, self.format, pixel_w, pixel_h)
+            || !target.initialized
+            || damage_covers_viewport(damage, frame.viewport.width, frame.viewport.height)
+        {
+            self.render_frame(frame, &target.view, pixel_w, pixel_h);
+            target.initialized = true;
+            return;
+        }
+        if damage.is_empty() {
+            return;
+        }
+        self.render_damage(frame, damage, &target.view, pixel_w, pixel_h);
+    }
+
+    /// Copies a retained backing texture into an acquired surface image.
+    pub fn copy_retained_to_texture(
+        &self,
+        source: &RetainedFrameTarget,
+        destination: &wgpu::Texture,
+    ) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tela retained present copy"),
+            });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &source.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: source.width,
+                height: source.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+    }
+
     /// 将共享 `UiFrame` 渲染到目标纹理。
     pub fn render_frame(
         &mut self,
@@ -384,6 +525,129 @@ impl WgpuRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.background),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                multiview_mask: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_viewport(0.0, 0.0, self.pixel_w as f32, self.pixel_h as f32, 0.0, 1.0);
+            for batch in &prepared {
+                let image_bind_group = match batch {
+                    PreparedBatch::Image { texture, .. }
+                    | PreparedBatch::Gradient { texture, .. } => Some(
+                        &self
+                            .images
+                            .get(texture)
+                            .expect("已准备的图片必须已注册")
+                            .bind_group,
+                    ),
+                    PreparedBatch::Solid { .. }
+                    | PreparedBatch::Rounded { .. }
+                    | PreparedBatch::Shadow { .. } => None,
+                };
+                self.pipelines.draw(&mut pass, batch, image_bind_group);
+                stats.draw_calls += 1;
+            }
+        }
+        self.in_flight_frames
+            .push_back(SubmittedFrame { batches: prepared });
+        while self.in_flight_frames.len() > IN_FLIGHT_FRAME_COUNT {
+            self.in_flight_frames.pop_front();
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.last_stats = stats;
+    }
+
+    /// Applies a local repaint to a target which already contains the preceding frame.
+    fn render_damage(
+        &mut self,
+        frame: &UiFrame,
+        damage: &FrameDamage,
+        target: &wgpu::TextureView,
+        pixel_w: u32,
+        pixel_h: u32,
+    ) {
+        self.viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: frame.viewport.width,
+            h: frame.viewport.height,
+        };
+        self.pixel_w = pixel_w;
+        self.pixel_h = pixel_h;
+        self.dpi = (self.pixel_w as f32 / self.viewport.w).max(0.01);
+
+        let mut stats = RenderStats::default();
+        let mut batches = Vec::<Batch>::new();
+        let mut used_generated_textures = BTreeSet::new();
+        for damage_rect in &damage.rects {
+            let Some(clip) = rect_clip(*damage_rect, None) else {
+                continue;
+            };
+            let clear_scissor = self.scissor_for(Some(clip));
+            if clear_scissor.2 == 0 || clear_scissor.3 == 0 {
+                continue;
+            }
+            // A load-op cannot clear only a scissor region. Draw the opaque background through
+            // that scissor before replaying the commands which intersect the same damage region.
+            solid_batch_for(&mut batches, clear_scissor).push_payload(
+                self.viewport,
+                Some(self.background_color),
+                None,
+                &self.viewport,
+            );
+            for (command_index, command) in frame.commands.iter().enumerate() {
+                if !rects_intersect(command.paint_bounds(), *damage_rect) {
+                    continue;
+                }
+                let Some(clip) = rect_clip(*damage_rect, command.clip) else {
+                    continue;
+                };
+                let scissor = self.scissor_for(Some(clip));
+                if scissor.2 == 0 || scissor.3 == 0 {
+                    stats.skipped_empty_clip += 1;
+                    continue;
+                }
+                stats.commands += 1;
+                self.append_payload(
+                    &mut batches,
+                    &mut used_generated_textures,
+                    &mut stats,
+                    command_index,
+                    scissor,
+                    command.geometry,
+                    command.opacity.clamp(0.0, 1.0),
+                    &command.payload,
+                );
+            }
+        }
+        stats.batches = batches.iter().filter(|batch| !batch.is_empty()).count() as u32;
+        stats.vertices = batches.iter().map(Batch::vertex_count).sum::<usize>() as u32;
+        stats.indices = batches.iter().map(Batch::index_count).sum::<usize>() as u32;
+        let prepared: Vec<PreparedBatch> = batches
+            .iter()
+            .filter(|batch| !batch.is_empty())
+            .map(|batch| batch.prepare(&self.device))
+            .collect();
+        self.last_diagnostics = diagnostics_for(frame, &stats, batches.first());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tela damage encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tela damage pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -711,6 +975,26 @@ impl WgpuRenderer {
 fn color_with_opacity(mut color: Color, opacity: f32) -> Color {
     color.a *= opacity;
     color
+}
+
+fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+fn rect_clip(damage: Rect, command_clip: Option<ClipRect>) -> Option<ClipRect> {
+    let clip = command_clip.map_or(damage, |clip| {
+        let x0 = damage.x.max(clip.rect.x);
+        let y0 = damage.y.max(clip.rect.y);
+        let x1 = (damage.x + damage.w).min(clip.rect.x + clip.rect.w);
+        let y1 = (damage.y + damage.h).min(clip.rect.y + clip.rect.h);
+        Rect {
+            x: x0,
+            y: y0,
+            w: (x1 - x0).max(0.0),
+            h: (y1 - y0).max(0.0),
+        }
+    });
+    (clip.w > 0.0 && clip.h > 0.0).then_some(ClipRect { rect: clip })
 }
 
 fn solid_gradient(color: Color, geometry: Rect) -> Gradient {

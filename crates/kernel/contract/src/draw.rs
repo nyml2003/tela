@@ -19,6 +19,156 @@ pub struct UiFrame {
     pub scroll_bounds: Vec<ScrollBounds>,
 }
 
+/// Kinds of invalidation carried through the retained render pipeline.
+///
+/// Geometry invalidation can require ancestor layout work; visual invalidation must still reach
+/// paint even when every layout box remains stable; structural invalidation describes inserted or
+/// removed retained subtrees. The flags are deliberately facts supplied by the producer, not the
+/// result of comparing two command streams.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirtyFlags(u8);
+
+impl DirtyFlags {
+    /// No invalidation.
+    pub const EMPTY: Self = Self(0);
+    /// Layout geometry changed or may have changed.
+    pub const GEOMETRY: Self = Self(1 << 0);
+    /// Paint payload changed without necessarily changing geometry.
+    pub const VISUAL: Self = Self(1 << 1);
+    /// Retained-tree membership or ordering changed.
+    pub const STRUCTURE: Self = Self(1 << 2);
+    /// All invalidation kinds.
+    pub const ALL: Self = Self(Self::GEOMETRY.0 | Self::VISUAL.0 | Self::STRUCTURE.0);
+
+    /// Whether this set has no invalidation kind.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether every flag in `other` is present.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Stable wire representation of this flag set.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Rebuilds a flag set from a wire representation, rejecting unknown bits.
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !Self::ALL.0 == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    /// Adds invalidation facts to this set.
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl std::ops::BitOr for DirtyFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for DirtyFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.insert(rhs);
+    }
+}
+
+/// Conservative screen-space repaint work emitted by the layout/paint boundary.
+///
+/// A damage rectangle always covers both the old and new extent of an affected retained subtree.
+/// This permits a backend to clear or rerasterize only these regions without discovering changes
+/// by comparing drawing payloads. Overlapping rectangles are coalesced eagerly, so callers can
+/// use [`Self::rects`] directly as a bounded repaint list.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameDamage {
+    /// Invalidation facts which produced these rectangles.
+    pub flags: DirtyFlags,
+    /// Coalesced logical-pixel repaint rectangles.
+    pub rects: Vec<Rect>,
+}
+
+impl FrameDamage {
+    /// Returns an empty repaint set.
+    pub const fn empty() -> Self {
+        Self {
+            flags: DirtyFlags::EMPTY,
+            rects: Vec::new(),
+        }
+    }
+
+    /// Returns one rectangle covering the whole logical viewport.
+    pub fn full(viewport: Viewport, flags: DirtyFlags) -> Self {
+        Self {
+            flags,
+            rects: vec![Rect {
+                x: 0.0,
+                y: 0.0,
+                w: viewport.width.max(0.0),
+                h: viewport.height.max(0.0),
+            }],
+        }
+    }
+
+    /// Whether no repaint work is required.
+    pub fn is_empty(&self) -> bool {
+        self.rects.is_empty()
+    }
+
+    /// Adds an affected extent, coalescing overlapping or touching rectangles.
+    pub fn add_rect(&mut self, rect: Rect, flags: DirtyFlags) {
+        self.flags |= flags;
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let mut merged = rect;
+        let mut index = 0;
+        while index < self.rects.len() {
+            if rects_touch_or_overlap(merged, self.rects[index]) {
+                merged = rect_union(merged, self.rects.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        self.rects.push(merged);
+    }
+
+    /// Adds every rectangle and invalidation fact from another repaint set.
+    pub fn extend(&mut self, other: &Self) {
+        self.flags |= other.flags;
+        for rect in other.rects.iter().copied() {
+            self.add_rect(rect, other.flags);
+        }
+    }
+}
+
+fn rects_touch_or_overlap(a: Rect, b: Rect) -> bool {
+    a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
+}
+
+fn rect_union(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = (a.x + a.w).max(b.x + b.w);
+    let y1 = (a.y + a.h).max(b.y + b.h);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
+}
+
 /// 单个滚动容器在本帧中的可滚动范围。
 ///
 /// `viewport` 是内容裁剪视口的逻辑坐标；`content_width` / `content_height` 是未平移内容的
@@ -56,6 +206,40 @@ pub struct DrawCommand {
     pub opacity: f32,
     /// 原语载荷。
     pub payload: DrawPayload,
+}
+
+impl DrawCommand {
+    /// Conservative screen-space extent that may receive pixels from this command.
+    ///
+    /// Layout geometry is sufficient for ordinary primitives. Outer shadows intentionally grow
+    /// this rectangle by the same padding used by the WGPU shadow batch, so a retained repaint
+    /// never leaves pixels outside the layout box stale.
+    pub fn paint_bounds(&self) -> Rect {
+        match &self.payload {
+            DrawPayload::Shadow { spec, .. } if !spec.inset => {
+                let pad = spec.blur_radius.max(0.5) * 2.0 + 1.0;
+                Rect {
+                    x: self.geometry.x + spec.offset.x - pad,
+                    y: self.geometry.y + spec.offset.y - pad,
+                    w: self.geometry.w + pad * 2.0,
+                    h: self.geometry.h + pad * 2.0,
+                }
+            }
+            // Glyph ink may legitimately extend above or left of the layout box. The exact
+            // raster is backend-specific, so retained scheduling uses a conservative line-box
+            // margin and lets the command clip discard any harmless overdraw.
+            DrawPayload::Text { text, .. } => {
+                let pad = text.line_height.max(text.font_size).max(1.0);
+                Rect {
+                    x: self.geometry.x - pad,
+                    y: self.geometry.y - pad,
+                    w: self.geometry.w + pad * 2.0,
+                    h: self.geometry.h + pad * 2.0,
+                }
+            }
+            _ => self.geometry,
+        }
+    }
 }
 
 /// 绘制原语载荷（见 007-绘制与渲染后端 1）。
@@ -461,5 +645,46 @@ impl BackendCapabilities {
             image_texture: true,
             subpixel: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PixelOffset, ShadowSpec};
+
+    #[test]
+    fn outer_shadow_paint_bounds_match_the_renderer_padding() {
+        let command = DrawCommand {
+            geometry: Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 30.0,
+                h: 40.0,
+            },
+            clip: None,
+            opacity: 1.0,
+            payload: DrawPayload::Shadow {
+                spec: ShadowSpec {
+                    offset: PixelOffset { x: 3.0, y: -2.0 },
+                    blur_radius: 4.0,
+                    color: Color::BLACK,
+                    inset: false,
+                },
+                target: Box::new(DrawPayload::Rect {
+                    fill: Some(Color::WHITE),
+                    border: None,
+                }),
+            },
+        };
+        assert_eq!(
+            command.paint_bounds(),
+            Rect {
+                x: 4.0,
+                y: 9.0,
+                w: 48.0,
+                h: 58.0,
+            }
+        );
     }
 }

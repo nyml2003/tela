@@ -380,10 +380,7 @@ impl UiNode {
     }
 
     /// 挂载已共享的子节点（splice/拼接路径：直接复用 Rc，零拷贝）。
-    pub fn with_shared_children(
-        mut self,
-        children: impl IntoIterator<Item = Rc<UiNode>>,
-    ) -> Self {
+    pub fn with_shared_children(mut self, children: impl IntoIterator<Item = Rc<UiNode>>) -> Self {
         self.children = children.into_iter().collect();
         self
     }
@@ -416,6 +413,16 @@ impl UiNode {
     pub fn with_content(mut self, content: ContentConcern) -> Self {
         self.content = Some(content);
         self
+    }
+}
+
+/// Compatibility conversion for APIs that still accept an owned root node.
+///
+/// Shared-tree call paths should keep the [`Rc`] and use `UiTree::new_shared`; converting here
+/// deliberately clones only the root shell while preserving all shared descendants.
+impl From<Rc<UiNode>> for UiNode {
+    fn from(node: Rc<UiNode>) -> Self {
+        (*node).clone()
     }
 }
 

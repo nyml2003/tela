@@ -236,7 +236,18 @@ impl Drop for BatchGuard {
 
 pub(crate) struct ResolvedWatch {
     pub(crate) key: SemanticKey,
+    pub(crate) scope: crate::owner::ScopeId,
     pub(crate) source: Box<dyn WatchSource>,
+}
+
+impl Clone for ResolvedWatch {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            scope: self.scope,
+            source: self.source.clone_box(),
+        }
+    }
 }
 
 pub(crate) trait WatchSource {
@@ -387,12 +398,14 @@ mod tests {
 
         runtime.reconcile(vec![ResolvedWatch {
             key: watched_key.clone(),
+            scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&signal)),
         }]);
         assert_eq!(signal.listener_count(), 1);
 
         runtime.reconcile(vec![ResolvedWatch {
             key: watched_key.clone(),
+            scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&signal)),
         }]);
         assert_eq!(signal.listener_count(), 1);
@@ -413,10 +426,12 @@ mod tests {
 
         runtime.reconcile(vec![ResolvedWatch {
             key: watched_key.clone(),
+            scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&first)),
         }]);
         runtime.reconcile(vec![ResolvedWatch {
             key: watched_key.clone(),
+            scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&second)),
         }]);
         assert_eq!(first.listener_count(), 0);

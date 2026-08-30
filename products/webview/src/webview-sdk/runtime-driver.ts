@@ -10,6 +10,12 @@ import { observeCanvasSurface, syncCanvasSurface, type CanvasSurfaceSize } from 
 
 export interface ApplicationPublication {
   readonly framePacket: Uint8Array;
+  readonly damageFlags: number;
+  readonly damageRects: Float32Array;
+  readonly transportSequence: bigint;
+  readonly transportBaseSequence: bigint | undefined;
+  readonly transportSnapshot: boolean;
+  readonly transportSpine: readonly string[];
   readonly status: WebAppStatus;
 }
 
@@ -25,6 +31,13 @@ export interface TelaApplicationRuntime {
   acknowledgePresented(token: bigint): ApplicationDispatchResult;
   rejectPublication(token: bigint): void;
   framePacket(): Uint8Array;
+  frameDamage(): { readonly flags: number; readonly rects: Float32Array };
+  frameTransport(): {
+    readonly sequence: bigint;
+    readonly baseSequence: bigint | undefined;
+    readonly snapshot: boolean;
+    readonly spine: readonly string[];
+  };
   status(): WebAppStatus;
   close?(): void;
   bridgeAvailable?(): boolean;
@@ -61,6 +74,7 @@ export async function startTelaRuntime(
   let retryTimer: number | undefined;
   let renderError: string | undefined;
   let presentedFrameToken: bigint | undefined;
+  let appliedTransportSequence: bigint | undefined;
 
   const scheduleRender = () => {
     if (closed || animationFrame !== undefined) return;
@@ -72,14 +86,22 @@ export async function startTelaRuntime(
           dispatch(bindings.event_tick(BigInt(Math.floor(timestamp))), false);
         }
         const framePacket = runtime.framePacket();
+        const damage = runtime.frameDamage();
+        const transport = runtime.frameTransport();
         const frameToken = runtime.status().frame_token;
-        if (!bindings.render_gpu(framePacket)) {
+        if (!transport.snapshot && transport.baseSequence !== appliedTransportSequence) {
+          throw new Error(
+            `收到基于 ${String(transport.baseSequence)} 的 patch，但当前保留帧为 ${String(appliedTransportSequence)}`,
+          );
+        }
+        if (!bindings.render_gpu_damage(framePacket, damage.flags, damage.rects)) {
           retryTimer ??= window.setTimeout(() => {
             retryTimer = undefined;
             scheduleRender();
           }, 100);
           return;
         }
+        appliedTransportSequence = transport.sequence;
         if (frameToken !== undefined && frameToken !== presentedFrameToken) {
           const outcome = runtime.acknowledgePresented(frameToken);
           input?.synchronize();

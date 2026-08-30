@@ -2,8 +2,8 @@
 //! 这是"wgpu 什么都没画出来"的回归防护：同一 UiFrame 在离屏纹理回读非背景像素。
 
 use tela_contract::{
-    BorderRadius, Color, ColorStop, DrawCommand, DrawPayload, Fill, Gradient, GradientKind,
-    PixelOffset, Point, Rect, ShadowSpec, UiFrame, Viewport,
+    BorderRadius, Color, ColorStop, DirtyFlags, DrawCommand, DrawPayload, Fill, FrameDamage,
+    Gradient, GradientKind, PixelOffset, Point, Rect, ShadowSpec, UiFrame, Viewport,
 };
 use tela_render_wgpu::WgpuRenderer;
 
@@ -288,6 +288,107 @@ fn render_to_texture(device: &wgpu::Device, queue: &wgpu::Queue, frame: &UiFrame
         .expect("golden checker upload");
     renderer.render_frame(frame, &view, W, H);
     read_pixels(device, queue, &texture)
+}
+
+#[test]
+#[ignore = "requires nix develop .#render-wgpu; GPU readback is covered by the ops visual gate"]
+fn retained_target_repaints_only_damage_and_preserves_the_rest() {
+    let (device, queue) = setup();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut renderer = WgpuRenderer::new(device.clone(), queue.clone(), format, Color::WHITE);
+    let mut retained = renderer.retained_target(W, H);
+    let frame = |left: Color| UiFrame {
+        viewport: Viewport {
+            width: W as f32,
+            height: H as f32,
+        },
+        commands: vec![
+            DrawCommand {
+                geometry: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 40.0,
+                    h: 40.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::Rect {
+                    fill: Some(left),
+                    border: None,
+                },
+            },
+            DrawCommand {
+                geometry: Rect {
+                    x: 60.0,
+                    y: 0.0,
+                    w: 40.0,
+                    h: 40.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::Rect {
+                    fill: Some(Color::BLUE),
+                    border: None,
+                },
+            },
+        ],
+        hit_regions: vec![],
+        scroll_bounds: vec![],
+    };
+    renderer.render_retained_frame(
+        &frame(Color::RED),
+        &FrameDamage::full(
+            Viewport {
+                width: W as f32,
+                height: H as f32,
+            },
+            DirtyFlags::ALL,
+        ),
+        &mut retained,
+        W,
+        H,
+    );
+    renderer.render_retained_frame(
+        &frame(Color::rgba(0.0, 0.8, 0.0, 1.0)),
+        &FrameDamage {
+            flags: DirtyFlags::VISUAL,
+            rects: vec![Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 40.0,
+                h: 40.0,
+            }],
+        },
+        &mut retained,
+        W,
+        H,
+    );
+    let output = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tela retained output"),
+        size: wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    renderer.copy_retained_to_texture(&retained, &output);
+    let pixels = read_pixels(&device, &queue, &output);
+    let left = ((20 * W + 20) * 4) as usize;
+    let right = ((20 * W + 80) * 4) as usize;
+    assert!(
+        pixels[left + 1] > 150 && pixels[left] < 40,
+        "damage 区未更新为绿色"
+    );
+    assert!(
+        pixels[right + 2] > 150 && pixels[right] < 40,
+        "未触及区域未保留蓝色"
+    );
 }
 
 /// 回读链路验证：write_texture 直接写红 → readback 应读到红。

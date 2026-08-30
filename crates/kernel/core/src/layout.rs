@@ -3,7 +3,7 @@
 //! 该模块的核心不变量是：一次 `LayoutEngine::measure` 中，每个源 `UiNode` 至多进入一次
 //! 测量。容器可以分阶段调度兄弟节点，但不会用临时 clone 或修正后的约束重测子树。
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use tela_contract::{
     BaseSize, Constraints, ContentConcern, CrossAlign, GridAlign, GridItemPlacement, GridSpec,
@@ -26,9 +26,6 @@ pub struct DefaultLayoutEngine<'a, M: TextMeasurer + ?Sized> {
     text_measurer: &'a M,
     cache: MeasureCache,
     visits: HashMap<usize, usize>,
-    /// 子树指纹按 Rc 指针记忆（单次 resolve 生命周期）：共享子树只哈希一次。
-    /// 引擎每次 resolve 新建，天然按遍清空——不存在跨帧地址复用风险。
-    pub(crate) fingerprint_memo: HashMap<usize, (u64, bool)>,
 }
 
 /// 容器调度时对子树的唯一入口。
@@ -39,7 +36,7 @@ pub(crate) trait ChildMeasurer<M: TextMeasurer + ?Sized> {
     fn measure_child(
         &mut self,
         engine: &mut DefaultLayoutEngine<'_, M>,
-        child: &UiNode,
+        child: &Rc<UiNode>,
         index: usize,
         constraints: Constraints,
     ) -> Result<LayoutBox, UiLayoutError>;
@@ -54,7 +51,7 @@ pub(crate) trait ChildMeasurer<M: TextMeasurer + ?Sized> {
         engine: &mut DefaultLayoutEngine<'_, M>,
         _wrapper: &UiNode,
         _wrapper_index: usize,
-        child: &UiNode,
+        child: &Rc<UiNode>,
         child_index: usize,
         constraints: Constraints,
     ) -> Result<LayoutBox, UiLayoutError> {
@@ -68,11 +65,11 @@ impl<M: TextMeasurer + ?Sized> ChildMeasurer<M> for DirectChildMeasurer {
     fn measure_child(
         &mut self,
         engine: &mut DefaultLayoutEngine<'_, M>,
-        child: &UiNode,
+        child: &Rc<UiNode>,
         _index: usize,
         constraints: Constraints,
     ) -> Result<LayoutBox, UiLayoutError> {
-        engine.measure_with(child, constraints, self)
+        engine.measure_with(child.as_ref(), constraints, self)
     }
 }
 
@@ -83,7 +80,6 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
             text_measurer,
             cache: MeasureCache::default(),
             visits: HashMap::new(),
-            fingerprint_memo: HashMap::new(),
         }
     }
 
@@ -210,13 +206,7 @@ impl<'a, M: TextMeasurer + ?Sized> DefaultLayoutEngine<'a, M> {
         node: &UiNode,
         constraints: Constraints,
     ) -> Result<LayoutBox, UiLayoutError> {
-        let key = (
-            node as *const UiNode as usize,
-            constraints.min_w.to_bits(),
-            constraints.max_w.to_bits(),
-            constraints.min_h.to_bits(),
-            constraints.max_h.to_bits(),
-        );
+        let key = MeasureKey::new(node, constraints);
         if let Some((w, h, baseline)) = self.cache.map.get(&key) {
             self.cache.hits += 1;
             return Ok(LayoutBox {
@@ -1171,7 +1161,108 @@ pub(crate) struct MeasureCache {
     misses: usize,
 }
 
-type MeasureKey = (usize, u32, u32, u32, u32);
+/// Complete, address-free leaf measurement input.
+///
+/// Text shaping can safely outlive one candidate tree, unlike a node address: the cache key is
+/// exactly the information the measurer receives plus every local layout field that changes the
+/// resulting box. This is deliberately separate from subtree reuse, whose only key is `Rc`
+/// identity.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MeasureKey {
+    kind: u8,
+    content: MeasureContentKey,
+    width: Option<SizeKey>,
+    height: Option<SizeKey>,
+    text_max_lines: Option<u16>,
+    text_overflow: Option<u8>,
+    min_w: u32,
+    max_w: u32,
+    min_h: u32,
+    max_h: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum MeasureContentKey {
+    None,
+    Text {
+        text: String,
+        font: String,
+        font_size: u32,
+        line_height: u32,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum SizeKey {
+    Fixed(u32),
+    Percent(u32),
+    Auto,
+    Constrained {
+        base: Box<SizeKey>,
+        min: Option<u32>,
+        max: Option<u32>,
+    },
+}
+
+impl MeasureKey {
+    fn new(node: &UiNode, constraints: Constraints) -> Self {
+        let layout = node.layout.as_ref();
+        let text_constraint = layout.and_then(|layout| layout.text_constraint);
+        let content = match &node.content {
+            Some(ContentConcern::Text(text)) => MeasureContentKey::Text {
+                text: text.text.clone(),
+                font: text.font.as_str().to_owned(),
+                font_size: text.font_size.to_bits(),
+                line_height: text.line_height.to_bits(),
+            },
+            _ => MeasureContentKey::None,
+        };
+        Self {
+            kind: leaf_kind_key(&node.kind),
+            content,
+            width: layout
+                .and_then(|layout| layout.width)
+                .map(SizeKey::from_size),
+            height: layout
+                .and_then(|layout| layout.height)
+                .map(SizeKey::from_size),
+            text_max_lines: text_constraint.and_then(|constraint| constraint.max_lines),
+            text_overflow: text_constraint.map(|constraint| constraint.overflow as u8),
+            min_w: constraints.min_w.to_bits(),
+            max_w: constraints.max_w.to_bits(),
+            min_h: constraints.min_h.to_bits(),
+            max_h: constraints.max_h.to_bits(),
+        }
+    }
+}
+
+impl SizeKey {
+    fn from_size(size: Size) -> Self {
+        match size {
+            Size::Raw(BaseSize::Fixed(value)) => Self::Fixed(value.to_bits()),
+            Size::Raw(BaseSize::Percent(value)) => Self::Percent(value.to_bits()),
+            Size::Raw(BaseSize::Auto) => Self::Auto,
+            Size::Constrained(MinMax { base, min, max }) => Self::Constrained {
+                base: Box::new(Self::from_size(Size::Raw(base))),
+                min: min.map(f32::to_bits),
+                max: max.map(f32::to_bits),
+            },
+        }
+    }
+}
+
+fn leaf_kind_key(kind: &NodeKind) -> u8 {
+    match kind {
+        NodeKind::Text => 1,
+        NodeKind::Image => 2,
+        NodeKind::Rect => 3,
+        NodeKind::Circle => 4,
+        NodeKind::Ellipse => 5,
+        NodeKind::NinePatch => 6,
+        NodeKind::Polygon => 7,
+        _ => 0,
+    }
+}
 
 #[derive(Clone, Copy)]
 struct AxisSize {

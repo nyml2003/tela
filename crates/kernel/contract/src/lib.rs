@@ -33,8 +33,8 @@ mod text;
 mod window;
 
 pub use draw::{
-    BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DrawCommand, DrawPayload, FrameSink,
-    HitRegion, HitRole, ScrollBounds, UiFrame,
+    BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DirtyFlags, DrawCommand, DrawPayload,
+    FrameDamage, FrameSink, HitRegion, HitRole, ScrollBounds, UiFrame,
 };
 pub use error::{UiBuildError, UiLayoutError};
 pub use geometry::{BorderRadius, Color, Insets, PixelOffset, Point, Rect, snap};
@@ -114,6 +114,39 @@ mod tests {
             scroll_bounds: vec![],
         };
         assert_eq!(frame.clone(), frame);
+    }
+
+    #[test]
+    fn damage_coalesces_old_and_new_extents_without_losing_visual_dirty() {
+        let mut damage = FrameDamage::default();
+        damage.add_rect(
+            Rect {
+                x: 4.0,
+                y: 8.0,
+                w: 20.0,
+                h: 10.0,
+            },
+            DirtyFlags::VISUAL,
+        );
+        damage.add_rect(
+            Rect {
+                x: 18.0,
+                y: 8.0,
+                w: 20.0,
+                h: 10.0,
+            },
+            DirtyFlags::VISUAL,
+        );
+        assert_eq!(
+            damage.rects,
+            vec![Rect {
+                x: 4.0,
+                y: 8.0,
+                w: 34.0,
+                h: 10.0,
+            }]
+        );
+        assert!(damage.flags.contains(DirtyFlags::VISUAL));
     }
 
     #[test]

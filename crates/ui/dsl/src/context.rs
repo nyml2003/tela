@@ -4,7 +4,6 @@ use std::{
     any::{Any, TypeId},
     collections::HashMap,
     rc::Rc,
-    sync::Arc,
 };
 
 use crate::{ViewBuildError, ViewResult, ViewSite};
@@ -40,14 +39,14 @@ impl ProvidedValue {
 /// 每个 `ui!` 块可创建一个 child scope。子 scope 可以遮蔽父项，但同一层级重复
 /// 提供相同 `TypeId` 会返回结构化错误。
 pub struct ViewContext {
-    parent: Option<Arc<Self>>,
+    parent: Option<Rc<Self>>,
     entries: HashMap<TypeId, ProvidedValue>,
 }
 
 impl ViewContext {
     /// 创建没有父层和能力值的根作用域。
-    pub fn root() -> Arc<Self> {
-        Arc::new(Self {
+    pub fn root() -> Rc<Self> {
+        Rc::new(Self {
             parent: None,
             entries: HashMap::new(),
         })
@@ -55,10 +54,10 @@ impl ViewContext {
 
     /// 在 `parent` 上创建一个包含本层能力值的不可变子作用域。
     pub fn child(
-        parent: Arc<Self>,
+        parent: Rc<Self>,
         values: impl IntoIterator<Item = ProvidedValue>,
         site: ViewSite,
-    ) -> ViewResult<Arc<Self>> {
+    ) -> ViewResult<Rc<Self>> {
         let mut entries = HashMap::new();
         for value in values {
             if entries.insert(value.type_id, value.clone()).is_some() {
@@ -68,7 +67,7 @@ impl ViewContext {
                 });
             }
         }
-        Ok(Arc::new(Self {
+        Ok(Rc::new(Self {
             parent: Some(parent),
             entries,
         }))

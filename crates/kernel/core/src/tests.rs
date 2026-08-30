@@ -1771,6 +1771,34 @@ fn measure_cache_same_input_same_output() {
 }
 
 #[test]
+fn measure_cache_reuses_equal_text_inputs_across_node_allocations() {
+    let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
+    let constraints = Constraints {
+        min_w: 0.0,
+        max_w: 200.0,
+        min_h: 0.0,
+        max_h: 100.0,
+    };
+    let first = engine
+        .measure(&text_node("same text"), constraints)
+        .unwrap();
+    let second = engine
+        .measure(&text_node("same text"), constraints)
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        engine.cache_stats(),
+        (1, 1),
+        "text shaping cache is keyed by complete input, never a transient node address"
+    );
+
+    let _ = engine
+        .measure(&text_node("changed text"), constraints)
+        .unwrap();
+    assert_eq!(engine.cache_stats(), (1, 2), "content change must miss");
+}
+
+#[test]
 fn measure_cache_clear_does_not_change_result() {
     let mut engine = DefaultLayoutEngine::new(&MockMeasurer);
     let node = rect(30.0, 20.0);

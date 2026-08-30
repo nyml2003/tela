@@ -10,8 +10,8 @@ use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     RawDisplayHandle, RawWindowHandle,
 };
-use tela_contract::{Color, UiFrame};
-use tela_render_wgpu::WgpuRenderer;
+use tela_contract::{Color, FrameDamage, UiFrame};
+use tela_render_wgpu::{WgpuRenderer, renderer::RetainedFrameTarget};
 
 use crate::view::TelaView;
 
@@ -57,6 +57,7 @@ pub enum RenderOutcome {
 /// Owns the WGPU objects that must stay on the AppKit main thread with the `NSView`.
 pub struct GpuSession {
     renderer: WgpuRenderer,
+    backing: RetainedFrameTarget,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     instance: wgpu::Instance,
@@ -106,11 +107,14 @@ impl GpuSession {
             trace: wgpu::Trace::Off,
         }))
         .map_err(|error| format!("create WGPU device: {error}"))?;
-        let config = surface
+        let mut config = surface
             .get_default_config(&adapter, metrics.width, metrics.height)
             .ok_or_else(|| "WGPU surface has no default configuration".to_owned())?;
+        config.usage |= wgpu::TextureUsages::COPY_DST;
         let format = config.format;
         surface.configure(&device, &config);
+        let renderer = WgpuRenderer::new(device, queue, format, Color::rgba(1.0, 1.0, 1.0, 1.0));
+        let backing = renderer.retained_target(config.width, config.height);
 
         device.set_device_lost_callback(move |reason, message| {
             if let Ok(mut report) = device_loss.lock() {
@@ -127,7 +131,8 @@ impl GpuSession {
         });
 
         Ok(Self {
-            renderer: WgpuRenderer::new(device, queue, format, Color::rgba(1.0, 1.0, 1.0, 1.0)),
+            renderer,
+            backing,
             surface,
             config,
             instance,
@@ -157,7 +162,7 @@ impl GpuSession {
     }
 
     /// Renders the current portable frame into the next AppKit drawable.
-    pub fn render(&mut self, frame: &UiFrame) -> RenderOutcome {
+    pub fn render(&mut self, frame: &UiFrame, damage: &FrameDamage) -> RenderOutcome {
         let (texture, suboptimal) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
@@ -167,11 +172,15 @@ impl GpuSession {
             wgpu::CurrentSurfaceTexture::Occluded => return RenderOutcome::Occluded,
             wgpu::CurrentSurfaceTexture::Validation => return RenderOutcome::Validation,
         };
-        let target = texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.renderer.render_retained_frame(
+            frame,
+            damage,
+            &mut self.backing,
+            self.config.width,
+            self.config.height,
+        );
         self.renderer
-            .render_frame(frame, &target, self.config.width, self.config.height);
+            .copy_retained_to_texture(&self.backing, &texture.texture);
         self.renderer.present(texture);
         RenderOutcome::Presented { suboptimal }
     }

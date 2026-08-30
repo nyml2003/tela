@@ -24,6 +24,8 @@ interface GuestExports {
   tela_app_publish: GuestFunction;
   tela_app_publication_ptr: GuestFunction;
   tela_app_publication_len: GuestFunction;
+  tela_app_transport_ptr: GuestFunction;
+  tela_app_transport_len: GuestFunction;
   tela_app_presented: GuestFunction;
   tela_app_rejected: GuestFunction;
   tela_app_error_ptr: GuestFunction;
@@ -164,6 +166,26 @@ export class TelaGuestRuntime implements TelaApplicationRuntime {
     return this.publication().framePacket;
   }
 
+  frameDamage(): { readonly flags: number; readonly rects: Float32Array } {
+    const publication = this.publication();
+    return { flags: publication.damageFlags, rects: publication.damageRects };
+  }
+
+  frameTransport(): {
+    readonly sequence: bigint;
+    readonly baseSequence: bigint | undefined;
+    readonly snapshot: boolean;
+    readonly spine: readonly string[];
+  } {
+    const publication = this.publication();
+    return {
+      sequence: publication.transportSequence,
+      baseSequence: publication.transportBaseSequence,
+      snapshot: publication.transportSnapshot,
+      spine: publication.transportSpine,
+    };
+  }
+
   /** Latest host-visible non-drawing application state. */
   status(): WebAppStatus {
     return this.publication().status;
@@ -172,13 +194,19 @@ export class TelaGuestRuntime implements TelaApplicationRuntime {
   private publish(): GuestPublication {
     this.requireOutcome(this.exports.tela_app_publish(), '应用发布');
     const packet = this.readGuestExport(
-      this.exports.tela_app_publication_ptr,
-      this.exports.tela_app_publication_len,
-      'publication',
+      this.exports.tela_app_transport_ptr,
+      this.exports.tela_app_transport_len,
+      'transport publication',
     );
-    const decoded = this.bindings.decode_app_publication(packet);
+    const decoded = this.bindings.decode_app_transport_publication(packet);
     const publication = {
       framePacket: decoded.frame_packet(),
+      damageFlags: decoded.damage_flags(),
+      damageRects: decoded.damage_rects(),
+      transportSequence: decoded.transport_sequence(),
+      transportBaseSequence: decoded.transport_base_sequence,
+      transportSnapshot: decoded.transport_snapshot,
+      transportSpine: decoded.transport_spine(),
       status: decoded.status(),
     };
     const token = publication.status.frame_token;
@@ -274,6 +302,8 @@ function requireGuestExports(exports: WebAssembly.Exports): GuestExports {
     'tela_app_publish',
     'tela_app_publication_ptr',
     'tela_app_publication_len',
+    'tela_app_transport_ptr',
+    'tela_app_transport_len',
     'tela_app_presented',
     'tela_app_rejected',
     'tela_app_error_ptr',

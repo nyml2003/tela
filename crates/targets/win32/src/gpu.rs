@@ -9,8 +9,8 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
     Win32WindowHandle,
 };
-use tela_contract::UiFrame;
-use tela_render_wgpu::WgpuRenderer;
+use tela_contract::{FrameDamage, UiFrame};
+use tela_render_wgpu::{WgpuRenderer, renderer::RetainedFrameTarget};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -61,6 +61,7 @@ pub struct GpuSession {
     /// Presentation configuration.
     pub config: wgpu::SurfaceConfiguration,
     renderer: WgpuRenderer,
+    backing: RetainedFrameTarget,
     /// 设备丢失回调的跨线程报告槽与代际号。
     device_loss: Arc<Mutex<Option<DeviceLossReport>>>,
     generation: u64,
@@ -166,7 +167,7 @@ impl GpuSession {
             init_started.elapsed().as_micros()
         );
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format: capabilities.formats[0],
             width: width.max(1),
             height: height.max(1),
@@ -177,6 +178,7 @@ impl GpuSession {
             color_space: wgpu::SurfaceColorSpace::Srgb,
         };
         surface.configure(renderer.device(), &config);
+        let backing = renderer.retained_target(config.width, config.height);
         gpu_trace!(
             "tela-win32-trace: event=gpu_init stage=surface_configured elapsed_us={} physical={}x{}",
             init_started.elapsed().as_micros(),
@@ -199,6 +201,7 @@ impl GpuSession {
                 surface,
                 config,
                 renderer,
+                backing,
                 device_loss,
                 generation,
             });
@@ -236,6 +239,7 @@ impl GpuSession {
             surface,
             config,
             renderer,
+            backing,
             device_loss,
             generation,
         })
@@ -270,7 +274,11 @@ impl GpuSession {
     }
 
     /// Acquires the next texture, renders the frame, and presents.
-    pub fn render(&mut self, frame: &UiFrame) -> Result<RenderOutcome, String> {
+    pub fn render(
+        &mut self,
+        frame: &UiFrame,
+        damage: &FrameDamage,
+    ) -> Result<RenderOutcome, String> {
         let (texture, suboptimal) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
@@ -280,11 +288,15 @@ impl GpuSession {
             wgpu::CurrentSurfaceTexture::Occluded => return Ok(RenderOutcome::Occluded),
             wgpu::CurrentSurfaceTexture::Validation => return Ok(RenderOutcome::Validation),
         };
-        let view = texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.renderer.render_retained_frame(
+            frame,
+            damage,
+            &mut self.backing,
+            self.config.width,
+            self.config.height,
+        );
         self.renderer
-            .render_frame(frame, &view, self.config.width, self.config.height);
+            .copy_retained_to_texture(&self.backing, &texture.texture);
         self.renderer.present(texture);
         Ok(RenderOutcome::Presented { suboptimal })
     }

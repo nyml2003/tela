@@ -78,7 +78,10 @@ where
         let recompute = Rc::clone(&recompute);
         Rc::new(a.subscribe(move || recompute())) as Rc<dyn Any>
     };
-    Computed { signal: out, _keep_alive }
+    Computed {
+        signal: out,
+        _keep_alive,
+    }
 }
 
 /// 双源派生：`computed2(&a, &b, |a, b| ..)`。两个源各自的变化都会触发重算。
@@ -111,7 +114,10 @@ where
         b.subscribe(move || recompute())
     };
     let _keep_alive = Rc::new((sub_a, sub_b)) as Rc<dyn Any>;
-    Computed { signal: out, _keep_alive }
+    Computed {
+        signal: out,
+        _keep_alive,
+    }
 }
 
 /// 三源派生：`computed3(&a, &b, &c, |a, b, c| ..)`。
@@ -151,7 +157,10 @@ where
         c.subscribe(move || recompute())
     };
     let _keep_alive = Rc::new((sub_a, sub_b, sub_c)) as Rc<dyn Any>;
-    Computed { signal: out, _keep_alive }
+    Computed {
+        signal: out,
+        _keep_alive,
+    }
 }
 
 #[cfg(test)]

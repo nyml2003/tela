@@ -10,7 +10,7 @@ use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppPublication, AppStatus,
     ApplicationSession, CursorKind,
 };
-use tela_contract::{HitRole, Point, UiFrame, WindowCommand};
+use tela_contract::{FrameDamage, HitRole, Point, UiFrame, WindowCommand};
 
 /// 一个会话的壳侧驱动状态：候选帧 → 呈现帧的握手与窗口命令队列。
 pub(crate) struct SessionDriver {
@@ -135,6 +135,16 @@ impl SessionDriver {
             .frame
     }
 
+    /// Damage for the same candidate-or-presented publication returned by [`Self::frame`].
+    pub(crate) fn frame_damage(&self) -> &FrameDamage {
+        &self
+            .candidate
+            .as_ref()
+            .or(self.presented.as_ref())
+            .expect("session frame must be published")
+            .damage
+    }
+
     /// 当前候选（优先）或已呈现帧的非绘制状态。
     pub(crate) fn status(&self) -> Option<&AppStatus> {
         self.candidate
@@ -230,6 +240,9 @@ mod tests {
             AppPublication {
                 token,
                 frame: empty_frame(),
+                damage: tela_contract::FrameDamage::default(),
+                spine: Vec::new(),
+                retained_tree: None,
                 status: AppStatus {
                     frame_token: Some(token),
                     cursor: CursorKind::Default,

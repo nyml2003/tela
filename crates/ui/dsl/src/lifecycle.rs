@@ -2,7 +2,7 @@
 //!
 //! 状态由 `ViewBuild` 的候选 owner 帧保存，应用不需要持有 owner 或身份对象。
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::{
     AnimationController, AnimationSample, Children, DslComponent, Interpolate, TransitionTarget,
@@ -12,11 +12,11 @@ use crate::{
 
 /// setup 阶段可读取的只读上下文。
 pub struct ComponentSetupContext {
-    scope: Arc<ViewContext>,
+    scope: Rc<ViewContext>,
 }
 
 impl ComponentSetupContext {
-    pub(crate) fn new(scope: Arc<ViewContext>) -> Self {
+    pub(crate) fn new(scope: Rc<ViewContext>) -> Self {
         Self { scope }
     }
 
@@ -26,7 +26,7 @@ impl ComponentSetupContext {
     }
 
     /// 从当前作用域读取已提供值。
-    pub fn inject<T: Send + Sync + Clone + 'static>(&self, site: ViewSite) -> Option<T> {
+    pub fn inject<T: Clone + 'static>(&self, site: ViewSite) -> Option<T> {
         self.scope.inject::<T>(site).ok().cloned()
     }
 }

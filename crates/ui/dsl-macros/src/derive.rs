@@ -108,30 +108,32 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
     });
 
     // ---- 组装表达式（纯借用：可重复执行，供快照再构造一次实例）----
-    let assembly: Vec<_> = specs.iter().map(|spec| {
-        let ident = &spec.ident;
-        match spec.kind {
-            FieldKind::Plain => quote!(#ident: props.#ident.clone().unwrap_or_default(),),
-            FieldKind::Defaulted => {
-                let default = spec.default_expr.as_ref().expect("defaulted has expr");
-                quote!(#ident: props.#ident.clone().unwrap_or(#default),)
+    let assembly: Vec<_> = specs
+        .iter()
+        .map(|spec| {
+            let ident = &spec.ident;
+            match spec.kind {
+                FieldKind::Plain => quote!(#ident: props.#ident.clone().unwrap_or_default(),),
+                FieldKind::Defaulted => {
+                    let default = spec.default_expr.as_ref().expect("defaulted has expr");
+                    quote!(#ident: props.#ident.clone().unwrap_or(#default),)
+                }
+                FieldKind::Option => quote!(#ident: props.#ident.clone(),),
+                FieldKind::Inject => {
+                    let binding = format_ident!("__tela_inject_{ident}");
+                    quote!(#ident: #binding.clone(),)
+                }
+                FieldKind::Provide => {
+                    let binding = format_ident!("__tela_provide_{ident}");
+                    quote!(#ident: #binding.clone(),)
+                }
+                FieldKind::Watch => {
+                    let binding = format_ident!("__tela_watch_{ident}");
+                    quote!(#ident: #binding.clone(),)
+                }
             }
-            FieldKind::Option => quote!(#ident: props.#ident.clone(),),
-            FieldKind::Inject => {
-                let binding = format_ident!("__tela_inject_{ident}");
-                quote!(#ident: #binding.clone(),)
-            }
-            FieldKind::Provide => {
-                let binding = format_ident!("__tela_provide_{ident}");
-                quote!(#ident: #binding.clone(),)
-            }
-            FieldKind::Watch => {
-                let binding = format_ident!("__tela_watch_{ident}");
-                quote!(#ident: #binding.clone(),)
-            }
-        }
-    })
-    .collect();
+        })
+        .collect();
 
     // ---- inject 绑定 ----
     let inject_code = specs.iter().filter_map(|spec| {
@@ -192,6 +194,25 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
             quote!(__tela_build.watch_source(&#binding, __tela_site))
         });
 
+    // Retained re-entry receives the previous component instance directly, so it must rebuild
+    // the local bindings that the normal props/inject path created before entering `view`.
+    let memo_watch_bindings = specs
+        .iter()
+        .filter(|spec| spec.kind == FieldKind::Watch)
+        .map(|spec| {
+            let ident = &spec.ident;
+            let binding = format_ident!("__tela_watch_{ident}");
+            quote!(let #binding = __tela_inst.#ident.clone();)
+        });
+    let memo_provide_bindings = specs
+        .iter()
+        .filter(|spec| spec.kind == FieldKind::Provide)
+        .map(|spec| {
+            let ident = &spec.ident;
+            let binding = format_ident!("__tela_provide_{ident}");
+            quote!(let #binding = __tela_inst.#ident.clone();)
+        });
+
     // ---- provide 字段：缺失时整帧返回错误（不 panic）----
     let provide_code = specs.iter().filter_map(|spec| {
         if spec.kind != FieldKind::Provide {
@@ -241,16 +262,12 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 vec![#(#provided_values),*],
                 __tela_site,
                 |__tela_build| {
-                    let __tela_body = __tela_children.build(__tela_build)?;
                     __tela_inst.view(__tela_build, __tela_body)
                 },
             )
         }
     } else {
-        quote!({
-            let __tela_body = __tela_children.build(__tela_build)?;
-            __tela_inst.view(__tela_build, __tela_body)
-        })
+        quote!({ __tela_inst.view(__tela_build, __tela_body) })
     };
     let watch_attach = if specs.iter().any(|spec| spec.kind == FieldKind::Watch) {
         quote! {
@@ -270,13 +287,16 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
 
     // ---- retained 求值语义（默认，001 §2）：入边无脏 → 不重求值 ----
     // 命中判定 = 上次实例快照的纯身份比较（watch 字段比 SignalId，key 已含于身份）。
-    // 携带 children 内容的调用点自动退出（Children::empty 判定在运行时完成）。
+    // children 在首次 render 后被物化为无动作槽位快照。命中不会执行调用栈闭包；
+    // 定点重入则用同一组 Rc 节点和 watch 边恢复 Body。不可快照的 children（动作、
+    // 组件动作、动画）仍然退出 retained，保持候选事务边界。
+    let memo_snapshot_name = format_ident!("__Tela{}MemoSnapshot", name);
     let memo_field_matches = specs
         .iter()
         .filter(|spec| spec.kind == FieldKind::Watch)
         .map(|spec| {
             let ident = &spec.ident;
-            quote!(self.#ident.id() == cached.#ident.id())
+            quote!(self.#ident.id() == cached.component.#ident.id())
         });
     let memo_matches_impl = quote! {
         const _: () = {
@@ -284,14 +304,14 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 #[doc(hidden)]
                 fn __tela_memo_matches(&self, cached: &dyn ::core::any::Any) -> bool {
                     cached
-                        .downcast_ref::<#name>()
+                        .downcast_ref::<#memo_snapshot_name>()
                         .is_some_and(|cached| true #(&& #memo_field_matches)*)
                 }
             }
         };
     };
     let memo_render = quote! {
-        let __tela_memo = __tela_build.memo_enabled() && __tela_children.is_empty();
+        let __tela_memo = __tela_build.memo_enabled();
         if __tela_memo {
             if let Some(__tela_cached) =
                 __tela_build.memo_hit(|cached| __tela_inst.__tela_memo_matches(cached))
@@ -300,19 +320,62 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 return Ok(__tela_cached);
             }
         }
+        let (__tela_body, __tela_retained_children) =
+            __tela_children.build_with_retained(__tela_build)?;
         let mut __tela_out = #view_call?;
         #watch_attach
-        if __tela_memo {
+        if __tela_memo && let Some(__tela_retained_children) = __tela_retained_children {
             // 记录上次实例快照（自包含 retained element：全 watch 句柄 + 坐标 + view）。
             // 快照由绑定重新构造（句柄 clone = Rc 递增），不要求组件结构体 Clone。
             // 必须发生在 watch attach 之后：缓存条目要携带组件自身的订阅，
             // 否则脏检查看不到它的 scope，signal 变化会被误命中。
-            __tela_build.memo_record(#name { #(#assembly)* }, &__tela_out);
+            __tela_build.memo_record(
+                #memo_snapshot_name {
+                    component: #name { #(#assembly)* },
+                    children: __tela_retained_children,
+                },
+                &__tela_out,
+                #name::__tela_memo_reenter::<A>,
+                __tela_site,
+            );
         }
         Ok(__tela_out)
     };
 
     let impl_block = quote! {
+        #[doc(hidden)]
+        struct #memo_snapshot_name {
+            component: #name,
+            children: #dsl::RetainedChildren,
+        }
+
+        impl #name {
+            #[doc(hidden)]
+            fn __tela_memo_reenter<A>(
+                __tela_build: &mut #dsl::ViewBuild<A>,
+                __tela_cached: ::std::rc::Rc<dyn ::core::any::Any>,
+                __tela_site: #dsl::ViewSite,
+            ) -> #dsl::ViewResult<#dsl::ViewOutput<A>> {
+                let __tela_snapshot = __tela_cached
+                    .downcast_ref::<#memo_snapshot_name>()
+                    .expect("retained evaluator and snapshot component type must agree");
+                let __tela_inst = &__tela_snapshot.component;
+                __tela_build.retain_retained_children(&__tela_snapshot.children);
+                let __tela_body = __tela_snapshot.children.restore::<A>();
+                #(#memo_watch_bindings)*
+                #(#memo_provide_bindings)*
+                let mut __tela_out = #view_call?;
+                #watch_attach
+                __tela_build.memo_record_erased(
+                    __tela_cached,
+                    &__tela_out,
+                    #name::__tela_memo_reenter::<A>,
+                    __tela_site,
+                );
+                Ok(__tela_out)
+            }
+        }
+
         impl #dsl::DslComponent for #name {
             type Props = #props_name;
             type State = ();

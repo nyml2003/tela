@@ -9,7 +9,7 @@
 
 use tela_agent_demo::{AgentDemoApp, new_agent_demo};
 use tela_app_abi::{
-    AppDispatchOutcome, AppFrameToken, ApplicationSession, decode_event, encode_publication,
+    AppDispatchOutcome, AppFrameToken, ApplicationSession, FrameTransportSender, decode_event,
 };
 use tela_contract::UiResourceSet;
 use tela_icon_resources::MaterialIconFontProvider;
@@ -45,6 +45,8 @@ impl AgentDispatchOutcome {
 pub struct AgentWebSession {
     app: AgentDemoApp,
     pending: Option<AppFrameToken>,
+    transport: FrameTransportSender,
+    pending_transport_sequence: Option<u64>,
     initialized: bool,
     closed: bool,
 }
@@ -63,6 +65,8 @@ impl AgentWebSession {
         Self {
             app: new_agent_demo(&RESOURCES),
             pending: None,
+            transport: FrameTransportSender::default(),
+            pending_transport_sequence: None,
             initialized: false,
             closed: false,
         }
@@ -91,18 +95,27 @@ impl AgentWebSession {
             .map_err(|error| js_error(error.to_string()))
     }
 
-    /// Builds and atomically decodes the latest frame/status publication for JavaScript.
+    /// Builds the newest retained-frame transport packet for JavaScript.
     pub fn publish(&mut self) -> Result<tela_target_webview::WebAppPublication, JsValue> {
         self.ensure_ready()?;
         if let Some(token) = self.pending.take() {
             ApplicationSession::rejected(&mut self.app, token);
+            if let Some(sequence) = self.pending_transport_sequence.take() {
+                self.transport.reject(sequence);
+            }
         }
         let publication = ApplicationSession::publish(&mut self.app)
             .map_err(|error| js_error(error.to_string()))?;
         self.pending = Some(publication.token);
-        let packet = encode_publication(&publication)
-            .map_err(|error| js_error(format!("encode publication: {error}")))?;
-        tela_target_webview::decode_app_publication(&packet)
+        let packet = self.transport.publish(
+            publication.token,
+            &publication.frame,
+            &publication.damage,
+            &publication.spine,
+            publication.retained_tree.clone(),
+        );
+        self.pending_transport_sequence = Some(packet.sequence());
+        tela_target_webview::web_app_publication_from_transport(packet, publication.status)
     }
 
     /// Commits a frame only after the WebGPU surface reports successful presentation.
@@ -116,6 +129,11 @@ impl AgentWebSession {
         let result = ApplicationSession::presented(&mut self.app, token)
             .map(outcome)
             .map_err(|error| js_error(error.to_string()))?;
+        let sequence = self
+            .pending_transport_sequence
+            .take()
+            .ok_or_else(|| js_error("presented publication has no transport sequence"))?;
+        self.transport.acknowledge(sequence);
         self.pending = None;
         Ok(result)
     }
@@ -130,6 +148,9 @@ impl AgentWebSession {
         }
         ApplicationSession::rejected(&mut self.app, token);
         self.pending = None;
+        if let Some(sequence) = self.pending_transport_sequence.take() {
+            self.transport.reject(sequence);
+        }
         Ok(())
     }
 
@@ -140,6 +161,9 @@ impl AgentWebSession {
         }
         if let Some(token) = self.pending.take() {
             ApplicationSession::rejected(&mut self.app, token);
+        }
+        if let Some(sequence) = self.pending_transport_sequence.take() {
+            self.transport.reject(sequence);
         }
         ApplicationSession::close(&mut self.app);
         self.closed = true;
@@ -188,6 +212,16 @@ mod tests {
         );
         let publication = session.publish().expect("publication");
         let status = publication.status();
-        assert!(status.frame_token().is_some());
+        let token = status.frame_token().expect("initial token");
+        assert!(publication.transport_snapshot());
+        assert_eq!(publication.transport_base_sequence(), None);
+
+        session.presented(token).expect("initial presented");
+        let viewport = tela_target_webview::event_viewport(800.0, 600.0).expect("viewport");
+        session.dispatch(&viewport).expect("dispatch viewport");
+        let patch = session.publish().expect("patch publication");
+        assert!(!patch.transport_snapshot());
+        assert_eq!(patch.transport_base_sequence(), Some(1));
+        assert!(!patch.transport_spine().is_empty());
     }
 }

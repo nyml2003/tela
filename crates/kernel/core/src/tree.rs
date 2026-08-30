@@ -1,6 +1,9 @@
 //! `UiTree`：值语义树的构建入口（构建期校验 + 身份分配）与 `resolve` 纯操作（见 003-场景树与节点模型）。
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    rc::Rc,
+};
 use tela_contract::{
     FocusAppearance, InteractConcern, NodeId, ScrollState, SemanticKey, TextMeasurer, UiBuildError,
     UiFrame, UiLayoutError, UiNode, Viewport,
@@ -37,19 +40,35 @@ fn collect_parent_ids(
 ///
 /// `UiTree::new` 在布局前完成构建期校验，失败返回结构化错误，不 panic。
 pub struct UiTree {
-    pub(crate) root: UiNode,
+    /// Immutable shared root. Candidate trees retain unchanged component subtrees by pointer.
+    pub(crate) root: Rc<UiNode>,
     /// 按深度优先前序遍历序的 auto-path / 业务 key（跨帧稳定）。
-    pub(crate) keys: Vec<SemanticKey>,
+    pub(crate) keys: Rc<[SemanticKey]>,
     /// 按深度优先前序遍历序的结构 id（本帧内有效，构建期分配）。
-    pub(crate) node_ids: Vec<NodeId>,
+    pub(crate) node_ids: Rc<[NodeId]>,
     /// 按深度优先前序遍历序保存的逻辑父级；当前值语义树中 Teleport 的逻辑父级仍是
     /// 声明位置，视觉提升由 resolve 层单独处理。
-    pub(crate) parent_ids: Vec<Option<NodeId>>,
+    pub(crate) parent_ids: Rc<[Option<NodeId>]>,
     /// 惰性一次性 key → DFS 槽位哈希索引：key 查询从 O(n) 线性字符串比较
     /// 变为一次哈希命中。仅在首次 key 查询时构建（每树至多一次）。
     key_index: std::cell::OnceCell<HashMap<SemanticKey, u32>>,
     /// 惰性一次性 NodeId → DFS 槽位索引（整数键，构建廉价）。
     id_index: std::cell::OnceCell<HashMap<NodeId, u32>>,
+}
+
+impl Clone for UiTree {
+    fn clone(&self) -> Self {
+        Self {
+            root: Rc::clone(&self.root),
+            keys: Rc::clone(&self.keys),
+            node_ids: Rc::clone(&self.node_ids),
+            parent_ids: Rc::clone(&self.parent_ids),
+            // These indexes are derived acceleration structures. Rebuilding lazily preserves
+            // the clone's independent interior mutability while retaining every node identity.
+            key_index: std::cell::OnceCell::new(),
+            id_index: std::cell::OnceCell::new(),
+        }
+    }
 }
 
 impl UiTree {
@@ -68,7 +87,21 @@ impl UiTree {
         root: impl Into<UiNode>,
         allocator: &mut IdentityAllocator,
     ) -> Result<Self, UiBuildError> {
-        let root = root.into();
+        Self::new_shared_with_allocator(Rc::new(root.into()), allocator)
+    }
+
+    /// Builds a tree from an already shared root without changing its identity.
+    pub fn new_shared(root: Rc<UiNode>) -> Result<Self, UiBuildError> {
+        let mut allocator = IdentityAllocator::new();
+        Self::new_shared_with_allocator(root, &mut allocator)
+    }
+
+    /// Shared-root variant of [`Self::new_with_allocator`]. This is the retained-rendering
+    /// boundary: a cache hit must enter the Kernel as the same `Rc`, not an equivalent clone.
+    pub fn new_shared_with_allocator(
+        root: Rc<UiNode>,
+        allocator: &mut IdentityAllocator,
+    ) -> Result<Self, UiBuildError> {
         // 身份分配是跨帧状态；任何后续校验失败都不能让失败树占用下一帧的稳定身份。
         // `FrameCoordinator` 也会维护候选状态，但这个 Core 入口本身必须保持原子语义。
         let mut candidate_allocator = allocator.clone();
@@ -80,9 +113,9 @@ impl UiTree {
         collect_parent_ids(&root, &result.ids, &mut cursor, &mut parent_ids, None);
         Ok(Self {
             root,
-            keys: result.keys,
-            node_ids: result.ids,
-            parent_ids,
+            keys: result.keys.into(),
+            node_ids: result.ids.into(),
+            parent_ids: parent_ids.into(),
             key_index: std::cell::OnceCell::new(),
             id_index: std::cell::OnceCell::new(),
         })
@@ -90,7 +123,56 @@ impl UiTree {
 
     /// 校验后的根节点。
     pub fn root(&self) -> &UiNode {
+        self.root.as_ref()
+    }
+
+    /// Internal shared root for identity-indexed downstream caches.
+    pub(crate) fn root_shared(&self) -> &Rc<UiNode> {
         &self.root
+    }
+
+    /// Resolves a shared node allocation back to this tree's stable coordinate.
+    ///
+    /// This is an identity lookup for retained-tree bookkeeping. It never compares node content;
+    /// an `Rc` allocation either occurs in this tree or it does not.
+    #[doc(hidden)]
+    pub fn key_for_shared_node(&self, target: &Rc<UiNode>) -> Option<SemanticKey> {
+        fn visit(
+            node: &Rc<UiNode>,
+            target: &Rc<UiNode>,
+            keys: &[SemanticKey],
+            cursor: &mut usize,
+        ) -> Option<SemanticKey> {
+            let key = keys.get(*cursor)?.clone();
+            *cursor += 1;
+            if Rc::ptr_eq(node, target) {
+                return Some(key);
+            }
+            for child in &node.children {
+                if let Some(key) = visit(child, target, keys, cursor) {
+                    return Some(key);
+                }
+            }
+            None
+        }
+
+        let mut cursor = 0;
+        visit(&self.root, target, &self.keys, &mut cursor)
+    }
+
+    /// Builds one allocation-address -> stable-key index for retained bookkeeping.
+    ///
+    /// Addresses are only used as `Rc` allocation identities inside this immutable tree; callers
+    /// must not retain the map after releasing the tree. This avoids one DFS per cached entry
+    /// when a rooted projection refreshes retained coordinates.
+    #[doc(hidden)]
+    pub fn shared_key_index(&self) -> HashMap<usize, SemanticKey> {
+        let (nodes, _, keys) = self.node_table();
+        nodes
+            .into_iter()
+            .zip(keys)
+            .map(|(node, key)| (node as *const UiNode as usize, key))
+            .collect()
     }
 
     /// 按深度优先前序遍历序的节点 key（跨帧稳定）。
@@ -135,11 +217,7 @@ impl UiTree {
 
     /// 按 DFS 槽位取节点（惰性遍历，无整树 Vec 重建）。
     fn node_at_slot(&self, slot: usize) -> Option<&UiNode> {
-        fn visit<'a>(
-            node: &'a UiNode,
-            slot: usize,
-            cursor: &mut usize,
-        ) -> Option<&'a UiNode> {
+        fn visit<'a>(node: &'a UiNode, slot: usize, cursor: &mut usize) -> Option<&'a UiNode> {
             let current = *cursor;
             *cursor += 1;
             if current == slot {
@@ -154,6 +232,131 @@ impl UiTree {
         }
         let mut cursor = 0;
         visit(&self.root, slot, &mut cursor)
+    }
+
+    /// Returns the child-index path for one DFS slot. The path is a build-local traversal aid;
+    /// callers enter through a stable `SemanticKey`, never by retaining this vector across frames.
+    fn path_at_slot(&self, target: usize) -> Option<Vec<usize>> {
+        fn visit(node: &UiNode, target: usize, cursor: &mut usize, path: &mut Vec<usize>) -> bool {
+            let current = *cursor;
+            *cursor += 1;
+            if current == target {
+                return true;
+            }
+            for (index, child) in node.children.iter().enumerate() {
+                path.push(index);
+                if visit(child, target, cursor, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+
+        let mut cursor = 0;
+        let mut path = Vec::new();
+        visit(&self.root, target, &mut cursor, &mut path).then_some(path)
+    }
+
+    /// Path-copies one immutable shared-tree spine and installs `replacement` at `target`.
+    ///
+    /// This is the tree-level primitive used by retained-element re-entry: lookup consumes a
+    /// stable coordinate, only ancestors are newly allocated, and all untouched siblings retain
+    /// their exact `Rc` identity. The returned root is intentionally unvalidated because its
+    /// caller may splice several dirty paths before it publishes one validated candidate tree.
+    pub fn splice_shared(
+        &self,
+        target: &SemanticKey,
+        replacement: Rc<UiNode>,
+    ) -> Option<Rc<UiNode>> {
+        fn replace_at(node: &Rc<UiNode>, path: &[usize], replacement: &Rc<UiNode>) -> Rc<UiNode> {
+            let Some((&child_index, rest)) = path.split_first() else {
+                return Rc::clone(replacement);
+            };
+            let mut copied = (**node).clone();
+            let child = copied
+                .children
+                .get(child_index)
+                .expect("path derived from this UiTree must address an existing child");
+            copied.children[child_index] = replace_at(child, rest, replacement);
+            Rc::new(copied)
+        }
+
+        let slot = self.key_slot(target)? as usize;
+        let path = self.path_at_slot(slot)?;
+        Some(replace_at(&self.root, &path, &replacement))
+    }
+
+    /// Path-copies the union of several disjoint shared-tree spines in one pass.
+    ///
+    /// Callers supply stable semantic coordinates. A target may not be an ancestor of another
+    /// target: tree-level retained scheduling must absorb nested dirty entries before reaching
+    /// this primitive. Unaffected branches retain their exact `Rc` allocation.
+    #[doc(hidden)]
+    pub fn splice_many_shared(
+        &self,
+        replacements: impl IntoIterator<Item = (SemanticKey, Rc<UiNode>)>,
+    ) -> Option<Rc<UiNode>> {
+        let mut paths = std::collections::BTreeMap::<Vec<usize>, Rc<UiNode>>::new();
+        for (key, replacement) in replacements {
+            let path = self.path_at_slot(self.key_slot(&key)? as usize)?;
+            if paths.insert(path, replacement).is_some() {
+                return None;
+            }
+        }
+        if paths.is_empty() {
+            return Some(Rc::clone(&self.root));
+        }
+        let mut previous = None::<&Vec<usize>>;
+        for path in paths.keys() {
+            if previous.is_some_and(|ancestor| path.starts_with(ancestor)) {
+                return None;
+            }
+            previous = Some(path);
+        }
+
+        fn copy_changed(
+            node: &Rc<UiNode>,
+            path: &[usize],
+            replacements: &std::collections::BTreeMap<Vec<usize>, Rc<UiNode>>,
+        ) -> Rc<UiNode> {
+            if let Some(replacement) = replacements.get(path) {
+                return Rc::clone(replacement);
+            }
+            let mut copied = None;
+            for (index, child) in node.children.iter().enumerate() {
+                let mut child_path = Vec::with_capacity(path.len() + 1);
+                child_path.extend_from_slice(path);
+                child_path.push(index);
+                if replacements
+                    .keys()
+                    .any(|target| target.starts_with(&child_path))
+                {
+                    let node_copy = copied.get_or_insert_with(|| (**node).clone());
+                    node_copy.children[index] = copy_changed(child, &child_path, replacements);
+                }
+            }
+            copied.map(Rc::new).unwrap_or_else(|| Rc::clone(node))
+        }
+
+        Some(copy_changed(&self.root, &[], &paths))
+    }
+
+    /// Returns the traversal path for one stable semantic coordinate.
+    #[doc(hidden)]
+    pub fn path_for_key(&self, key: &SemanticKey) -> Option<Vec<usize>> {
+        self.path_at_slot(self.key_slot(key)? as usize)
+    }
+
+    /// Returns the exact shared allocation at a stable coordinate.
+    #[doc(hidden)]
+    pub fn shared_node_for_key(&self, key: &SemanticKey) -> Option<Rc<UiNode>> {
+        let path = self.path_for_key(key)?;
+        let mut current = Rc::clone(&self.root);
+        for index in path {
+            current = Rc::clone(current.children.get(index)?);
+        }
+        Some(current)
     }
 
     /// 返回从根到目标节点的逻辑父链（包含目标节点）。
@@ -190,7 +393,7 @@ impl UiTree {
     pub(crate) fn node_table(&self) -> (Vec<&UiNode>, Vec<NodeId>, Vec<SemanticKey>) {
         let mut nodes = Vec::with_capacity(self.node_ids.len());
         collect_nodes(&self.root, &mut nodes);
-        (nodes, self.node_ids.clone(), self.keys.clone())
+        (nodes, self.node_ids.to_vec(), self.keys.to_vec())
     }
 
     /// 返回当前帧的逻辑父级索引，供 Composition 预计算事件传播路径。
@@ -292,7 +495,8 @@ impl UiTree {
     /// 组件自己的 focus key。返回的引用只在本树存活期间有效。
     pub fn interact_for_key(&self, key: &SemanticKey) -> Option<&InteractConcern> {
         let slot = self.key_slot(key)? as usize;
-        self.node_at_slot(slot).and_then(|node| node.interact.as_ref())
+        self.node_at_slot(slot)
+            .and_then(|node| node.interact.as_ref())
     }
 
     /// 当前焦点沿焦点链遇到的键位作用域（由内向外）。

@@ -23,6 +23,12 @@ export interface WebAppStatus {
 
 export interface WebAppPublication {
   frame_packet(): Uint8Array;
+  damage_flags(): number;
+  damage_rects(): Float32Array;
+  transport_sequence(): bigint;
+  readonly transport_base_sequence: bigint | undefined;
+  readonly transport_snapshot: boolean;
+  transport_spine(): string[];
   status(): WebAppStatus;
 }
 
@@ -31,6 +37,7 @@ export interface TelaWebviewBindings {
   parse_development_index(bytes: Uint8Array): DevelopmentBundleIndex;
   validate_development_bundle(index: DevelopmentBundleIndex, bytes: Uint8Array): ValidatedBundle;
   decode_app_publication(bytes: Uint8Array): WebAppPublication;
+  decode_app_transport_publication(bytes: Uint8Array): WebAppPublication;
   decode_app_status(bytes: Uint8Array): WebAppStatus;
   event_viewport(width: number, height: number): Uint8Array;
   event_tick(timestampMs: bigint): Uint8Array;
@@ -57,6 +64,7 @@ export interface TelaWebviewBindings {
   event_replace_keymap_json(json: string): Uint8Array;
   start_gpu(canvas: HTMLCanvasElement): Promise<void>;
   render_gpu(framePacket: Uint8Array): boolean;
+  render_gpu_damage(framePacket: Uint8Array, damageFlags: number, damageRects: Float32Array): boolean;
   shutdown_gpu(): void;
   gpu_diagnostics(): string;
 }

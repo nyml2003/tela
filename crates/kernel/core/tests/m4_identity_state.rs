@@ -1,7 +1,7 @@
 //! M4 验收测试：auto-stable-identity 稳定身份、ViewStateStore 状态保持、虚拟列表
 //! （见 010-落地路线 M4、005-key身份策略、004-更新策略与状态保持 3、006-布局引擎 6）。
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 use tela_contract::{
     Color, Fill, IdentityConcern, KeySegment, KeyStrategy, LayoutConcern, ScrollState, SemanticKey,
     Size, TextContent, TextMeasureRequest, TextMeasurer, TextMetrics, UiBuildError, UiNode,
@@ -323,6 +323,50 @@ fn stable_identity_same_fingerprint_nodes_do_not_collide() {
     assert!(
         keys1[1] == keys3[1] || keys1[2] == keys3[1],
         "删除后剩余 A 复用旧身份"
+    );
+}
+
+#[test]
+fn splice_shared_copies_only_the_dirty_spine() {
+    let left = Rc::new(
+        LayoutContainer::frame(text("left"))
+            .identity(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(SemanticKey("left".to_owned())),
+                ..IdentityConcern::default()
+            })
+            .into(),
+    );
+    let right = Rc::new(
+        LayoutContainer::frame(text("right"))
+            .identity(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(SemanticKey("right".to_owned())),
+                ..IdentityConcern::default()
+            })
+            .into(),
+    );
+    let root: UiNode = LayoutContainer::column(Vec::<UiNode>::new()).into();
+    let shared_root = Rc::new(root.with_shared_children([Rc::clone(&left), Rc::clone(&right)]));
+    let tree = UiTree::new_shared(Rc::clone(&shared_root)).expect("shared tree");
+    let replacement = Rc::new(
+        LayoutContainer::frame(text("right changed"))
+            .identity(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                semantic_key: Some(SemanticKey("right".to_owned())),
+                ..IdentityConcern::default()
+            })
+            .into(),
+    );
+
+    let spliced = tree
+        .splice_shared(&SemanticKey("right".to_owned()), Rc::clone(&replacement))
+        .expect("right key exists");
+    assert!(Rc::ptr_eq(&spliced.children[0], &left));
+    assert!(Rc::ptr_eq(&spliced.children[1], &replacement));
+    assert!(
+        !Rc::ptr_eq(&spliced, &shared_root),
+        "only the root-to-target spine is copied"
     );
 }
 

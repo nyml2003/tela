@@ -2,20 +2,36 @@
 
 use serde::{Deserialize, Serialize};
 use tela_app_session::{AppEffect, AppFrameToken, AppPublication};
-use tela_contract::WindowCommand;
+use tela_contract::{DirtyFlags, FrameDamage, Rect, SemanticKey, WindowCommand};
 
 use crate::{FrameCodecError, decode_frame, decode_status, encode_frame, encode_status};
 
 const PUBLICATION_MAGIC: [u8; 4] = *b"TLPB";
-const PUBLICATION_VERSION: u16 = 1;
+const PUBLICATION_VERSION: u16 = 3;
 const HEADER_LEN: usize = PUBLICATION_MAGIC.len() + std::mem::size_of::<u16>();
 
 #[derive(Serialize, Deserialize)]
 struct WirePublication {
     token: u64,
     frame: Vec<u8>,
+    damage: WireDamage,
+    spine: Vec<String>,
     status: Vec<u8>,
     effects: Vec<WireEffect>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireDamage {
+    flags: u8,
+    rects: Vec<WireRect>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,6 +56,8 @@ pub fn encode_publication(publication: &AppPublication) -> Result<Vec<u8>, Frame
     let wire = WirePublication {
         token: publication.token.get(),
         frame: encode_frame(&publication.frame)?,
+        damage: WireDamage::from(&publication.damage),
+        spine: publication.spine.iter().map(|key| key.0.clone()).collect(),
         status: encode_status(&publication.status)?,
         effects: publication.effects.iter().map(WireEffect::from).collect(),
     };
@@ -78,9 +96,66 @@ pub fn decode_publication(bytes: &[u8]) -> Result<AppPublication, FrameCodecErro
     Ok(AppPublication {
         token,
         frame: decode_frame(&wire.frame)?,
+        damage: FrameDamage::try_from(wire.damage)?,
+        spine: wire.spine.into_iter().map(SemanticKey).collect(),
+        retained_tree: None,
         status,
         effects: wire.effects.into_iter().map(AppEffect::from).collect(),
     })
+}
+
+impl From<&FrameDamage> for WireDamage {
+    fn from(damage: &FrameDamage) -> Self {
+        Self {
+            flags: damage.flags.bits(),
+            rects: damage
+                .rects
+                .iter()
+                .map(|rect| WireRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<WireDamage> for FrameDamage {
+    type Error = FrameCodecError;
+
+    fn try_from(damage: WireDamage) -> Result<Self, Self::Error> {
+        let flags = DirtyFlags::from_bits(damage.flags).ok_or_else(|| {
+            FrameCodecError::Decode(format!(
+                "publication damage has unknown flags: {}",
+                damage.flags
+            ))
+        })?;
+        let mut decoded = FrameDamage::default();
+        for rect in damage.rects {
+            if !rect.x.is_finite()
+                || !rect.y.is_finite()
+                || !rect.w.is_finite()
+                || !rect.h.is_finite()
+            {
+                return Err(FrameCodecError::Decode(
+                    "publication damage rectangle must be finite".to_owned(),
+                ));
+            }
+            decoded.add_rect(
+                Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                },
+                flags,
+            );
+        }
+        decoded.flags |= flags;
+        Ok(decoded)
+    }
 }
 
 impl From<&AppEffect> for WireEffect {
@@ -128,7 +203,9 @@ impl From<WireWindowCommand> for WindowCommand {
 #[cfg(test)]
 mod tests {
     use tela_app_session::{AppEffect, AppFrameToken, AppPublication, AppStatus};
-    use tela_contract::{UiFrame, Viewport, WindowCommand};
+    use tela_contract::{
+        DirtyFlags, FrameDamage, Rect, SemanticKey, UiFrame, Viewport, WindowCommand,
+    };
 
     use super::{decode_publication, encode_publication};
 
@@ -146,6 +223,17 @@ mod tests {
                 hit_regions: Vec::new(),
                 scroll_bounds: Vec::new(),
             },
+            damage: FrameDamage {
+                flags: DirtyFlags::VISUAL,
+                rects: vec![Rect {
+                    x: 8.0,
+                    y: 12.0,
+                    w: 40.0,
+                    h: 24.0,
+                }],
+            },
+            spine: vec![SemanticKey::from("root/dialog")],
+            retained_tree: None,
             status: AppStatus {
                 frame_token: Some(token),
                 ..AppStatus::default()
@@ -175,6 +263,9 @@ mod tests {
                 hit_regions: Vec::new(),
                 scroll_bounds: Vec::new(),
             },
+            damage: tela_contract::FrameDamage::default(),
+            spine: Vec::new(),
+            retained_tree: None,
             status: AppStatus {
                 frame_token: Some(other),
                 ..AppStatus::default()

@@ -9,7 +9,6 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use tela_contract::{KernelInteraction, NodeId, UiBuildError, UiFrame};
 use tela_core::{IdentityAllocator, KernelInputPlan, UiTree};
 
-use crate::view::ResolvedPlans;
 use crate::{
     ActionFrame, ActionRegistry, AnimationSchedule, ComponentDispatch, ComponentInput,
     ComponentRuntime, FramedInteraction, InteractionIndex, ViewBuild, ViewBuildError, ViewOutput,
@@ -19,6 +18,7 @@ use crate::{
         ComponentOwnerRuntime, ComponentRouteOutcome, OwnerFrameToken,
     },
 };
+use crate::{runtime::ResolvedWatch, view::ResolvedPlans};
 
 /// Host 在成功发布一个 active frame 时分配的单调来源标识。
 ///
@@ -77,6 +77,9 @@ pub struct PreparedFrame<A> {
     interaction_index: InteractionIndex,
     animation_schedule: AnimationSchedule,
     watch_scopes: Vec<(crate::owner::ScopeId, tela_contract::SemanticKey)>,
+    /// A retained-only candidate did not touch action-bearing subtrees, so its published tree
+    /// can retain the previous immutable action/component routing snapshots.
+    reuse_active_routes: bool,
 }
 
 impl<A> PreparedFrame<A> {
@@ -125,6 +128,14 @@ impl<A> ResolvedFrame<A> {
         &self.frame
     }
 
+    /// Candidate shared tree belonging to this exact resolved frame.
+    ///
+    /// A guest-local incremental transport can retain this identity view while the frame awaits
+    /// host acknowledgement; the tree remains private to the process and is never ABI encoded.
+    pub fn tree(&self) -> &UiTree {
+        self.prepared.tree()
+    }
+
     /// Reusable input indexes derived from this exact tree/frame pair.
     pub fn input_plan(&self) -> &KernelInputPlan {
         &self.input_plan
@@ -146,6 +157,7 @@ pub struct ActiveFrame<A> {
     component_actions: BTreeMap<NodeId, Box<dyn ComponentActionRoute<A>>>,
     interaction_index: InteractionIndex,
     animation_schedule: AnimationSchedule,
+    watches: Vec<ResolvedWatch>,
 }
 
 impl<A: 'static> ActiveFrame<A> {
@@ -199,8 +211,8 @@ pub struct FrameCoordinator<A: Clone + 'static> {
     pending_component_outputs: RefCell<Vec<A>>,
     committed_component_outputs: Vec<A>,
     committed_component_lifecycle: Vec<ComponentLifecycleEvent>,
-    memo: RenderMemoRuntime,
-    memo_candidate: Option<Rc<RefCell<MemoCandidate>>>,
+    memo: RenderMemoRuntime<A>,
+    memo_candidate: Option<Rc<RefCell<MemoCandidate<A>>>>,
     next_token: u64,
 }
 
@@ -239,7 +251,8 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         dirty: std::collections::BTreeSet<tela_contract::SemanticKey>,
         enabled: bool,
     ) -> ViewBuild<A> {
-        let build = ViewBuild::new().with_owner_frame(Rc::new(RefCell::new(self.owners.begin_frame())));
+        let build =
+            ViewBuild::new().with_owner_frame(Rc::new(RefCell::new(self.owners.begin_frame())));
         if enabled {
             let (candidate, watch_keys) = self.memo.begin_frame();
             self.memo_candidate = Some(Rc::clone(&candidate));
@@ -263,13 +276,16 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
         let owner_frame = root.owner_frame.clone();
         let (root, plans, animation_schedule) = root.into_parts();
         let mut allocator = self.allocator.clone();
-        let tree = match UiTree::new_with_allocator(root, &mut allocator) {
+        let tree = match UiTree::new_shared_with_allocator(root, &mut allocator) {
             Ok(tree) => tree,
             Err(error) => {
                 self.abort_component_transaction();
                 return Err(FramePrepareError::Tree(error));
             }
         };
+        if let Some(candidate) = self.memo_candidate.as_ref() {
+            self.memo.bind_candidate_root_keys(candidate, &tree);
+        }
         let plans = match plans.resolve(&tree) {
             Ok(plans) => plans,
             Err(error) => {
@@ -283,6 +299,10 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             actions,
             component_actions: raw_component_actions,
         } = plans;
+        if let Some(candidate) = self.memo_candidate.as_ref() {
+            self.memo
+                .bind_candidate_watch_root_keys(candidate, &watch_scopes);
+        }
         let component_actions = match resolve_component_actions(&tree, raw_component_actions) {
             Ok(actions) => actions,
             Err(error) => {
@@ -307,7 +327,150 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             interaction_index,
             animation_schedule,
             watch_scopes,
+            reuse_active_routes: false,
         })
+    }
+
+    /// Builds a candidate by independently re-entering the active tree's outermost dirty
+    /// retained roots. `None` means the caller must use its normal root projection: no active
+    /// tree, no eligible coordinate, or a re-entered subtree acquired actions/animation that
+    /// cannot safely share the current routing snapshot.
+    ///
+    /// This is intentionally a separate entry point. A host chooses it only for a pure
+    /// signal-driven frame; viewport/focus/scroll invalidations and application structural
+    /// changes remain rooted projections until they become explicit graph edges.
+    pub fn prepare_retained_dirty(
+        &mut self,
+        dirty: std::collections::BTreeSet<tela_contract::SemanticKey>,
+    ) -> Result<Option<PreparedFrame<A>>, FramePrepareError> {
+        let roots = match self.active.as_ref() {
+            Some(active) => self.memo.outermost_dirty_roots(&active.tree, &dirty),
+            None => return Ok(None),
+        };
+        let Some(entries) = self.memo.active_entries(&roots) else {
+            return Ok(None);
+        };
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        let (candidate, watch_keys) = self.memo.begin_frame();
+        self.memo_candidate = Some(Rc::clone(&candidate));
+        let owner_frame = Rc::new(RefCell::new(self.owners.begin_frame()));
+        let mut build = ViewBuild::new()
+            .with_owner_frame(Rc::clone(&owner_frame))
+            .with_memo(Rc::clone(&candidate), dirty, watch_keys);
+        let reentered_identities = entries
+            .iter()
+            .flat_map(|(_, _, entry)| entry.subtree.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.memo
+            .retain_active_entries_except(&candidate, &reentered_identities);
+        owner_frame
+            .borrow_mut()
+            .retain_all_except(&reentered_identities);
+
+        let mut replacements = Vec::with_capacity(entries.len());
+        let mut reentered_plans = Vec::with_capacity(entries.len());
+        for (_, key, entry) in &entries {
+            let Some(path) = self
+                .active
+                .as_ref()
+                .and_then(|active| active.tree.path_for_key(key))
+            else {
+                self.abort_component_transaction();
+                return Ok(None);
+            };
+            let output = match build.reenter_memo_entry(entry) {
+                Ok(output) if output.is_retained_compatible() => output,
+                Ok(_) => {
+                    self.abort_component_transaction();
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.abort_component_transaction();
+                    return Err(FramePrepareError::Plans(error));
+                }
+            };
+            let (node, plans, _) = output.into_rebased_parts(&path);
+            // `<For>` assigns the business key after a component has produced its retained
+            // output. Independent re-entry bypasses that parent lowering, so transfer the old
+            // root identity shell onto the new output before splicing it back at that coordinate.
+            let node = self
+                .active
+                .as_ref()
+                .and_then(|active| active.tree.shared_node_for_key(key))
+                .map(|previous| {
+                    let mut replacement = (*node).clone();
+                    replacement.identity = previous.identity.clone();
+                    Rc::new(replacement)
+                })
+                .expect("selected retained key resolves in the active tree");
+            replacements.push((key.clone(), node));
+            reentered_plans.push(plans);
+        }
+
+        let mut allocator = self.allocator.clone();
+        let root = self
+            .active
+            .as_ref()
+            .and_then(|active| active.tree.splice_many_shared(replacements))
+            .expect("selected retained roots originate from the active tree");
+        let tree = match UiTree::new_shared_with_allocator(root, &mut allocator) {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.abort_component_transaction();
+                return Err(FramePrepareError::Tree(error));
+            }
+        };
+        self.memo.bind_candidate_root_keys(&candidate, &tree);
+
+        let mut watches = self
+            .active
+            .as_ref()
+            .expect("active tree was checked before retained re-entry")
+            .watches
+            .iter()
+            .filter(|watch| {
+                !reentered_identities
+                    .iter()
+                    .any(|identity| identity.scope() == watch.scope)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for plans in reentered_plans {
+            let plans = match plans.resolve(&tree) {
+                Ok(plans) => plans,
+                Err(error) => {
+                    self.abort_component_transaction();
+                    return Err(FramePrepareError::Plans(error));
+                }
+            };
+            debug_assert!(plans.actions.is_empty() && plans.component_actions.is_empty());
+            watches.extend(plans.watches);
+        }
+        let watch_scopes = watches
+            .iter()
+            .map(|watch| (watch.scope, watch.key.clone()))
+            .collect::<Vec<_>>();
+        self.memo
+            .bind_candidate_watch_root_keys(&candidate, &watch_scopes);
+        Ok(Some(PreparedFrame {
+            tree,
+            allocator,
+            plans: ResolvedPlans {
+                watches,
+                watch_scopes: Vec::new(),
+                actions: Vec::new(),
+                component_actions: Vec::new(),
+            },
+            owner_frame: Some(owner_frame),
+            component_actions: BTreeMap::new(),
+            interaction_index: InteractionIndex::default(),
+            animation_schedule: AnimationSchedule::default(),
+            watch_scopes,
+            reuse_active_routes: true,
+        }))
     }
 
     /// 原子发布一个已经成功 resolve 的候选帧。
@@ -355,14 +518,34 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             interaction_index,
             animation_schedule,
             watch_scopes,
+            reuse_active_routes,
         } = prepared;
         let token = FrameToken(
             self.next_token
                 .checked_add(1)
                 .expect("FrameToken exhausted after u64::MAX successful publications"),
         );
+        let active_watches = plans.watches.clone();
         self.runtime.reconcile(plans.watches);
-        let actions = self.registry.install(&tree, plans.actions);
+        let reused = reuse_active_routes.then(|| {
+            self.active
+                .take()
+                .expect("retained-only candidate requires an active frame")
+        });
+        let (actions, component_actions, interaction_index, animation_schedule) = match reused {
+            Some(active) => (
+                active.actions,
+                active.component_actions,
+                active.interaction_index,
+                active.animation_schedule,
+            ),
+            None => (
+                self.registry.install(&tree, plans.actions),
+                component_actions,
+                interaction_index,
+                animation_schedule,
+            ),
+        };
         // No fallible work remains after this callback. The Host candidate and all DSL snapshots
         // therefore become externally visible as one GUI-loop transaction.
         commit_host(token);
@@ -392,6 +575,7 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
             component_actions,
             interaction_index,
             animation_schedule,
+            watches: active_watches,
         });
         self.active
             .as_ref()
@@ -409,6 +593,26 @@ impl<A: Clone + 'static> FrameCoordinator<A> {
     /// `FrameInvalidator` 也通过这个引用完成。
     pub fn runtime(&self) -> &ComponentRuntime {
         &self.runtime
+    }
+
+    /// 返回当前 active retained 树中应处理这批 dirty key 的最外层根坐标。
+    ///
+    /// 返回值只依赖 Signal runtime 已解析的 [`tela_contract::SemanticKey`] 与 active
+    /// tree 的逻辑路径；同一 retained 子树内的嵌套 dirty scope 会由最外层根吸收。
+    /// 该查询不执行 render，也不会改变候选或 active 状态。
+    #[doc(hidden)]
+    pub fn outermost_dirty_retained_roots(
+        &self,
+        dirty: &std::collections::BTreeSet<tela_contract::SemanticKey>,
+    ) -> Vec<tela_contract::SemanticKey> {
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        self.memo
+            .outermost_dirty_roots(&active.tree, dirty)
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect()
     }
 
     /// 丢弃本次输入产生、但尚未随成功帧提交的组件 State、Output 与 render 记忆。

@@ -23,16 +23,17 @@ mod memo;
 mod owner;
 mod runtime;
 mod signal;
+mod slots;
 mod view;
 
 pub use action::{ActionFrame, ActionRegistry, DslTrigger, TextActionMap, with_context};
-pub use computed::{Computed, computed, computed2, computed3};
 pub use animation::{
     AnimationClock, AnimationController, AnimationSample, AnimationSchedule, Easing, Interpolate,
     TransitionExt, TransitionSpec, TransitionTarget,
 };
 pub use component::DslComponent;
 pub use component::prelude;
+pub use computed::{Computed, computed, computed2, computed3};
 pub use context::{ProvidedValue, ViewContext};
 pub use frame::{
     ActiveFrame, FrameCoordinator, FramePrepareError, FrameToken, PreparedFrame, ResolvedFrame,
@@ -48,10 +49,14 @@ pub use owner::{
 };
 pub use runtime::{ComponentRuntime, FrameInvalidator};
 pub use signal::{Signal, SignalId, SignalSubscription};
+pub use slots::{
+    BindingSlot, BindingSlotDyn, BindingSlotKind, DuplicateListKey, ListFactory, ListReconcile,
+    SlotDamage, SlotGroup, SlotSelection, SlotSelector, StaticBindingTable,
+};
 pub use tela_ui_dsl_macros::{DslComponent, ui};
 pub use view::{
-    ActionTarget, Body, Children, IntoViewChild, ItemKey, ViewBuild, ViewBuildError, ViewChild,
-    ViewNode, ViewOutput, ViewResult, ViewSite, into_view_child,
+    ActionTarget, Body, Children, IntoViewChild, ItemKey, RetainedChildren, ViewBuild,
+    ViewBuildError, ViewChild, ViewNode, ViewOutput, ViewResult, ViewSite, into_view_child,
 };
 
 /// 由过程宏生成代码使用的稳定内部 re-export。

@@ -554,16 +554,16 @@ impl WindowState {
         if !self.lifecycle.can_render() {
             return Ok(RenderOutcome::Occluded);
         }
-        let frame = self
+        let (frame, damage) = self
             .session
             .as_ref()
-            .map(|session| session.frame())
+            .map(|session| (session.frame().clone(), session.frame_damage().clone()))
             .ok_or_else(|| "render without a resolved UI frame".to_owned())?;
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| "render without a live GPU session".to_owned())?;
-        gpu.render(frame)
+        gpu.render(&frame, &damage)
     }
 
     fn paint_guest(&mut self) -> Result<(), String> {

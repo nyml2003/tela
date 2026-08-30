@@ -30,7 +30,7 @@ use tela_bridge::BridgeDispatcher;
 use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
 
 use crate::providers::MacMetrics;
-use tela_contract::UiFrame;
+use tela_contract::{FrameDamage, UiFrame};
 use tela_desktop_runtime::{
     DeviceLossAction, GuestRuntime, PlatformLaunchOptions, ShellLifecycle, ShellPhase,
     TextChannelAction,
@@ -51,6 +51,7 @@ struct ViewState {
     lifecycle: ShellLifecycle,
     runtime: Option<GuestRuntime>,
     frame: Option<UiFrame>,
+    damage: FrameDamage,
     frame_token: Option<AppFrameToken>,
     presented_frame_token: Option<AppFrameToken>,
     gpu: Option<GpuSession>,
@@ -192,6 +193,7 @@ impl TelaView {
                 lifecycle: ShellLifecycle::new(),
                 runtime: None,
                 frame: None,
+                damage: FrameDamage::default(),
                 frame_token: None,
                 presented_frame_token: None,
                 gpu: None,
@@ -469,6 +471,7 @@ impl ViewState {
             let frame = runtime.frame().map_err(|error| error.to_string())?;
             let frame_token = runtime.status().frame_token;
             self.frame = Some(frame);
+            self.damage = FrameDamage::default();
             self.frame_token = frame_token;
             self.presented_frame_token = None;
             self.runtime = Some(runtime);
@@ -500,6 +503,7 @@ impl ViewState {
         eprintln!("tela-macos-host: startup failed: {error}");
         self.runtime = None;
         self.frame = None;
+        self.damage = FrameDamage::default();
         self.frame_token = None;
         self.presented_frame_token = None;
         self.gpu = None;
@@ -629,6 +633,7 @@ impl ViewState {
         if let Some(publication) = publication {
             self.frame_token = Some(publication.token);
             self.frame = Some(publication.frame);
+            self.damage = publication.damage;
         }
         Ok(outcome.handled)
     }
@@ -802,15 +807,16 @@ impl ViewState {
             return Ok(());
         }
         let frame_token = self.frame_token;
-        let frame = self
+        let (frame, damage) = self
             .frame
             .as_ref()
+            .map(|frame| (frame.clone(), self.damage.clone()))
             .ok_or_else(|| "render without a resolved UI frame".to_owned())?;
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| "render without a live GPU session".to_owned())?;
-        match gpu.render(frame) {
+        match gpu.render(&frame, &damage) {
             RenderOutcome::Presented { suboptimal } => {
                 if frame_token != self.presented_frame_token
                     && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), frame_token)

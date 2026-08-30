@@ -6,7 +6,6 @@ use std::{
     collections::{BTreeSet, HashMap},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     rc::Rc,
-    sync::Arc,
 };
 
 use tela_contract::{
@@ -605,18 +604,29 @@ impl<A> Default for ActionTarget<A> {
 /// 一个 real node 以及所有相对于它的 watch/action 计划。
 #[doc(hidden)]
 pub struct ViewNode<A> {
-    node: UiNode,
+    /// The real Kernel node is shared all the way through lowering. A retained component can
+    /// therefore splice its exact previous root into a new parent without cloning the subtree.
+    node: Rc<UiNode>,
     watches: Vec<PendingWatch>,
     actions: Vec<PendingAction<A>>,
     component_actions: Vec<Box<dyn ComponentActionRoute<A>>>,
     animation_schedule: AnimationSchedule,
 }
 
+/// 一个可跨帧复用的 child 节点快照。
+///
+/// 它刻意只保存结构与 watch 边。动作路由、组件动作和动画调度都属于候选帧事务，
+/// 不能跟随父组件的 retained children 被静态复用。
+struct RetainedViewNode {
+    node: Rc<UiNode>,
+    watches: Vec<PendingWatch>,
+}
+
 impl<A> ViewNode<A> {
     /// 将已构造的普通 `UiNode` 视为 opaque child。
     pub fn opaque(node: UiNode) -> Self {
         Self {
-            node,
+            node: Rc::new(node),
             watches: Vec::new(),
             actions: Vec::new(),
             component_actions: Vec::new(),
@@ -633,7 +643,14 @@ impl<A> ViewNode<A> {
 
     fn from_output(output: ViewOutput<A>) -> Self {
         let (node, plans, animation_schedule) = output.into_parts();
-        let mut view = Self::opaque(node).with_plan_bundle(plans);
+        let mut view = Self {
+            node,
+            watches: Vec::new(),
+            actions: Vec::new(),
+            component_actions: Vec::new(),
+            animation_schedule: AnimationSchedule::default(),
+        }
+        .with_plan_bundle(plans);
         view.animation_schedule = animation_schedule;
         view
     }
@@ -671,15 +688,16 @@ impl<A> ViewNode<A> {
             return Err(ViewBuildError::ForItemIdentityConflict { site });
         }
 
-        let mut identity = self.node.identity.take().unwrap_or_default();
+        let node = Rc::make_mut(&mut self.node);
+        let mut identity = node.identity.take().unwrap_or_default();
         identity.key_strategy = KeyStrategy::SemanticId;
         identity.key_segment = Some(segment);
-        self.node.identity = Some(identity);
+        node.identity = Some(identity);
         Ok(self)
     }
 
     fn with_collection_scope(mut self, scope: u32) -> Self {
-        if let Some(identity) = self.node.identity.as_mut()
+        if let Some(identity) = Rc::make_mut(&mut self.node).identity.as_mut()
             && let Some(segment) = identity.key_segment.take()
         {
             identity.key_segment = Some(segment.with_collection_scope(scope));
@@ -687,13 +705,37 @@ impl<A> ViewNode<A> {
         self
     }
 
+    fn retained_snapshot(&self) -> Option<RetainedViewNode> {
+        if !self.actions.is_empty()
+            || !self.component_actions.is_empty()
+            || self.animation_schedule != AnimationSchedule::default()
+        {
+            return None;
+        }
+        Some(RetainedViewNode {
+            node: Rc::clone(&self.node),
+            watches: self.watches.clone(),
+        })
+    }
+
+    fn from_retained(snapshot: RetainedViewNode) -> Self {
+        Self {
+            node: snapshot.node,
+            watches: snapshot.watches,
+            actions: Vec::new(),
+            component_actions: Vec::new(),
+            animation_schedule: AnimationSchedule::default(),
+        }
+    }
+
     /// 为普通 DSL 标签设置完整语义 key。
     pub fn with_semantic_key(mut self, key: impl Into<SemanticKey>) -> Self {
-        let mut identity = self.node.identity.take().unwrap_or_default();
+        let node = Rc::make_mut(&mut self.node);
+        let mut identity = node.identity.take().unwrap_or_default();
         identity.key_strategy = KeyStrategy::SemanticId;
         identity.semantic_key = Some(key.into());
         identity.key_segment = None;
-        self.node.identity = Some(identity);
+        node.identity = Some(identity);
         self
     }
 }
@@ -717,6 +759,16 @@ enum ViewChildInner<A> {
         scope: u32,
         /// 本 collection 本帧已降低的 item roots。
         children: Vec<ViewChild<A>>,
+    },
+}
+
+/// 与 [`ViewChild`] 对应、但不含应用动作类型的 retained child 表示。
+enum RetainedViewChild {
+    Node(Box<RetainedViewNode>),
+    Fragment(Vec<RetainedViewChild>),
+    Collection {
+        scope: u32,
+        children: Vec<RetainedViewChild>,
     },
 }
 
@@ -749,6 +801,27 @@ impl<A> ViewChild<A> {
     #[doc(hidden)]
     pub fn collection(scope: u32, children: Vec<Self>) -> Self {
         Self(ViewChildInner::Collection { scope, children })
+    }
+
+    fn retained_snapshot(&self) -> Option<RetainedViewChild> {
+        match &self.0 {
+            ViewChildInner::Node(node) => node
+                .retained_snapshot()
+                .map(|node| RetainedViewChild::Node(Box::new(node))),
+            ViewChildInner::Fragment(children) => children
+                .iter()
+                .map(Self::retained_snapshot)
+                .collect::<Option<Vec<_>>>()
+                .map(RetainedViewChild::Fragment),
+            ViewChildInner::Collection { scope, children } => children
+                .iter()
+                .map(Self::retained_snapshot)
+                .collect::<Option<Vec<_>>>()
+                .map(|children| RetainedViewChild::Collection {
+                    scope: *scope,
+                    children,
+                }),
+        }
     }
 
     fn flatten_into(self, nodes: &mut Vec<ViewNode<A>>) {
@@ -800,6 +873,18 @@ pub struct Children<'a, A> {
     build: Option<ChildrenBuilder<'a, A>>,
 }
 
+/// 已物化且不携带候选帧动作的 children 槽位快照。
+///
+/// 该值不保存 `ui!` 生成的闭包。首次渲染后只保留共享 `UiNode`、固定 collection
+/// namespace 和显式 watch 边，因此 derive retained entry 可以跨帧重入父组件，同时
+/// 子组件仍以自身 retained 坐标独立更新。
+#[doc(hidden)]
+pub struct RetainedChildren {
+    children: Vec<RetainedViewChild>,
+    watches: Vec<WatchHandle>,
+    subtree: BTreeSet<ComponentIdentity>,
+}
+
 type ChildrenBuilder<'a, A> = Box<dyn FnOnce(&mut ViewBuild<A>) -> ViewResult<Body<A>> + 'a>;
 
 impl<'a, A> Children<'a, A> {
@@ -812,8 +897,8 @@ impl<'a, A> Children<'a, A> {
 
     /// 创建没有 child 内容的空 children 标记。
     ///
-    /// 宏对无子元素的自闭合组件使用该变体；`#[memo]` 记忆化以"内容为空"作为
-    /// 可缓存的前置条件之一（子内容含闭包与动作，v1 不参与结构比较）。
+    /// 宏对无子元素的自闭合组件使用该变体。带 children 的调用点会在首次 render 后
+    /// 物化为无动作 retained 槽位快照；此变体只是避免创建不必要的闭包。
     pub fn empty() -> Self {
         Self { build: None }
     }
@@ -828,6 +913,59 @@ impl<'a, A> Children<'a, A> {
         match self.build.take() {
             Some(builder) => builder(build),
             None => Ok(Body::new(Vec::new(), Vec::new())),
+        }
+    }
+
+    /// 展开当前调用的 children，并在其不含候选帧专属计划时取得可 retained 的槽位快照。
+    #[doc(hidden)]
+    pub fn build_with_retained(
+        self,
+        build: &mut ViewBuild<A>,
+    ) -> ViewResult<(Body<A>, Option<RetainedChildren>)> {
+        let body = self.build(build)?;
+        let retained = body
+            .retained_snapshot()
+            .map(|snapshot| snapshot.with_subtree(build.memo_current_subtree()));
+        Ok((body, retained))
+    }
+}
+
+impl RetainedChildren {
+    /// 为一次 retained 重入重建泛型 action 无关的 `Body`。
+    #[doc(hidden)]
+    pub fn restore<A>(&self) -> Body<A> {
+        Body {
+            children: self
+                .children
+                .iter()
+                .map(|child| child.clone_for_restore())
+                .collect(),
+            watches: self.watches.clone(),
+        }
+    }
+
+    fn with_subtree(mut self, subtree: BTreeSet<ComponentIdentity>) -> Self {
+        self.subtree = subtree;
+        self
+    }
+}
+
+impl RetainedViewChild {
+    fn clone_for_restore<A>(&self) -> ViewChild<A> {
+        // Retained slots only contain Rc nodes and cloned watch sources. Recreate the small
+        // wrapper shape while retaining the exact immutable node identity.
+        match self {
+            Self::Node(node) => ViewChild::view_node(ViewNode::from_retained(RetainedViewNode {
+                node: Rc::clone(&node.node),
+                watches: node.watches.clone(),
+            })),
+            Self::Fragment(children) => {
+                ViewChild::fragment(children.iter().map(Self::clone_for_restore).collect())
+            }
+            Self::Collection { scope, children } => ViewChild::collection(
+                *scope,
+                children.iter().map(Self::clone_for_restore).collect(),
+            ),
         }
     }
 }
@@ -850,6 +988,18 @@ impl<A> Body<A> {
         }
         (children, self.watches)
     }
+
+    fn retained_snapshot(&self) -> Option<RetainedChildren> {
+        self.children
+            .iter()
+            .map(ViewChild::retained_snapshot)
+            .collect::<Option<Vec<_>>>()
+            .map(|children| RetainedChildren {
+                children,
+                watches: self.watches.clone(),
+                subtree: BTreeSet::new(),
+            })
+    }
 }
 
 /// 由嵌套 `ui!` / 子视图捕获的尚未 rebase 的附属计划。
@@ -869,6 +1019,10 @@ impl<A> PlanBundle<A> {
         }
     }
 
+    pub(crate) fn is_retained_compatible(&self) -> bool {
+        self.actions.is_empty() && self.component_actions.is_empty()
+    }
+
     pub(crate) fn resolve(self, tree: &UiTree) -> ViewResult<ResolvedPlans<A>> {
         let resolver = AnchorResolver::new(tree);
         self.validate(&resolver, tree)?;
@@ -885,6 +1039,7 @@ impl<A> PlanBundle<A> {
                 watch_scopes.push((watch.scope, key.clone()));
                 ResolvedWatch {
                     key,
+                    scope: watch.scope,
                     source: watch.source,
                 }
             })
@@ -907,6 +1062,15 @@ impl<A> PlanBundle<A> {
             actions,
             component_actions: self.component_actions,
         })
+    }
+
+    pub(crate) fn rebase(&mut self, prefix: &[usize]) {
+        for watch in &mut self.watches {
+            watch.rebase(prefix);
+        }
+        for action in &mut self.actions {
+            action.rebase(prefix);
+        }
     }
 
     fn validate(&self, resolver: &AnchorResolver<'_>, tree: &UiTree) -> ViewResult<()> {
@@ -974,7 +1138,7 @@ impl<A> PlanBundle<A> {
 /// bundle 按真实 DFS child 位置 rebase。这样 `let header = render_header(build)?` 与内联
 /// `{ render_header(build) }` 具有相同的身份和订阅语义。
 pub struct ViewOutput<A> {
-    node: UiNode,
+    node: Rc<UiNode>,
     plans: PlanBundle<A>,
     pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
     pub(crate) animation_schedule: AnimationSchedule,
@@ -987,7 +1151,7 @@ impl<A> ViewOutput<A> {
     /// `ui!(build { ... })` 的结果，不能先提取其 `UiNode`。
     pub fn opaque(node: UiNode) -> Self {
         Self {
-            node,
+            node: Rc::new(node),
             plans: PlanBundle::empty(),
             owner_frame: None,
             animation_schedule: AnimationSchedule::default(),
@@ -996,7 +1160,7 @@ impl<A> ViewOutput<A> {
 
     /// 查看纯 Kernel 节点，而不转移其帧期计划。
     pub fn node(&self) -> &UiNode {
-        &self.node
+        self.node.as_ref()
     }
 
     /// 附加组件级订阅（`#[derive(DslComponent)]` 的 `#[watch]` 脚手架使用）。
@@ -1089,8 +1253,22 @@ impl<A> ViewOutput<A> {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (UiNode, PlanBundle<A>, AnimationSchedule) {
+    pub(crate) fn into_parts(self) -> (Rc<UiNode>, PlanBundle<A>, AnimationSchedule) {
         (self.node, self.plans, self.animation_schedule)
+    }
+
+    pub(crate) fn into_rebased_parts(
+        self,
+        prefix: &[usize],
+    ) -> (Rc<UiNode>, PlanBundle<A>, AnimationSchedule) {
+        let (node, mut plans, animation_schedule) = self.into_parts();
+        plans.rebase(prefix);
+        (node, plans, animation_schedule)
+    }
+
+    pub(crate) fn is_retained_compatible(&self) -> bool {
+        self.plans.is_retained_compatible()
+            && self.animation_schedule == AnimationSchedule::default()
     }
 }
 
@@ -1165,22 +1343,25 @@ where
 }
 
 /// `#[memo]` 记忆化在本帧的判定上下文。
-pub(crate) struct MemoFrameCtx {
-    candidate: Rc<RefCell<crate::memo::MemoCandidate>>,
+pub(crate) struct MemoFrameCtx<A> {
+    candidate: Rc<RefCell<crate::memo::MemoCandidate<A>>>,
     dirty: BTreeSet<SemanticKey>,
     watch_keys: Rc<crate::memo::WatchKeysByScope>,
 }
 
 /// 一次 `ui!(build)` 调用的 Application 构建上下文。
 pub struct ViewBuild<A> {
-    scope: Arc<ViewContext>,
+    scope: Rc<ViewContext>,
     component_identity_scopes: Vec<crate::owner::ScopeId>,
     pub(crate) owner_frame: Option<Rc<RefCell<ComponentOwnerFrame>>>,
     animation_clock: AnimationClock,
     animation_schedule: AnimationSchedule,
-    memo: Option<MemoFrameCtx>,
+    memo: Option<MemoFrameCtx<A>>,
     /// 记忆化启用时的组件身份收集栈：每帧一个集合，弹栈时并入父集合。
     memo_identities: Vec<BTreeSet<ComponentIdentity>>,
+    /// 与 `memo_identities` 同步的当前 retained 组件身份；重入条目必须携带完整身份，
+    /// 而不仅是内部的 scope 整数，以便 owner 候选帧正确登记自身。
+    memo_component_identities: Vec<ComponentIdentity>,
     marker: std::marker::PhantomData<A>,
 }
 
@@ -1201,13 +1382,14 @@ impl<A> ViewBuild<A> {
             animation_schedule: AnimationSchedule::default(),
             memo: None,
             memo_identities: Vec::new(),
+            memo_component_identities: Vec::new(),
             marker: std::marker::PhantomData,
         }
     }
 
     /// 返回当前词法 Context 的 owned snapshot。
-    pub fn current_scope(&self) -> Arc<ViewContext> {
-        Arc::clone(&self.scope)
+    pub fn current_scope(&self) -> Rc<ViewContext> {
+        Rc::clone(&self.scope)
     }
 
     /// 设置当前候选帧使用的宿主单调时钟采样。
@@ -1235,7 +1417,7 @@ impl<A> ViewBuild<A> {
     /// 绑定本帧的记忆化上下文（由 `FrameCoordinator::begin_build_for_frame` 调用）。
     pub(crate) fn with_memo(
         mut self,
-        candidate: Rc<RefCell<crate::memo::MemoCandidate>>,
+        candidate: Rc<RefCell<crate::memo::MemoCandidate<A>>>,
         dirty: BTreeSet<SemanticKey>,
         watch_keys: Rc<crate::memo::WatchKeysByScope>,
     ) -> Self {
@@ -1253,6 +1435,31 @@ impl<A> ViewBuild<A> {
         self.memo.is_some()
     }
 
+    fn memo_current_subtree(&self) -> BTreeSet<ComponentIdentity> {
+        self.memo_identities.last().cloned().unwrap_or_default()
+    }
+
+    /// Restores the lifecycle ownership of children materialized in a retained parent slot.
+    ///
+    /// The child nodes themselves are immutable `Rc`s, but their retained entries and owner
+    /// state are candidate-transactional. Reusing a slot must therefore mark every contained
+    /// identity as seen in the same atomic candidate before the parent records its new entry.
+    #[doc(hidden)]
+    pub fn retain_retained_children(&mut self, children: &RetainedChildren) {
+        if let Some(owner) = self.owner_frame.as_ref() {
+            owner.borrow_mut().retain_subtree(&children.subtree);
+        }
+        if let Some(memo) = self.memo.as_ref() {
+            let mut candidate = memo.candidate.borrow_mut();
+            for identity in &children.subtree {
+                candidate.seen.insert(identity.scope());
+            }
+        }
+        if let Some(frame) = self.memo_identities.last_mut() {
+            frame.extend(children.subtree.iter().cloned());
+        }
+    }
+
     /// 尝试命中当前组件的 render 记忆（retained 求值语义：入边无脏 → 不重求值）。
     ///
     /// 命中条件：候选条目存在、`matches` 对上次实例快照判定相等（宏生成的
@@ -1261,12 +1468,9 @@ impl<A> ViewBuild<A> {
     /// 命中时补登记 owner `seen`、标记候选条目为 seen、把缓存子树身份并入当前
     /// 收集帧，并重新声明缓存输出（节点 + watch 计划，供 reconcile 复用订阅）。
     #[doc(hidden)]
-    pub fn memo_hit(
-        &mut self,
-        matches: impl FnOnce(&dyn Any) -> bool,
-    ) -> Option<ViewOutput<A>> {
+    pub fn memo_hit(&mut self, matches: impl FnOnce(&dyn Any) -> bool) -> Option<ViewOutput<A>> {
         let scope = self.component_identity_scopes.last().copied()?;
-        let matched: Option<(Rc<crate::memo::MemoEntry>, bool)> = {
+        let matched: Option<(Rc<crate::memo::MemoEntry<A>>, bool)> = {
             let memo = self.memo.as_ref()?;
             let entry = Rc::clone(memo.candidate.borrow().entries.get(&scope)?);
             let dirty_subtree = entry.watches.iter().any(|watch| {
@@ -1315,7 +1519,26 @@ impl<A> ViewBuild<A> {
     /// 只缓存纯 watch 输出：动作 / 组件动作 / 动画调度请求不参与
     /// （动作载荷没有 `PartialEq` 保证，动画依赖时钟推进）。
     #[doc(hidden)]
-    pub fn memo_record<S: 'static>(&mut self, snapshot: S, output: &ViewOutput<A>) {
+    pub fn memo_record<S: 'static>(
+        &mut self,
+        snapshot: S,
+        output: &ViewOutput<A>,
+        rerender: crate::memo::MemoRender<A>,
+        site: ViewSite,
+    ) {
+        self.memo_record_erased(Rc::new(snapshot), output, rerender, site);
+    }
+
+    /// Replaces this scope's retained entry with a fresh output while preserving the original
+    /// self-contained input snapshot. Only generated derive evaluators call this on re-entry.
+    #[doc(hidden)]
+    pub fn memo_record_erased(
+        &mut self,
+        inputs: Rc<dyn std::any::Any>,
+        output: &ViewOutput<A>,
+        rerender: crate::memo::MemoRender<A>,
+        site: ViewSite,
+    ) {
         let Some(memo) = self.memo.as_ref() else {
             return;
         };
@@ -1328,34 +1551,66 @@ impl<A> ViewBuild<A> {
         {
             return;
         }
-        let subtree = self
-            .memo_identities
+        let subtree = self.memo_identities.last().cloned().unwrap_or_default();
+        let identity = self
+            .memo_component_identities
             .last()
             .cloned()
-            .unwrap_or_default();
+            .expect("memo record requires an active component identity");
         let entry = Rc::new(crate::memo::MemoEntry {
-            inputs: Rc::new(snapshot),
+            inputs,
+            identity,
+            site,
+            rerender,
             node: output.node.clone(),
             watches: output.plans.watches.clone(),
             subtree,
         });
         let mut candidate = memo.candidate.borrow_mut();
-        candidate.entries.insert(scope.clone(), entry);
+        candidate.entries.insert(scope, entry);
         candidate.seen.insert(scope);
     }
 
     /// 记忆化帧内一个组件开始 render：压入新的身份收集帧。
     pub(crate) fn memo_component_started(&mut self, identity: ComponentIdentity) {
-        self.memo_identities.push(BTreeSet::from([identity]));
+        self.memo_identities
+            .push(BTreeSet::from([identity.clone()]));
+        self.memo_component_identities.push(identity);
     }
 
     /// 一个组件结束 render：弹出身份收集帧并并入父帧。
     pub(crate) fn memo_component_finished(&mut self) {
+        self.memo_component_identities
+            .pop()
+            .expect("memo component identity was pushed immediately before render");
         if let (Some(collected), Some(parent)) =
             (self.memo_identities.pop(), self.memo_identities.last_mut())
         {
             parent.extend(collected);
         }
+    }
+
+    /// Re-enters one self-contained derive retained element without reconstructing its parent.
+    pub(crate) fn reenter_memo_entry(
+        &mut self,
+        entry: &crate::memo::MemoEntry<A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        self.memo_component_started(entry.identity.clone());
+        // Derive retained components have `State = ()`; entering through the normal owner cell
+        // path marks the root seen and preserves the same candidate transaction semantics.
+        let _: crate::owner::ComponentState<()> =
+            self.local_state_for(entry.identity.clone(), || ());
+        let result = self.with_component_identity(&entry.identity, |build| {
+            (entry.rerender)(build, Rc::clone(&entry.inputs), entry.site)
+        });
+        self.memo_component_finished();
+        result.map(|output| {
+            output.with_owner_frame(
+                self.owner_frame
+                    .clone()
+                    .expect("retained re-entry must retain the candidate owner frame"),
+            )
+        })
     }
 
     pub(crate) fn local_state_for<T: Clone + 'static>(
@@ -1399,11 +1654,12 @@ impl<A> ViewBuild<A> {
             .copied()
             .unwrap_or(crate::owner::ScopeId::ROOT);
         let encoded = key.encode_item_key();
-        self.component_identity_scopes.push(crate::owner::intern_collection_scope(
-            parent,
-            collection_scope,
-            &encoded,
-        ));
+        self.component_identity_scopes
+            .push(crate::owner::intern_collection_scope(
+                parent,
+                collection_scope,
+                &encoded,
+            ));
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.component_identity_scopes
             .pop()
@@ -1437,8 +1693,8 @@ impl<A> ViewBuild<A> {
         site: ViewSite,
         operation: impl FnOnce(&mut Self) -> ViewResult<R>,
     ) -> ViewResult<R> {
-        let parent = Arc::clone(&self.scope);
-        self.scope = ViewContext::child(Arc::clone(&parent), providers, site)?;
+        let parent = Rc::clone(&self.scope);
+        self.scope = ViewContext::child(Rc::clone(&parent), providers, site)?;
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.scope = parent;
         match result {
@@ -1492,10 +1748,10 @@ impl<A> ViewBuild<A> {
             merged_component_actions.extend(child.component_actions);
             animation_schedule.merge(child.animation_schedule);
         }
-        node.children = lowered_children.into_iter().map(Rc::new).collect();
+        node.children = lowered_children;
         let node = Self::attach_body_watches(
             ViewNode {
-                node,
+                node: Rc::new(node),
                 watches: merged_watches,
                 actions: merged_actions,
                 component_actions: merged_component_actions,
@@ -1608,7 +1864,7 @@ mod tests {
     use std::{
         collections::BTreeSet,
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::Arc,
+        rc::Rc,
     };
 
     use tela_contract::{InteractConcern, NodeKind, SemanticKey, UiNode};
@@ -1646,7 +1902,7 @@ mod tests {
             },
         );
         assert!(matches!(error, Err(ViewBuildError::MissingProvider { .. })));
-        assert!(Arc::ptr_eq(&root, &build.current_scope()));
+        assert!(Rc::ptr_eq(&root, &build.current_scope()));
         assert!(build.current_scope().inject::<u32>(site()).is_err());
 
         let panic_result = catch_unwind(AssertUnwindSafe(|| {
@@ -1666,7 +1922,7 @@ mod tests {
             );
         }));
         assert!(panic_result.is_err());
-        assert!(Arc::ptr_eq(&root, &build.current_scope()));
+        assert!(Rc::ptr_eq(&root, &build.current_scope()));
         assert!(build.current_scope().inject::<u32>(site()).is_err());
     }
 
@@ -1766,7 +2022,9 @@ mod tests {
             clickable: true,
             ..InteractConcern::default()
         });
-        button.children.push(std::rc::Rc::new(UiNode::new(NodeKind::Rect)));
+        button
+            .children
+            .push(std::rc::Rc::new(UiNode::new(NodeKind::Rect)));
         let target = build
             .action_target(
                 Body::new(vec![ViewChild::node(button)], Vec::new()),

@@ -4,7 +4,8 @@
 //! 不读时钟、随机数、设备输入。滚动偏移由调用方作为外部只读输入（`scroll_inputs`）注入，
 //! `resolve` 不持久保存（跨帧记忆归 M4 视图状态仓库，见 006-布局引擎 5）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 use tela_contract::{
     AnchorAlign, AnchorSide, AnchoredPlacement, BorderRadius, BorderStroke, ClipRect,
     ContentConcern, DrawCommand, DrawPayload, Fill, FocusAppearance, HitRegion, LayoutBox, NodeId,
@@ -15,7 +16,7 @@ use tela_contract::{
 
 use crate::layout::{DefaultLayoutEngine, LayoutEngine};
 use crate::tree::UiTree;
-use crate::update::{LayoutCache, measure_dirty};
+use crate::update::{LayoutCache, measure_dirty_shared};
 
 /// emit 上下文：命令/命中区域收集、滚动输入、节点 id/key 映射、Teleport 顶层队列。
 struct EmitContext<'a, M: TextMeasurer + ?Sized> {
@@ -34,6 +35,16 @@ struct EmitContext<'a, M: TextMeasurer + ?Sized> {
     focus_key: Option<&'a SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
     text_measurer: &'a M,
+}
+
+/// Internal resolve product retained by the application profile for paint-damage planning.
+///
+/// `UiFrame` deliberately stays self-contained for existing renderer APIs. The rectangle index
+/// is kernel bookkeeping: it associates stable tree coordinates with their emitted screen-space
+/// extent without adding backend-only provenance to every draw command.
+pub(crate) struct ResolvedTreeFrame {
+    pub(crate) frame: UiFrame,
+    pub(crate) node_rects: HashMap<SemanticKey, Rect>,
 }
 
 /// Teleport 提升项（节点 + 布局盒 + 祖先平移；提升后视觉独立于父布局）。
@@ -71,6 +82,26 @@ pub(crate) fn resolve_tree_with_focus(
     focus_key: Option<&SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
 ) -> Result<UiFrame, UiLayoutError> {
+    resolve_tree_with_focus_details(
+        tree,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        focus_key,
+        focus_appearance,
+    )
+    .map(|resolved| resolved.frame)
+}
+
+/// Full resolve with the coordinate index needed by retained paint planning.
+pub(crate) fn resolve_tree_with_focus_details(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Result<ResolvedTreeFrame, UiLayoutError> {
     // 逻辑画布必须使用非零基数。
     if !(viewport.width > 0.0 && viewport.height > 0.0) {
         return Err(UiLayoutError::InvalidViewport {
@@ -128,6 +159,59 @@ pub(crate) fn resolve_tree_dirty_with_focus(
     focus_key: Option<&SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
 ) -> Result<UiFrame, UiLayoutError> {
+    resolve_tree_dirty_with_focus_details(
+        tree,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        cache,
+        focus_key,
+        focus_appearance,
+    )
+    .map(|resolved| resolved.frame)
+}
+
+/// Dirty resolve with the coordinate index needed by retained paint planning.
+pub(crate) fn resolve_tree_dirty_with_focus_details(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    cache: &mut LayoutCache,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Result<ResolvedTreeFrame, UiLayoutError> {
+    resolve_tree_dirty_incremental_with_focus_details(
+        tree,
+        None,
+        None,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        cache,
+        focus_key,
+        focus_appearance,
+    )
+}
+
+/// Dirty resolve with a last-presented tree and graph coordinates.
+///
+/// The optional active tree is a transaction-owned identity baseline. When every dirty path can
+/// be measured under its prior constraints and reaches a geometrically stable ancestor, only
+/// that local box is spliced into the old root layout. Unknown coordinates, structural changes,
+/// `Full` scopes, and geometry that reaches the root deliberately use the ordinary Dirty path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_tree_dirty_incremental_with_focus_details(
+    tree: &UiTree,
+    active_tree: Option<&UiTree>,
+    dirty_keys: Option<&BTreeSet<SemanticKey>>,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    cache: &mut LayoutCache,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Result<ResolvedTreeFrame, UiLayoutError> {
     if !(viewport.width > 0.0 && viewport.height > 0.0) {
         return Err(UiLayoutError::InvalidViewport {
             width: viewport.width,
@@ -141,11 +225,6 @@ pub(crate) fn resolve_tree_dirty_with_focus(
         max_h: viewport.height,
     };
     let mut engine = DefaultLayoutEngine::new(text_measurer);
-    let root_key = tree
-        .keys
-        .first()
-        .cloned()
-        .unwrap_or_else(|| SemanticKey("/".to_string()));
     // 根生效模式 = 根节点声明的更新策略（默认 Full 全量，见 004-1）；Dirty 需显式声明。
     let root_mode = tree
         .root
@@ -154,14 +233,23 @@ pub(crate) fn resolve_tree_dirty_with_focus(
         .map(|i| i.update_mode)
         .unwrap_or(tela_contract::UpdateMode::Full);
     engine.reset_measure_audit();
-    let root_box = measure_dirty(
-        &tree.root,
+    let root_box = match try_measure_dirty_incrementally(
+        tree,
+        active_tree,
+        dirty_keys,
         root_constraints,
-        root_mode,
-        &root_key,
         &mut engine,
         cache,
-    )?;
+    )? {
+        Some(root_box) => root_box,
+        None => measure_dirty_shared(
+            tree.root_shared(),
+            root_constraints,
+            root_mode,
+            &mut engine,
+            cache,
+        )?,
+    };
     emit_frame_tree(
         tree,
         &root_box,
@@ -173,6 +261,153 @@ pub(crate) fn resolve_tree_dirty_with_focus(
     )
 }
 
+fn try_measure_dirty_incrementally<M: TextMeasurer + ?Sized>(
+    tree: &UiTree,
+    active_tree: Option<&UiTree>,
+    dirty_keys: Option<&BTreeSet<SemanticKey>>,
+    root_constraints: tela_contract::Constraints,
+    engine: &mut DefaultLayoutEngine<'_, M>,
+    cache: &mut LayoutCache,
+) -> Result<Option<LayoutBox>, UiLayoutError> {
+    let (Some(active_tree), Some(dirty_keys)) = (active_tree, dirty_keys) else {
+        return Ok(None);
+    };
+    if dirty_keys.is_empty() {
+        return Ok(None);
+    }
+    let Some(mut merged_root) = cache.cached_layout(active_tree.root_shared(), root_constraints)
+    else {
+        return Ok(None);
+    };
+
+    // A coordinate is the only valid route into the retained tree. If a key moved, appeared, or
+    // vanished, the tree shape itself is dirty and the established root path is the sound escape.
+    let mut paths = Vec::with_capacity(dirty_keys.len());
+    for key in dirty_keys {
+        let (Some(active_path), Some(candidate_path)) =
+            (active_tree.path_for_key(key), tree.path_for_key(key))
+        else {
+            return Ok(None);
+        };
+        if active_path != candidate_path {
+            return Ok(None);
+        }
+        paths.push(candidate_path);
+    }
+    paths.sort();
+    paths.dedup();
+    let mut outermost = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !outermost
+            .iter()
+            .any(|ancestor: &Vec<usize>| path.starts_with(ancestor))
+        {
+            outermost.push(path);
+        }
+    }
+
+    for target_path in outermost {
+        let mut path = target_path;
+        loop {
+            let (Some(active_node), Some(candidate_node)) = (
+                shared_node_at_path(active_tree, &path),
+                shared_node_at_path(tree, &path),
+            ) else {
+                return Ok(None);
+            };
+            let Some((active_constraints, active_box)) = cache.cached_layout_for_node(&active_node)
+            else {
+                return Ok(None);
+            };
+            let mode = update_mode_at_path(tree, &path);
+            if mode == tela_contract::UpdateMode::Full {
+                return Ok(None);
+            }
+            let mut candidate_box =
+                measure_dirty_shared(&candidate_node, active_constraints, mode, engine, cache)?;
+            if !same_layout_boundary(&active_box, &candidate_box) {
+                if path.is_empty() {
+                    return Ok(None);
+                }
+                path.pop();
+                continue;
+            }
+
+            // Cached child boxes are local to the child measurer. The parent owns its final
+            // placement, so preserve the already-proven stable parent-relative origin when
+            // replacing the subtree in the emitted root box.
+            let Some(previous_position) = layout_box_at_path(&merged_root, &path) else {
+                return Ok(None);
+            };
+            candidate_box.x = previous_position.x;
+            candidate_box.y = previous_position.y;
+            if !replace_layout_box_at_path(&mut merged_root, &path, candidate_box) {
+                return Ok(None);
+            }
+            break;
+        }
+    }
+    Ok(Some(merged_root))
+}
+
+fn shared_node_at_path(tree: &UiTree, path: &[usize]) -> Option<Rc<UiNode>> {
+    let mut node = Rc::clone(tree.root_shared());
+    for &index in path {
+        node = Rc::clone(node.children.get(index)?);
+    }
+    Some(node)
+}
+
+fn update_mode_at_path(tree: &UiTree, path: &[usize]) -> tela_contract::UpdateMode {
+    let mut node = Rc::clone(tree.root_shared());
+    let mut mode = node
+        .identity
+        .as_ref()
+        .map(|identity| identity.update_mode)
+        .unwrap_or(tela_contract::UpdateMode::Full);
+    for &index in path {
+        node = Rc::clone(
+            node.children
+                .get(index)
+                .expect("path obtained from this UiTree must remain valid"),
+        );
+        if let Some(identity) = &node.identity {
+            mode = identity.update_mode;
+        }
+    }
+    mode
+}
+
+fn same_layout_boundary(active: &LayoutBox, candidate: &LayoutBox) -> bool {
+    active.w == candidate.w
+        && active.h == candidate.h
+        && active.first_baseline == candidate.first_baseline
+}
+
+fn layout_box_at_path<'a>(root: &'a LayoutBox, path: &[usize]) -> Option<&'a LayoutBox> {
+    let mut current = root;
+    for &index in path {
+        current = current.children.get(index)?;
+    }
+    Some(current)
+}
+
+fn replace_layout_box_at_path(
+    root: &mut LayoutBox,
+    path: &[usize],
+    replacement: LayoutBox,
+) -> bool {
+    let mut current = root;
+    for &index in path {
+        let Some(child) = current.children.get_mut(index) else {
+            return false;
+        };
+        current = child;
+    }
+    *current = replacement;
+    true
+}
+
 /// 布局盒树 → 帧生成（emit 阶段，Full/Dirty 共用）。
 fn emit_frame_tree<M: TextMeasurer + ?Sized>(
     tree: &UiTree,
@@ -182,7 +417,7 @@ fn emit_frame_tree<M: TextMeasurer + ?Sized>(
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
     focus_key: Option<&SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
-) -> Result<UiFrame, UiLayoutError> {
+) -> Result<ResolvedTreeFrame, UiLayoutError> {
     let (nodes, node_ids, keys) = tree.node_table();
     let node_meta = nodes
         .into_iter()
@@ -209,11 +444,14 @@ fn emit_frame_tree<M: TextMeasurer + ?Sized>(
     for entry in teleports {
         emit_frame_teleport(&tree.root, entry, &mut ctx);
     }
-    Ok(UiFrame {
-        viewport,
-        commands: ctx.commands,
-        hit_regions: ctx.hit_regions,
-        scroll_bounds: ctx.scroll_bounds,
+    Ok(ResolvedTreeFrame {
+        frame: UiFrame {
+            viewport,
+            commands: ctx.commands,
+            hit_regions: ctx.hit_regions,
+            scroll_bounds: ctx.scroll_bounds,
+        },
+        node_rects: ctx.node_rects,
     })
 }
 

@@ -87,6 +87,26 @@ class StaticAgentRuntime implements TelaApplicationRuntime {
     return this.publication().framePacket;
   }
 
+  frameDamage(): { readonly flags: number; readonly rects: Float32Array } {
+    const publication = this.publication();
+    return { flags: publication.damageFlags, rects: publication.damageRects };
+  }
+
+  frameTransport(): {
+    readonly sequence: bigint;
+    readonly baseSequence: bigint | undefined;
+    readonly snapshot: boolean;
+    readonly spine: readonly string[];
+  } {
+    const publication = this.publication();
+    return {
+      sequence: publication.transportSequence,
+      baseSequence: publication.transportBaseSequence,
+      snapshot: publication.transportSnapshot,
+      spine: publication.transportSpine,
+    };
+  }
+
   status(): WebAppStatus {
     return this.publication().status;
   }
@@ -104,6 +124,12 @@ class StaticAgentRuntime implements TelaApplicationRuntime {
     const publication = this.session.publish() as DisposablePublication;
     const next = {
       framePacket: publication.frame_packet(),
+      damageFlags: publication.damage_flags(),
+      damageRects: publication.damage_rects(),
+      transportSequence: publication.transport_sequence(),
+      transportBaseSequence: publication.transport_base_sequence,
+      transportSnapshot: publication.transport_snapshot,
+      transportSpine: publication.transport_spine(),
       status: publication.status() as DisposableStatus,
     };
     publication.free?.();

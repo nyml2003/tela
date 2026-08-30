@@ -3,7 +3,7 @@
 //! - Dirty 子树下仅脏节点重算（可测布局调用次数）；
 //! - Full/Dirty 渲染结果一致（缓存只是纯函数加速，组件无感知）。
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 use tela_contract::{
     Color, Fill, IdentityConcern, LayoutConcern, OverlaySpec, TextContent, TextMeasureRequest,
     TextMeasurer, TextMetrics, UiNode, UpdateMode, Viewport, VisualConcern,
@@ -70,6 +70,10 @@ fn dirty_scope(children: Vec<UiNode>) -> UiNode {
         .into()
 }
 
+fn dirty_scope_shared(children: impl IntoIterator<Item = Rc<UiNode>>) -> UiNode {
+    dirty_scope(Vec::new()).with_shared_children(children)
+}
+
 /// 显式声明 Full 的容器（子容器覆盖父级 Dirty 默认，见 004-1）。
 fn full_scope(children: Vec<UiNode>) -> UiNode {
     LayoutContainer::column(children)
@@ -93,23 +97,24 @@ fn resolve_dirty(tree: &UiTree, cache: &mut LayoutCache) -> tela_contract::UiFra
 
 #[test]
 fn dirty_measures_only_changed_subtree() {
-    // 树：Full 根 → [Dirty A[textA], Dirty B[textB]]。
-    // 帧 1 全量；帧 2 只改 textB → 仅 textB、容器 B、根重算（3 次），A 子树缓存命中（0 次）。
+    // 树：Dirty 根 → [Dirty A[textA], Dirty B[textB]]。
+    // 帧 2 保留 A 的 Rc，仅替换 B：根、B、textB 重算；A 以指针身份命中。
     let mut cache = LayoutCache::new();
-    let mut tree = UiTree::new(dirty_scope(vec![
-        dirty_scope(vec![text("A")]),
-        dirty_scope(vec![text("B")]),
-    ]))
+    let stable_a = Rc::new(dirty_scope(vec![text("A")]));
+    let mut tree = UiTree::new_shared(Rc::new(dirty_scope_shared([
+        Rc::clone(&stable_a),
+        Rc::new(dirty_scope(vec![text("B")])),
+    ])))
     .unwrap();
     let _ = resolve_dirty(&tree, &mut cache);
     let frame1_measures = cache.measure_count();
     assert_eq!(frame1_measures, 5, "帧 1 全量：根 + 2 容器 + 2 文本");
 
     // 只改 textB。
-    tree = UiTree::new(dirty_scope(vec![
-        dirty_scope(vec![text("A")]),
-        dirty_scope(vec![text("B changed")]),
-    ]))
+    tree = UiTree::new_shared(Rc::new(dirty_scope_shared([
+        Rc::clone(&stable_a),
+        Rc::new(dirty_scope(vec![text("B changed")])),
+    ])))
     .unwrap();
     let _ = resolve_dirty(&tree, &mut cache);
     let frame2_measures = cache.measure_count() - frame1_measures;
@@ -119,6 +124,31 @@ fn dirty_measures_only_changed_subtree() {
     let _ = resolve_dirty(&tree, &mut cache);
     let frame3_measures = cache.measure_count() - frame1_measures - frame2_measures;
     assert_eq!(frame3_measures, 0, "未变树全部命中缓存");
+}
+
+#[test]
+fn equal_but_reconstructed_subtree_does_not_hit_identity_cache() {
+    let mut cache = LayoutCache::new();
+    let first = UiTree::new(dirty_scope(vec![
+        dirty_scope(vec![text("A")]),
+        dirty_scope(vec![text("B")]),
+    ]))
+    .unwrap();
+    let _ = resolve_dirty(&first, &mut cache);
+    let measured = cache.measure_count();
+
+    // 文本和布局内容完全相同，但 allocation 全新。读路径不得以内容哈希证明“没变”。
+    let rebuilt = UiTree::new(dirty_scope(vec![
+        dirty_scope(vec![text("A")]),
+        dirty_scope(vec![text("B")]),
+    ]))
+    .unwrap();
+    let _ = resolve_dirty(&rebuilt, &mut cache);
+    assert_eq!(
+        cache.measure_count() - measured,
+        5,
+        "等值重建不是身份复用，必须重新布局"
+    );
 }
 
 // ---------- 验收 2：Full / Dirty 渲染结果一致（组件无感知） ----------
@@ -195,12 +225,8 @@ fn dirty_cache_invalidates_on_layout_field_change() {
 
 #[test]
 fn dirty_cache_keeps_expanded_and_overlay_descendant_paths_distinct() {
-    fn dirty_row(expanded_width: f32) -> UiTree {
-        UiTree::new(
-            LayoutContainer::row([
-                rect(20.0, 10.0),
-                LayoutContainer::expanded(rect(expanded_width, 10.0)).into(),
-            ])
+    fn dirty_row(fixed: Rc<UiNode>, expanded_width: f32) -> UiTree {
+        let root: UiNode = LayoutContainer::row(Vec::<UiNode>::new())
             .identity(IdentityConcern {
                 update_mode: UpdateMode::Dirty,
                 ..IdentityConcern::default()
@@ -208,17 +234,17 @@ fn dirty_cache_keeps_expanded_and_overlay_descendant_paths_distinct() {
             .layout(LayoutConcern {
                 width: Some(Size::fixed(100.0)),
                 ..LayoutConcern::default()
-            }),
-        )
+            })
+            .into();
+        UiTree::new_shared(Rc::new(root.with_shared_children([
+            fixed,
+            Rc::new(LayoutContainer::expanded(rect(expanded_width, 10.0)).into()),
+        ])))
         .unwrap()
     }
 
-    fn dirty_stack(overlay_width: f32) -> UiTree {
-        UiTree::new(
-            LayoutContainer::stack([
-                rect(100.0, 20.0),
-                LayoutContainer::overlay(rect(overlay_width, 10.0), OverlaySpec::default()).into(),
-            ])
+    fn dirty_stack(fixed: Rc<UiNode>, overlay_width: f32) -> UiTree {
+        let root: UiNode = LayoutContainer::stack(Vec::<UiNode>::new())
             .identity(IdentityConcern {
                 update_mode: UpdateMode::Dirty,
                 ..IdentityConcern::default()
@@ -227,17 +253,24 @@ fn dirty_cache_keeps_expanded_and_overlay_descendant_paths_distinct() {
                 width: Some(Size::fixed(100.0)),
                 height: Some(Size::fixed(20.0)),
                 ..LayoutConcern::default()
-            }),
-        )
+            })
+            .into();
+        UiTree::new_shared(Rc::new(root.with_shared_children([
+            fixed,
+            Rc::new(
+                LayoutContainer::overlay(rect(overlay_width, 10.0), OverlaySpec::default()).into(),
+            ),
+        ])))
         .unwrap()
     }
 
     // Expanded 与 Overlay 是由父原语分阶段调度的包装器；其内部 child 必须保留
     // "父 / 包装器 / child" 路径，不能和父的第 0 个普通 child 共用缓存槽。
     let mut row_cache = LayoutCache::new();
-    let _ = resolve_dirty(&dirty_row(10.0), &mut row_cache);
+    let row_fixed = Rc::new(rect(20.0, 10.0));
+    let _ = resolve_dirty(&dirty_row(Rc::clone(&row_fixed), 10.0), &mut row_cache);
     let row_warm = row_cache.measure_count();
-    let _ = resolve_dirty(&dirty_row(12.0), &mut row_cache);
+    let _ = resolve_dirty(&dirty_row(row_fixed, 12.0), &mut row_cache);
     assert_eq!(
         row_cache.measure_count() - row_warm,
         2,
@@ -245,9 +278,13 @@ fn dirty_cache_keeps_expanded_and_overlay_descendant_paths_distinct() {
     );
 
     let mut stack_cache = LayoutCache::new();
-    let _ = resolve_dirty(&dirty_stack(10.0), &mut stack_cache);
+    let stack_fixed = Rc::new(rect(100.0, 20.0));
+    let _ = resolve_dirty(
+        &dirty_stack(Rc::clone(&stack_fixed), 10.0),
+        &mut stack_cache,
+    );
     let stack_warm = stack_cache.measure_count();
-    let _ = resolve_dirty(&dirty_stack(12.0), &mut stack_cache);
+    let _ = resolve_dirty(&dirty_stack(stack_fixed, 12.0), &mut stack_cache);
     assert_eq!(
         stack_cache.measure_count() - stack_warm,
         2,

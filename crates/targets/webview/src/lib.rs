@@ -15,9 +15,13 @@ use std::cell::RefCell;
 use tela_app_abi::decode_frame;
 use tela_app_abi::{
     ABI_VERSION, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
-    AppPointerPhase, AppStatus, decode_publication, decode_status, encode_event, encode_frame,
+    AppPointerPhase, AppStatus, FrameTransportPacket, decode_publication, decode_status,
+    decode_transport_publication, encode_event, encode_frame,
 };
 use tela_bundle::{BundleArchive, DevelopmentManifest, read_archive, sha256_hex};
+#[cfg(target_arch = "wasm32")]
+use tela_contract::{DirtyFlags, Rect};
+use tela_contract::{FrameDamage, SemanticKey};
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_sys::HtmlCanvasElement;
@@ -51,12 +55,23 @@ pub struct WebAppStatus {
 #[wasm_bindgen]
 pub struct WebAppPublication {
     frame_packet: Vec<u8>,
+    damage: FrameDamage,
     status: AppStatus,
+    transport: WebTransportState,
+}
+
+#[derive(Clone)]
+struct WebTransportState {
+    sequence: u64,
+    base_sequence: Option<u64>,
+    snapshot: bool,
+    spine: Vec<SemanticKey>,
 }
 
 #[cfg(target_arch = "wasm32")]
 struct GpuSession {
     renderer: tela_render_wgpu::WgpuRenderer,
+    backing: tela_render_wgpu::renderer::RetainedFrameTarget,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     canvas: HtmlCanvasElement,
@@ -167,6 +182,48 @@ impl WebAppPublication {
         self.frame_packet.clone()
     }
 
+    /// Invalidation kinds for this frame's retained backing layer.
+    pub fn damage_flags(&self) -> u8 {
+        self.damage.flags.bits()
+    }
+
+    /// Coalesced damage rectangles as `x, y, width, height` quadruples.
+    pub fn damage_rects(&self) -> Vec<f32> {
+        self.damage
+            .rects
+            .iter()
+            .flat_map(|rect| [rect.x, rect.y, rect.w, rect.h])
+            .collect()
+    }
+
+    /// Sender sequence for the retained-frame packet.
+    pub fn transport_sequence(&self) -> u64 {
+        self.transport.sequence
+    }
+
+    /// Receiver sequence required before this packet can be applied.
+    #[wasm_bindgen(getter)]
+    pub fn transport_base_sequence(&self) -> Option<u64> {
+        self.transport.base_sequence
+    }
+
+    /// Whether this is a full resynchronizing snapshot rather than a patch.
+    #[wasm_bindgen(getter)]
+    pub fn transport_snapshot(&self) -> bool {
+        self.transport.snapshot
+    }
+
+    /// Outermost retained tree coordinates replaced by this packet.
+    ///
+    /// Snapshots return an empty list because their complete frame replaces every coordinate.
+    pub fn transport_spine(&self) -> Vec<String> {
+        self.transport
+            .spine
+            .iter()
+            .map(|key| key.0.clone())
+            .collect()
+    }
+
     /// Returns the non-drawing state from the same atomic publication.
     pub fn status(&self) -> WebAppStatus {
         WebAppStatus {
@@ -184,7 +241,66 @@ pub fn decode_app_publication(bytes: &[u8]) -> Result<WebAppPublication, JsValue
         .map_err(|error| js_error(format!("invalid guest publication frame: {error}")))?;
     Ok(WebAppPublication {
         frame_packet,
+        damage: publication.damage,
         status: publication.status,
+        transport: WebTransportState {
+            sequence: 0,
+            base_sequence: None,
+            snapshot: true,
+            spine: Vec::new(),
+        },
+    })
+}
+
+/// Decodes the incremental transport packet exported by a modern dynamic guest.
+#[wasm_bindgen]
+pub fn decode_app_transport_publication(bytes: &[u8]) -> Result<WebAppPublication, JsValue> {
+    let publication = decode_transport_publication(bytes)
+        .map_err(|error| js_error(format!("invalid guest transport packet: {error}")))?;
+    web_app_publication_from_transport(publication.packet, publication.status)
+}
+
+/// Converts an acknowledged-base transport packet into the browser's typed publication view.
+///
+/// This path is intentionally separate from [`decode_app_publication`]: older dynamic guest
+/// exports still publish the stable ABI snapshot packet, while statically linked products can
+/// advance a retained renderer through explicit latest-wins sequences.
+pub fn web_app_publication_from_transport(
+    packet: FrameTransportPacket,
+    status: AppStatus,
+) -> Result<WebAppPublication, JsValue> {
+    if status.frame_token != Some(packet.token()) {
+        return Err(js_error(
+            "transport publication status token does not match packet token",
+        ));
+    }
+    let transport = WebTransportState {
+        sequence: packet.sequence(),
+        base_sequence: packet.base_sequence(),
+        snapshot: packet.is_snapshot(),
+        spine: Vec::new(),
+    };
+    let (frame, damage, spine) = match packet {
+        FrameTransportPacket::Snapshot {
+            frame,
+            damage,
+            spine,
+            ..
+        }
+        | FrameTransportPacket::Patch {
+            frame,
+            damage,
+            spine,
+            ..
+        } => (frame, damage, spine),
+    };
+    let frame_packet = encode_frame(&frame)
+        .map_err(|error| js_error(format!("invalid transport frame: {error}")))?;
+    Ok(WebAppPublication {
+        frame_packet,
+        damage,
+        status,
+        transport: WebTransportState { spine, ..transport },
     })
 }
 
@@ -379,6 +495,7 @@ pub async fn start_gpu(canvas: HtmlCanvasElement) -> Result<(), JsValue> {
         format,
         tela_contract::Color::rgba(1.0, 1.0, 1.0, 1.0),
     );
+    let backing = renderer.retained_target(config.width, config.height);
     GPU.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_some() {
@@ -386,6 +503,7 @@ pub async fn start_gpu(canvas: HtmlCanvasElement) -> Result<(), JsValue> {
         }
         *slot = Some(GpuSession {
             renderer,
+            backing,
             surface,
             config,
             canvas,
@@ -402,8 +520,49 @@ pub async fn start_gpu(canvas: HtmlCanvasElement) -> Result<(), JsValue> {
 #[wasm_bindgen]
 #[cfg(target_arch = "wasm32")]
 pub fn render_gpu(frame_packet: &[u8]) -> Result<bool, JsValue> {
+    render_gpu_damage(frame_packet, DirtyFlags::ALL.bits(), &[])
+}
+
+/// Decodes one guest frame and applies its damage to the retained browser backing texture.
+///
+/// `damage_rects` contains `x, y, width, height` quadruples. An empty list requests an explicit
+/// full-frame fallback, which preserves compatibility with callers that predate damage packets.
+#[wasm_bindgen]
+#[cfg(target_arch = "wasm32")]
+pub fn render_gpu_damage(
+    frame_packet: &[u8],
+    damage_flags: u8,
+    damage_rects: &[f32],
+) -> Result<bool, JsValue> {
     let frame = decode_frame(frame_packet)
         .map_err(|error| js_error(format!("invalid guest frame packet: {error}")))?;
+    let flags = DirtyFlags::from_bits(damage_flags)
+        .ok_or_else(|| js_error(format!("invalid frame damage flags: {damage_flags}")))?;
+    if damage_rects.len() % 4 != 0 {
+        return Err(js_error(
+            "frame damage rectangles must be x/y/w/h quadruples",
+        ));
+    }
+    let damage = if damage_rects.is_empty() {
+        FrameDamage::full(frame.viewport, flags)
+    } else {
+        let mut damage = FrameDamage::default();
+        for rect in damage_rects.chunks_exact(4) {
+            if !rect.iter().all(|value| value.is_finite()) {
+                return Err(js_error("frame damage rectangles must be finite"));
+            }
+            damage.add_rect(
+                Rect {
+                    x: rect[0],
+                    y: rect[1],
+                    w: rect[2],
+                    h: rect[3],
+                },
+                flags,
+            );
+        }
+        damage
+    };
     GPU.with(|slot| {
         let mut slot = slot.borrow_mut();
         let session = slot
@@ -451,10 +610,16 @@ pub fn render_gpu(frame_packet: &[u8]) -> Result<bool, JsValue> {
                 return Ok(false);
             }
         };
-        let view = texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        session.renderer.render_frame(&frame, &view, width, height);
+        session.renderer.render_retained_frame(
+            &frame,
+            &damage,
+            &mut session.backing,
+            width,
+            height,
+        );
+        session
+            .renderer
+            .copy_retained_to_texture(&session.backing, &texture.texture);
         session.renderer.present(texture);
         session.last_status = "submitted".to_owned();
         Ok(true)

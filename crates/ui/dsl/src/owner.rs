@@ -47,7 +47,9 @@ fn intern_site(site: ViewSite) -> SiteId {
     SITE_INTERNER.with(|table| {
         let mut table = table.borrow_mut();
         let next = u32::try_from(table.len()).expect("site id exhausted after u32::MAX sites");
-        *table.entry((site.file(), site.line(), site.column())).or_insert(SiteId(next))
+        *table
+            .entry((site.file(), site.line(), site.column()))
+            .or_insert(SiteId(next))
     })
 }
 
@@ -110,7 +112,6 @@ pub(crate) fn intern_collection_scope(parent: ScopeId, collection: u32, key: &st
         key: Rc::from(key),
     })
 }
-
 
 /// 类型擦除的组件本地事件路由。
 pub(crate) trait ComponentActionRoute<A> {
@@ -411,7 +412,7 @@ impl ComponentIdentity {
             parent,
             site: site_id,
             kind,
-            key: key.map(|key| Rc::from(key)),
+            key: key.map(Rc::from),
         });
         Self::from_scope(scope, site_id, kind, key.map(Rc::from))
     }
@@ -492,6 +493,18 @@ impl ComponentOwnerFrame {
     /// 已从 active 浅复制，这里只需补 `seen`。
     pub(crate) fn retain_subtree(&mut self, subtree: &BTreeSet<ComponentIdentity>) {
         self.seen.extend(subtree.iter().cloned());
+    }
+
+    /// Retains every active owner except components that are about to be independently
+    /// re-evaluated. The re-entered roots and any newly materialized descendants will mark
+    /// themselves seen through the normal component lifecycle path.
+    pub(crate) fn retain_all_except(&mut self, reentered: &BTreeSet<ComponentIdentity>) {
+        self.seen.extend(
+            self.states
+                .keys()
+                .filter(|identity| !reentered.contains(*identity))
+                .cloned(),
+        );
     }
 }
 
@@ -674,11 +687,7 @@ mod tests {
 
     fn id(path: &str, key: Option<&str>) -> ComponentIdentity {
         // path 充当唯一调用点坐标（site 由字符串驻留），保持用例语义不变。
-        let site = crate::ViewSite::new(
-            Box::leak(path.to_owned().into_boxed_str()),
-            1,
-            1,
-        );
+        let site = crate::ViewSite::new(Box::leak(path.to_owned().into_boxed_str()), 1, 1);
         ComponentIdentity::from_scoped_site("Transfer", ScopeId::ROOT, site, key)
     }
 
@@ -688,7 +697,8 @@ mod tests {
         let first = ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("7"));
         let second = ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("7"));
         assert_eq!(first, second);
-        let other_key = ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("8"));
+        let other_key =
+            ComponentIdentity::from_scoped_site("Panel", ScopeId::ROOT, site, Some("8"));
         assert_ne!(first, other_key);
     }
 

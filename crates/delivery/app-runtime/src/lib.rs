@@ -14,16 +14,19 @@
 
 pub mod keymap;
 
-use std::{collections::{BTreeSet, HashMap}, rc::Rc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    rc::Rc,
+};
 
 use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPublication,
-    AppStatus, ApplicationSession, CursorKind, SessionError,
+    AppStatus, ApplicationSession, CursorKind, RetainedTreeSnapshot, SessionError,
 };
 use tela_contract::{
-    FocusAppearance, InputEvent, KernelInteraction, NodeId, NodeKind, Point, PointerEvent,
-    ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame, UiLayoutError, UiNode,
-    UiResources, Viewport,
+    DirtyFlags, FocusAppearance, FrameDamage, InputEvent, KernelInteraction, NodeId, NodeKind,
+    Point, PointerEvent, ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame,
+    UiLayoutError, UiNode, UiResources, Viewport,
 };
 use tela_core::{
     DefaultApplicationProfile, FocusSlot, UiTree, ViewStateStore, restore_focus, save_focus,
@@ -46,6 +49,14 @@ pub struct FrameContext {
     /// viewport 的图节点（001 §2 宿主态收编）：组件以 `#[watch] viewport` 声明
     /// 依赖，宽高变化驱动重建而无需普通 props 通道。与 `viewport` 字段同源。
     pub viewport_signal: Signal<Viewport>,
+    /// 当前悬停坐标的图节点。组件可用 `#[watch]` 声明局部高亮，而 Core 仍以
+    /// `hover_key` 快照完成命中和生命周期投影。
+    pub hover_signal: Signal<Option<SemanticKey>>,
+    /// 当前焦点坐标的图节点。焦点环等 Kernel 投影继续消费 `focus_key` 快照；业务视图
+    /// 通过此边避免把 focus 变化一律升级为根级重建。
+    pub focus_signal: Signal<Option<SemanticKey>>,
+    /// Host 注入的单调动画时钟图节点。只有显式 watch 它的组件会因一个 tick 标脏。
+    pub animation_clock_signal: Signal<AnimationClock>,
     /// 原生窗口是否最大化（自绘标题栏投影需要）。
     pub window_maximized: bool,
     /// 当前悬停节点的语义 key（组件高亮需要）。
@@ -59,11 +70,14 @@ pub struct FrameContext {
 }
 
 // PartialEq 用于收敛循环判定（reconcile 后投影与渲染输入一致才算稳定）。
-// viewport_signal 恒为同一对象（构造一次），按 SignalId 比较即可。
+// Host signal 均在 Application 构造时创建，收敛判定只比较其稳定 SignalId。
 impl PartialEq for FrameContext {
     fn eq(&self, other: &Self) -> bool {
         self.viewport == other.viewport
             && self.viewport_signal.id() == other.viewport_signal.id()
+            && self.hover_signal.id() == other.hover_signal.id()
+            && self.focus_signal.id() == other.focus_signal.id()
+            && self.animation_clock_signal.id() == other.animation_clock_signal.id()
             && self.window_maximized == other.window_maximized
             && self.hover_key == other.hover_key
             && self.pressed_key == other.pressed_key
@@ -220,6 +234,11 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     /// viewport 的图节点（宿主态收编）：`set_viewport` 同步写入，组件经
     /// `#[watch] viewport` 订阅（相等性短路防同值帧）。
     viewport_signal: Signal<Viewport>,
+    /// Focus/hover/clock are host-owned graph sources. Their values are synchronized with the
+    /// candidate projection before render and restored to active state when that candidate fails.
+    hover_signal: Signal<Option<SemanticKey>>,
+    focus_signal: Signal<Option<SemanticKey>>,
+    animation_clock_signal: Signal<AnimationClock>,
     window_maximized: bool,
     profile: DefaultApplicationProfile,
     view_state: ViewStateStore,
@@ -257,6 +276,21 @@ struct PendingFrame<A> {
     restore_focus_pending: bool,
 }
 
+/// Guest-local pointer lookup over one validated immutable tree.
+///
+/// The transport ACK window owns this snapshot, so `UiTree::clone` only increments the shared
+/// root allocation and keeps node identity valid until that window evicts the sequence.
+#[derive(Clone)]
+struct ApplicationTreeSnapshot(UiTree);
+
+impl RetainedTreeSnapshot for ApplicationTreeSnapshot {
+    fn node_identity(&self, key: &SemanticKey) -> Option<usize> {
+        self.0
+            .shared_node_for_key(key)
+            .map(|node| Rc::as_ptr(&node) as usize)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TextInputChannel {
     key: SemanticKey,
@@ -278,6 +312,9 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             controller,
             config,
             viewport_signal: Signal::new(viewport),
+            hover_signal: Signal::new(None),
+            focus_signal: Signal::new(None),
+            animation_clock_signal: Signal::new(AnimationClock::default()),
             viewport,
             window_maximized: false,
             profile: DefaultApplicationProfile::new(),
@@ -327,12 +364,14 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             return false;
         }
         self.animation_clock = AnimationClock { timestamp_ms };
+        self.animation_clock_signal.set(self.animation_clock);
         let requested = self.animation_schedule().active;
         let controller_changed = self.controller.on_animation_tick(timestamp_ms);
+        let graph_changed = self.frames.runtime().has_dirty();
         if requested || controller_changed {
             self.invalidate_frame();
         }
-        requested || controller_changed
+        requested || controller_changed || graph_changed
     }
 
     /// 当前候选（优先）或 active 帧的动画调度请求。
@@ -401,7 +440,8 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 self.view_state.clear_current_focus();
             }
         }
-        self.invalidate_frame();
+        self.sync_projection_signals(&self.view_state);
+        self.invalidate_frame_unless_dirty();
     }
 
     /// 使当前投影失效，下一次 `ensure_frame` 重建候选帧。
@@ -486,7 +526,12 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let mut inherited_dirty = self
             .pending_frame
             .take()
-            .map(|pending| pending.dirty)
+            .map(|pending| {
+                // A superseded candidate never reached present, so its profile cache and paint
+                // projection must not leak into the next candidate.
+                self.profile.discard_candidate();
+                pending.dirty
+            })
             .unwrap_or_default();
         self.frames.runtime().begin_frame();
         inherited_dirty.extend(self.frames.runtime().take_dirty());
@@ -544,7 +589,25 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let mut staged: Option<(ResolvedFrame<A>, Controls)> = None;
         for _ in 0..MAX_FRAME_FIXPOINT_ITERATIONS {
             let ctx = self.candidate_context(&candidate_state);
-            let provisional = match self.prepare_projection(&ctx, None, &dirty, memo_enabled) {
+            // A signal-only frame with no dynamically anchored controller actions can re-enter
+            // retained roots directly from the active shared tree. Any unsupported local case
+            // (no retained coordinate, actions/animation appeared, structural host invalidation)
+            // returns `None` and uses the established root projection transaction below.
+            let retained = if memo_enabled && anchors.is_empty() {
+                match self.frames.prepare_retained_dirty(dirty.clone()) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.retain_previous_frame(dirty, error);
+                        return false;
+                    }
+                }
+            } else {
+                None
+            };
+            let provisional = match retained
+                .map(Ok)
+                .unwrap_or_else(|| self.prepare_projection(&ctx, None, &dirty, memo_enabled))
+            {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     self.retain_previous_frame(dirty, error);
@@ -568,15 +631,18 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             } else {
                 let present_keys: BTreeSet<SemanticKey> =
                     provisional.tree().keys().iter().cloned().collect();
-                let prepared =
-                    match self.prepare_projection(&ctx, Some((&anchors, &present_keys)), &dirty, memo_enabled)
-                    {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            self.retain_previous_frame(dirty, error);
-                            return false;
-                        }
-                    };
+                let prepared = match self.prepare_projection(
+                    &ctx,
+                    Some((&anchors, &present_keys)),
+                    &dirty,
+                    memo_enabled,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.retain_previous_frame(dirty, error);
+                        return false;
+                    }
+                };
                 self.profile
                     .reconcile_tree(prepared.tree(), &mut candidate_state);
                 self.profile
@@ -588,13 +654,17 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             // 走 Dirty 布局缓存路径（resolve 而非 resolve_candidate）：纯视觉变化（hover
             // 高亮等）不改变子树指纹，直接命中缓存零重测；只有尺寸/文本/结构变化才重算
             // 对应子树。滚动输入使用真实状态，滚动偏移进入布局。
-            let frame = match self.profile.resolve(
+            let dirty_coordinates =
+                (!self.projection_invalidated && !dirty.is_empty()).then_some(&dirty);
+            let frame = match self.profile.resolve_with_dirty(
                 prepared.tree(),
                 self.viewport,
                 self.resources.text_measurer(),
                 &scroll_inputs,
                 &candidate_state,
                 self.config.focus_appearance,
+                dirty_coordinates,
+                DirtyFlags::ALL,
             ) {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -667,6 +737,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             *clickable_keys = controls.clickable;
             *pending_restore = restore_focus_pending;
         });
+        self.profile.commit_candidate();
         self.reconcile_text_input_channel();
 
         for lifecycle in self.frames.take_component_lifecycle_events() {
@@ -695,7 +766,9 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             return;
         };
         self.frames.abort_component_transaction();
+        self.profile.discard_candidate();
         self.frames.runtime().restore_dirty(pending.dirty);
+        self.sync_projection_signals(&self.view_state);
         self.projection_invalidated = true;
         session_trace!("session_frame_rejected result=retained_active");
     }
@@ -723,6 +796,13 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .expect("session frame must be ensured")
     }
 
+    /// Damage emitted for the frame returned by [`Self::frame`]. Targets that retain a backing
+    /// layer or send frames across a process boundary can consume this directly; targets without
+    /// a retained target may conservatively render the complete frame.
+    pub fn frame_damage(&self) -> &FrameDamage {
+        self.profile.frame_damage()
+    }
+
     /// 派发一个归一化指针事件；返回消费的动作数。
     pub fn handle_pointer(&mut self, event: PointerEvent) -> u32 {
         self.ensure_frame();
@@ -730,18 +810,21 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             return 0;
         };
         let pressed_before = self.view_state.pressed_mouse_key().cloned();
+        let hover_before = self.view_state.hover_key().cloned();
+        let focus_before = self.view_state.current_focus_key().cloned();
         let actions = self
             .frames
             .active()
             .expect("accepted token requires an active frame")
             .input_plan()
             .dispatch(&mut self.view_state, &InputEvent::Pointer(event));
-        let projected_pointer_state_changed =
-            pressed_before != self.view_state.pressed_mouse_key().cloned();
+        let projected_pointer_state_changed = pressed_before
+            != self.view_state.pressed_mouse_key().cloned()
+            || hover_before != self.view_state.hover_key().cloned()
+            || focus_before != self.view_state.current_focus_key().cloned();
+        self.sync_projection_signals(&self.view_state);
         let framed_action_changed = self.handle_framed_actions(token, &actions);
-        if projected_pointer_state_changed {
-            self.invalidate_frame();
-        } else if framed_action_changed {
+        if projected_pointer_state_changed || framed_action_changed {
             self.invalidate_frame_unless_dirty();
         }
         let changed = projected_pointer_state_changed || framed_action_changed;
@@ -792,6 +875,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
+        let focus_before = self.view_state.current_focus_key().cloned();
         let actions = self
             .frames
             .active()
@@ -799,7 +883,9 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .input_plan()
             .dispatch(&mut self.view_state, &InputEvent::Keyboard(intent));
         let changed = self.handle_framed_actions(token, &actions);
-        if changed {
+        let focus_changed = focus_before != self.view_state.current_focus_key().cloned();
+        self.sync_projection_signals(&self.view_state);
+        if changed || focus_changed {
             self.invalidate_frame_unless_dirty();
         }
         1
@@ -1037,10 +1123,14 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         active.input_plan().hit_test_interactive(point)
     }
 
-    fn candidate_context(&self, state: &ViewStateStore) -> FrameContext {
+    fn candidate_context(&mut self, state: &ViewStateStore) -> FrameContext {
+        self.sync_projection_signals(state);
         FrameContext {
             viewport: self.viewport,
             viewport_signal: self.viewport_signal.clone(),
+            hover_signal: self.hover_signal.clone(),
+            focus_signal: self.focus_signal.clone(),
+            animation_clock_signal: self.animation_clock_signal.clone(),
             window_maximized: self.window_maximized,
             hover_key: state.hover_key().cloned(),
             pressed_key: state.pressed_mouse_key().cloned(),
@@ -1053,6 +1143,14 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         }
     }
 
+    /// Mirrors the current transaction's focus/hover projection into the stable host graph.
+    /// The signals are restored from `view_state` on candidate rejection, so a failed candidate
+    /// cannot leave a watcher observing an unpresented coordinate.
+    fn sync_projection_signals(&self, state: &ViewStateStore) {
+        self.hover_signal.set(state.hover_key().cloned());
+        self.focus_signal.set(state.current_focus_key().cloned());
+    }
+
     fn prepare_projection(
         &mut self,
         ctx: &FrameContext,
@@ -1060,7 +1158,9 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         dirty: &std::collections::BTreeSet<SemanticKey>,
         memo_enabled: bool,
     ) -> Result<PreparedFrame<A>, String> {
-        let mut build = self.frames.begin_build_for_frame(dirty.clone(), memo_enabled);
+        let mut build = self
+            .frames
+            .begin_build_for_frame(dirty.clone(), memo_enabled);
         build.set_animation_clock(self.animation_clock);
         let mut output = self
             .controller
@@ -1236,6 +1336,19 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
 
     fn publish(&mut self) -> Result<AppPublication, SessionError> {
         self.ensure_frame();
+        let spine = self
+            .pending_frame
+            .as_ref()
+            .map(|pending| pending.dirty.iter().cloned().collect())
+            .unwrap_or_default();
+        let retained_tree = self
+            .pending_frame
+            .as_ref()
+            .map(|pending| pending.resolved.tree())
+            .or_else(|| self.frames.active().map(|active| active.tree()))
+            .map(|tree| {
+                Rc::new(ApplicationTreeSnapshot(tree.clone())) as Rc<dyn RetainedTreeSnapshot>
+            });
         let frame = self
             .pending_frame
             .as_ref()
@@ -1272,6 +1385,9 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
         Ok(AppPublication {
             token,
             frame,
+            damage: self.profile.frame_damage().clone(),
+            spine,
+            retained_tree,
             status: AppStatus {
                 frame_token: Some(token),
                 cursor,
@@ -1412,6 +1528,8 @@ fn action_kind(action: &KernelInteraction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
     use tela_contract::{
         IconProvider, IconRequest, IconResolveError, IconVisual, IdentityConcern, InteractConcern,
@@ -1465,10 +1583,18 @@ mod tests {
         Click(u32),
     }
 
+    type HostProjectionSignals = (
+        Signal<Viewport>,
+        Signal<Option<SemanticKey>>,
+        Signal<Option<SemanticKey>>,
+        Signal<AnimationClock>,
+    );
+
     /// 最小可交互夹具：可滚动列表 + 可点击行 + 可开关模态。
     struct FixtureController {
         clicks: Vec<u32>,
         modal_open: bool,
+        host_signals: Option<HostProjectionSignals>,
     }
 
     fn keyed(mut node: UiNode, key: &str) -> UiNode {
@@ -1541,8 +1667,14 @@ mod tests {
         fn render(
             &mut self,
             _build: &mut ViewBuild<FixtureAction>,
-            _ctx: &FrameContext,
+            ctx: &FrameContext,
         ) -> ViewResult<ViewOutput<FixtureAction>> {
+            self.host_signals = Some((
+                ctx.viewport_signal.clone(),
+                ctx.hover_signal.clone(),
+                ctx.focus_signal.clone(),
+                ctx.animation_clock_signal.clone(),
+            ));
             let rows: Vec<UiNode> = (0..10)
                 .map(|index| fixed_box(&format!("row.{index}"), 180.0, 20.0, true))
                 .collect();
@@ -1576,6 +1708,7 @@ mod tests {
             FixtureController {
                 clicks: Vec::new(),
                 modal_open: false,
+                host_signals: None,
             },
             ApplicationConfig::default(),
         )
@@ -1755,6 +1888,44 @@ mod tests {
         )));
         let publication = application.publish().expect("publication");
         assert_eq!(publication.status.cursor, CursorKind::Pointer);
+    }
+
+    #[test]
+    fn host_projection_values_are_stable_signal_sources() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        let (viewport, hover, focus, clock) = application
+            .controller()
+            .host_signals
+            .as_ref()
+            .expect("render captures host graph sources")
+            .clone();
+        assert_eq!(
+            viewport.get(),
+            ApplicationConfig::default().initial_viewport
+        );
+        assert_eq!(hover.get(), None);
+        assert_eq!(focus.get(), None);
+        assert_eq!(clock.get(), AnimationClock::default());
+
+        assert!(application.set_viewport(800.0, 600.0, 1.0));
+        assert_eq!(
+            viewport.get(),
+            Viewport {
+                width: 800.0,
+                height: 600.0
+            }
+        );
+        application.set_current_focus_key(Some(SemanticKey("fixture.button".to_owned())));
+        assert_eq!(focus.get(), Some(SemanticKey("fixture.button".to_owned())));
+        application.handle_pointer(PointerEvent::mouse_move(point_for_key(
+            &application,
+            "fixture.button",
+        )));
+        assert_eq!(hover.get(), Some(SemanticKey("fixture.button".to_owned())));
+
+        assert!(!application.on_animation_tick(42));
+        assert_eq!(clock.get(), AnimationClock { timestamp_ms: 42 });
     }
 
     #[test]

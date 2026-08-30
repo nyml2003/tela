@@ -11,8 +11,9 @@ mod error;
 mod event;
 mod frame;
 mod publication;
+mod transport;
 
-use tela_contract::UiFrame;
+use tela_contract::{DirtyFlags, FrameDamage, UiFrame};
 
 pub use error::FrameCodecError;
 pub use event::{decode_event, decode_status, encode_event, encode_status};
@@ -21,7 +22,11 @@ pub use publication::{decode_publication, encode_publication};
 pub use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent,
     AppPointerKind, AppPointerPhase, AppPublication, AppStatus, ApplicationSession, CursorKind,
-    SessionError,
+    RetainedTreeSnapshot, SessionError,
+};
+pub use transport::{
+    AppliedFrameTransport, FrameTransportPacket, FrameTransportReceiver, FrameTransportSender,
+    TransportPublication, decode_transport_publication, encode_transport_publication,
 };
 
 /// Guest call completed successfully.
@@ -88,6 +93,9 @@ impl IntoPublicationResult for Result<(&UiFrame, AppStatus), String> {
             Ok(AppPublication {
                 token,
                 frame: frame.clone(),
+                damage: FrameDamage::full(frame.viewport, DirtyFlags::ALL),
+                spine: Vec::new(),
+                retained_tree: None,
                 status,
                 effects: Vec::new(),
             })
@@ -140,6 +148,14 @@ macro_rules! export_guest {
             static __TELA_PUBLICATION_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
                 ::std::cell::RefCell::new(::std::vec::Vec::new())
             };
+            static __TELA_TRANSPORT_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
+                ::std::cell::RefCell::new(::std::vec::Vec::new())
+            };
+            static __TELA_TRANSPORT: ::std::cell::RefCell<$crate::FrameTransportSender> =
+                ::std::cell::RefCell::new($crate::FrameTransportSender::default());
+            static __TELA_TRANSPORT_SEQUENCE: ::std::cell::Cell<u64> = const {
+                ::std::cell::Cell::new(0)
+            };
             static __TELA_ERROR_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
                 ::std::cell::RefCell::new(::std::vec::Vec::new())
             };
@@ -162,6 +178,9 @@ macro_rules! export_guest {
         pub extern "C" fn tela_app_init() -> u32 {
             $reset();
             __TELA_PUBLICATION_BYTES.with(|slot| slot.borrow_mut().clear());
+            __TELA_TRANSPORT_BYTES.with(|slot| slot.borrow_mut().clear());
+            __TELA_TRANSPORT.with(|slot| *slot.borrow_mut() = $crate::FrameTransportSender::default());
+            __TELA_TRANSPORT_SEQUENCE.with(|slot| slot.set(0));
             __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
             __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
             __TELA_PRESENTED_TOKEN.with(|slot| slot.set(0));
@@ -242,19 +261,29 @@ macro_rules! export_guest {
 
         #[allow(unsafe_code)]
         #[unsafe(no_mangle)]
+        pub extern "C" fn tela_app_transport_ptr() -> *const u8 {
+            __TELA_TRANSPORT_BYTES.with(|publication| publication.borrow().as_ptr())
+        }
+
+        #[allow(unsafe_code)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn tela_app_transport_len() -> u32 {
+            __TELA_TRANSPORT_BYTES.with(|publication| publication.borrow().len() as u32)
+        }
+
+        #[allow(unsafe_code)]
+        #[unsafe(no_mangle)]
         pub extern "C" fn tela_app_presented(token_low: u32, token_high: u32) -> u32 {
             let token = u64::from(token_low) | (u64::from(token_high) << 32);
             if token == 0 || __TELA_PUBLISHED_TOKEN.with(|slot| slot.get()) != token {
                 __tela_set_error("presented token is not the latest publication".to_owned());
                 return 0;
             }
-            __TELA_PRESENTED_TOKEN.with(|slot| slot.set(token));
-            __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
             let mut outcome_bits = 0u32;
             $(
-                let token = $crate::AppFrameToken::new(token)
+                let frame_token = $crate::AppFrameToken::new(token)
                     .expect("presented token is validated non-zero");
-                match $with_app(|app| $presented(app, token)) {
+                match $with_app(|app| $presented(app, frame_token)) {
                     ::std::result::Result::Ok(outcome) => {
                         if outcome.handled {
                             outcome_bits |= $crate::OUTCOME_HANDLED;
@@ -269,6 +298,14 @@ macro_rules! export_guest {
                     }
                 }
             )?
+            __TELA_PRESENTED_TOKEN.with(|slot| slot.set(token));
+            __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
+            __TELA_TRANSPORT_SEQUENCE.with(|sequence| {
+                if sequence.get() != 0 {
+                    __TELA_TRANSPORT.with(|sender| sender.borrow_mut().acknowledge(sequence.get()));
+                    sequence.set(0);
+                }
+            });
             __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
             $crate::OUTCOME_OK | outcome_bits
         }
@@ -282,6 +319,12 @@ macro_rules! export_guest {
                 return 0;
             }
             __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
+            __TELA_TRANSPORT_SEQUENCE.with(|slot| {
+                let sequence = slot.replace(0);
+                if sequence != 0 {
+                    __TELA_TRANSPORT.with(|sender| sender.borrow_mut().reject(sequence));
+                }
+            });
             $(
                 let token = $crate::AppFrameToken::new(token)
                     .expect("rejected token is validated non-zero");
@@ -310,11 +353,26 @@ macro_rules! export_guest {
                 let token = publication.token;
                 let bytes = $crate::encode_publication(&publication)
                     .map_err(|error| error.to_string())?;
-                Ok::<_, ::std::string::String>((token, bytes))
+                let transport = __TELA_TRANSPORT.with(|sender| {
+                    sender.borrow_mut().publish(
+                        token,
+                        &publication.frame,
+                        &publication.damage,
+                        &publication.spine,
+                        publication.retained_tree.clone(),
+                    )
+                });
+                let transport_sequence = transport.sequence();
+                let transport_bytes = $crate::encode_transport_publication(
+                    &$crate::TransportPublication { packet: transport, status: publication.status.clone() }
+                ).map_err(|error| error.to_string())?;
+                Ok::<_, ::std::string::String>((token, bytes, transport_sequence, transport_bytes))
             });
             match published {
-                Ok((token, bytes)) => {
+                Ok((token, bytes, transport_sequence, transport_bytes)) => {
                     __TELA_PUBLICATION_BYTES.with(|slot| *slot.borrow_mut() = bytes);
+                    __TELA_TRANSPORT_BYTES.with(|slot| *slot.borrow_mut() = transport_bytes);
+                    __TELA_TRANSPORT_SEQUENCE.with(|slot| slot.set(transport_sequence));
                     __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(token.get()));
                     __TELA_ERROR_BYTES.with(|slot| slot.borrow_mut().clear());
                     true
@@ -334,9 +392,10 @@ macro_rules! export_guest {
 
 /// ABI version expected by the current development bundle runtime.
 ///
-/// Version 6 separates event dispatch from atomic publication and adds presentation
-/// acknowledgement. Hosts reject bundles whose declared version does not exactly match.
-pub const ABI_VERSION: u32 = 6;
+/// Version 8 adds acknowledged-base transport packets with retained tree coordinates for WebView
+/// guests.
+/// Hosts reject bundles whose declared version does not exactly match.
+pub const ABI_VERSION: u32 = 8;
 
 #[cfg(test)]
 mod coercion_tests {
@@ -415,6 +474,9 @@ mod coercion_tests {
         let publication = AppPublication {
             token: AppFrameToken::new(2).unwrap(),
             frame: frame(),
+            damage: FrameDamage::default(),
+            spine: Vec::new(),
+            retained_tree: None,
             status: status(Some(AppFrameToken::new(2).unwrap())),
             effects: vec![AppEffect::Window(tela_contract::WindowCommand::Close)],
         };

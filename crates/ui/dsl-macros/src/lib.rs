@@ -398,8 +398,8 @@ fn generate_component(
             // 字符串字面量（&str）经 Into<String> 转换。
             quote!(__tela_dsl_props.#name = Some((#value).into());)
         });
-    // 无 child 内容的组件元素使用 `Children::empty()` 标记：
-    // `#[memo]` 记忆化以"内容为空"作为可缓存的前置条件。
+    // 无 child 内容的组件元素不创建闭包；有内容的 children 会在首次 render 后
+    // 物化为 retained 槽位快照，而不是跨帧保留此 FnOnce。
     let children_expr = if element.children.is_empty() {
         quote!(#dsl::Children::empty())
     } else {
