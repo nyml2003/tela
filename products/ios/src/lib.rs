@@ -72,7 +72,7 @@ impl IosMobileSession for ProductMobileSession {
         self.app.animation_tick(timestamp_ms)
     }
 
-    fn frame(&mut self) -> (&tela_contract::UiFrame, u64) {
+    fn frame(&mut self) -> (&tela_contract::RenderPlan, u64) {
         self.app.frame()
     }
 

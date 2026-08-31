@@ -5,13 +5,11 @@ use std::{
     rc::Rc,
 };
 use tela_contract::{
-    FocusAppearance, InteractConcern, NodeId, ScrollState, SemanticKey, TextMeasurer, UiBuildError,
-    UiFrame, UiLayoutError, UiNode, Viewport,
+    FocusAppearance, InteractConcern, NodeId, RenderPlan, ScrollState, SemanticKey, TextMeasurer,
+    UiBuildError, UiLayoutError, UiNode, Viewport,
 };
 
-use crate::identity::IdentityAllocator;
 use crate::interact::focus::build_focus_context;
-use crate::resolve::{resolve_tree, resolve_tree_dirty};
 use crate::validate;
 
 fn collect_nodes<'a>(node: &'a UiNode, out: &mut Vec<&'a UiNode>) {
@@ -72,42 +70,18 @@ impl Clone for UiTree {
 }
 
 impl UiTree {
-    /// 构建并校验树（auto-stable-identity 使用一次性分配器，见 `new_with_allocator`）。
+    /// 构建并校验树。
     pub fn new(root: impl Into<UiNode>) -> Result<Self, UiBuildError> {
-        let mut allocator = IdentityAllocator::new();
-        Self::new_with_allocator(root, &mut allocator)
-    }
-
-    /// 构建并校验树：结构 id 分配、key 生成（auto-path / semantic / auto-stable-identity）、
-    /// key 唯一/非零基数/内容形状/策略/槽位校验。
-    ///
-    /// `allocator` 是 `auto-stable-identity` 的唯一跨帧状态（宿主跨帧持有），
-    /// 每帧传入以保持节点稳定身份与延迟回收（见 005-key身份策略 2.2）。
-    pub fn new_with_allocator(
-        root: impl Into<UiNode>,
-        allocator: &mut IdentityAllocator,
-    ) -> Result<Self, UiBuildError> {
-        Self::new_shared_with_allocator(Rc::new(root.into()), allocator)
+        Self::new_shared(Rc::new(root.into()))
     }
 
     /// Builds a tree from an already shared root without changing its identity.
     pub fn new_shared(root: Rc<UiNode>) -> Result<Self, UiBuildError> {
-        let mut allocator = IdentityAllocator::new();
-        Self::new_shared_with_allocator(root, &mut allocator)
-    }
-
-    /// Shared-root variant of [`Self::new_with_allocator`]. This is the retained-rendering
-    /// boundary: a cache hit must enter the Kernel as the same `Rc`, not an equivalent clone.
-    pub fn new_shared_with_allocator(
-        root: Rc<UiNode>,
-        allocator: &mut IdentityAllocator,
-    ) -> Result<Self, UiBuildError> {
-        // 身份分配是跨帧状态；任何后续校验失败都不能让失败树占用下一帧的稳定身份。
-        // `FrameCoordinator` 也会维护候选状态，但这个 Core 入口本身必须保持原子语义。
-        let mut candidate_allocator = allocator.clone();
-        let result = validate::validate(&root, &mut candidate_allocator)?;
+        // This is the retained-rendering boundary: a cache hit must enter the Kernel as the
+        // same `Rc`, not an equivalent clone. Key derivation is pure: it uses only explicit
+        // semantic keys, keyed collection segments, or structural paths.
+        let result = validate::validate(&root)?;
         validate::validate_teleport_references(&root, &result.keys)?;
-        *allocator = candidate_allocator;
         let mut parent_ids = Vec::with_capacity(result.ids.len());
         let mut cursor = 0;
         collect_parent_ids(&root, &result.ids, &mut cursor, &mut parent_ids, None);
@@ -405,7 +379,7 @@ impl UiTree {
             .collect()
     }
 
-    /// 纯操作：同树同 viewport 必同帧，输出 `UiFrame`（命令 + 命中区域）。
+    /// 纯操作：同树同 viewport 必同保留绘制计划（命令 + 命中区域）。
     ///
     /// `text_measurer` 必须是纯函数；`scroll_inputs` 是外部只读输入（M2 滚动生效）；
     /// `resolve` 不持久保存任何状态，不读时钟/随机/输入。
@@ -414,8 +388,8 @@ impl UiTree {
         viewport: Viewport,
         text_measurer: &(impl TextMeasurer + ?Sized),
         scroll_inputs: &HashMap<SemanticKey, ScrollState>,
-    ) -> Result<UiFrame, UiLayoutError> {
-        resolve_tree(self, viewport, text_measurer, scroll_inputs)
+    ) -> Result<RenderPlan, UiLayoutError> {
+        crate::resolve::resolve_tree_plan(self, viewport, text_measurer, scroll_inputs)
     }
 
     /// Dirty 更新：按 key 逐节点缓存布局，仅脏节点重算（见 004-2、010-M5）。
@@ -427,8 +401,16 @@ impl UiTree {
         text_measurer: &(impl TextMeasurer + ?Sized),
         scroll_inputs: &HashMap<SemanticKey, ScrollState>,
         cache: &mut crate::update::LayoutCache,
-    ) -> Result<UiFrame, UiLayoutError> {
-        resolve_tree_dirty(self, viewport, text_measurer, scroll_inputs, cache)
+    ) -> Result<RenderPlan, UiLayoutError> {
+        crate::resolve::resolve_tree_dirty_plan_with_focus(
+            self,
+            viewport,
+            text_measurer,
+            scroll_inputs,
+            cache,
+            None,
+            None,
+        )
     }
 
     /// 纯操作：与 [`Self::resolve`] 相同，但按只读焦点状态投影可见焦点环。
@@ -441,8 +423,8 @@ impl UiTree {
         scroll_inputs: &HashMap<SemanticKey, ScrollState>,
         focus_key: Option<&SemanticKey>,
         focus_appearance: Option<FocusAppearance>,
-    ) -> Result<UiFrame, UiLayoutError> {
-        crate::resolve::resolve_tree_with_focus(
+    ) -> Result<RenderPlan, UiLayoutError> {
+        crate::resolve::resolve_tree_plan_with_focus(
             self,
             viewport,
             text_measurer,
@@ -461,8 +443,8 @@ impl UiTree {
         cache: &mut crate::update::LayoutCache,
         focus_key: Option<&SemanticKey>,
         focus_appearance: Option<FocusAppearance>,
-    ) -> Result<UiFrame, UiLayoutError> {
-        crate::resolve::resolve_tree_dirty_with_focus(
+    ) -> Result<RenderPlan, UiLayoutError> {
+        crate::resolve::resolve_tree_dirty_plan_with_focus(
             self,
             viewport,
             text_measurer,

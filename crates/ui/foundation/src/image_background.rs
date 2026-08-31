@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn resolves_image_before_content_in_shared_area() {
         let tree = UiTree::new(ImageBackground::new("hero", content())).unwrap();
-        let frame = tree
+        let plan = tree
             .resolve(
                 Viewport {
                     width: 200.0,
@@ -128,18 +128,20 @@ mod tests {
                 &HashMap::new(),
             )
             .unwrap();
-        assert_eq!(frame.commands.len(), 2);
+        assert_eq!(plan.command_count(), 2);
+        let mut commands = Vec::new();
+        plan.visit_commands(|command| commands.push(command.clone()));
         assert!(matches!(
-            frame.commands[0].payload,
+            commands[0].payload,
             tela_contract::DrawPayload::Image { ref texture, .. } if texture.0 == "hero"
         ));
         assert!(matches!(
-            frame.commands[1].payload,
+            commands[1].payload,
             tela_contract::DrawPayload::Rect {
                 fill: Some(Color::WHITE),
                 border: None
             }
         ));
-        assert_eq!(frame.commands[0].geometry, frame.commands[1].geometry);
+        assert_eq!(commands[0].geometry, commands[1].geometry);
     }
 }

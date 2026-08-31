@@ -483,7 +483,10 @@
                   pkgs.pkgsCross.mingwW64.stdenv.cc
                 ];
                 text = ''
-                  export RUSTFLAGS="-L native=${win32Pthreads}/lib''${RUSTFLAGS:+ ''${RUSTFLAGS}}"
+                  # Build scripts and proc macros run on the Linux host. Keep the MinGW pthread
+                  # search path on the Windows target only, otherwise Cargo feeds a Windows
+                  # archive to host build-script linking before it reaches the cross target.
+                  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="-L native=${win32Pthreads}/lib''${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:+ ''${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS}}"
                   exec ${win32Cargo}/bin/cargo "$@"
                 '';
               };

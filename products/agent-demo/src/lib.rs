@@ -135,6 +135,12 @@ impl AgentWebSession {
             .ok_or_else(|| js_error("presented publication has no transport sequence"))?;
         self.transport.acknowledge(sequence);
         self.pending = None;
+        let effects = ApplicationSession::take_presented_effects(&mut self.app);
+        if !effects.is_empty() {
+            return Err(js_error(format!(
+                "browser host does not support committed native effects: {effects:?}"
+            )));
+        }
         Ok(result)
     }
 

@@ -1,13 +1,13 @@
 //! 最小 WebGPU 渲染后端。
 //!
-//! 后端仍然只消费 `UiFrame`；未声明能力的 payload 在批次构建前跳过，不回读
-//! `UiTree`，也不改变输入帧。渐变、圆/椭圆、SDF 阴影和圆角图片都在 GPU 路径展开。
+//! 后端只消费有序绘制源；未声明能力的 payload 在批次构建前跳过，不回读 `UiTree`，也不
+//! 改变输入计划。渐变、圆/椭圆、SDF 阴影和圆角图片都在 GPU 路径展开。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tela_contract::{
-    BackendCapabilities, BorderRadius, ClipRect, Color, ColorStop, DrawPayload, Fill, FrameDamage,
-    Gradient, GradientKind, Rect, TextureRef, UiFrame,
+    BackendCapabilities, BorderRadius, ClipRect, Color, ColorStop, DrawCommand, DrawCommandSource,
+    DrawPayload, Fill, FrameDamage, Gradient, GradientKind, Rect, TextureRef,
 };
 
 #[cfg(test)]
@@ -388,9 +388,9 @@ impl WgpuRenderer {
 
     /// Repaints a persistent backing texture. The first frame, a resize, and full damage take
     /// the ordinary full-frame path; otherwise only damage rectangles are cleared and redrawn.
-    pub fn render_retained_frame(
+    pub fn render_retained_frame<S: DrawCommandSource + ?Sized>(
         &mut self,
-        frame: &UiFrame,
+        frame: &S,
         damage: &FrameDamage,
         target: &mut RetainedFrameTarget,
         pixel_w: u32,
@@ -400,7 +400,7 @@ impl WgpuRenderer {
         let pixel_h = pixel_h.max(1);
         if target.ensure_size(&self.device, self.format, pixel_w, pixel_h)
             || !target.initialized
-            || damage_covers_viewport(damage, frame.viewport.width, frame.viewport.height)
+            || damage_covers_viewport(damage, frame.viewport().width, frame.viewport().height)
         {
             self.render_frame(frame, &target.view, pixel_w, pixel_h);
             target.initialized = true;
@@ -445,10 +445,10 @@ impl WgpuRenderer {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    /// 将共享 `UiFrame` 渲染到目标纹理。
-    pub fn render_frame(
+    /// Renders an ordered draw source into a target texture.
+    pub fn render_frame<S: DrawCommandSource + ?Sized>(
         &mut self,
-        frame: &UiFrame,
+        frame: &S,
         target: &wgpu::TextureView,
         pixel_w: u32,
         pixel_h: u32,
@@ -456,24 +456,30 @@ impl WgpuRenderer {
         self.viewport = Rect {
             x: 0.0,
             y: 0.0,
-            w: frame.viewport.width,
-            h: frame.viewport.height,
+            w: frame.viewport().width,
+            h: frame.viewport().height,
         };
         self.pixel_w = pixel_w.max(1);
         self.pixel_h = pixel_h.max(1);
         self.dpi = (self.pixel_w as f32 / self.viewport.w).max(0.01);
 
         let mut stats = RenderStats {
-            commands: frame.commands.len() as u32,
+            commands: frame.command_count() as u32,
             ..RenderStats::default()
         };
         let mut batches = Vec::<Batch>::new();
         let mut used_generated_textures = BTreeSet::new();
-        for (command_index, command) in frame.commands.iter().enumerate() {
+        let mut command_index = 0usize;
+        let mut first_input = None;
+        frame.visit_commands(&mut |command| {
+            if first_input.is_none() {
+                first_input = Some(diagnostics_input(command));
+            }
             let scissor = self.scissor_for(command.clip);
             if scissor.2 == 0 || scissor.3 == 0 {
                 stats.skipped_empty_clip += 1;
-                continue;
+                command_index += 1;
+                return;
             }
             self.append_payload(
                 &mut batches,
@@ -485,7 +491,8 @@ impl WgpuRenderer {
                 command.opacity.clamp(0.0, 1.0),
                 &command.payload,
             );
-        }
+            command_index += 1;
+        });
 
         let stale_textures: Vec<TextureRef> = self
             .text_images
@@ -509,7 +516,7 @@ impl WgpuRenderer {
             .filter(|batch| !batch.is_empty())
             .map(|batch| batch.prepare(&self.device))
             .collect();
-        self.last_diagnostics = diagnostics_for(frame, &stats, batches.first());
+        self.last_diagnostics = diagnostics_for(first_input.as_deref(), &stats, batches.first());
 
         let mut encoder = self
             .device
@@ -562,9 +569,9 @@ impl WgpuRenderer {
     }
 
     /// Applies a local repaint to a target which already contains the preceding frame.
-    fn render_damage(
+    fn render_damage<S: DrawCommandSource + ?Sized>(
         &mut self,
-        frame: &UiFrame,
+        frame: &S,
         damage: &FrameDamage,
         target: &wgpu::TextureView,
         pixel_w: u32,
@@ -573,8 +580,8 @@ impl WgpuRenderer {
         self.viewport = Rect {
             x: 0.0,
             y: 0.0,
-            w: frame.viewport.width,
-            h: frame.viewport.height,
+            w: frame.viewport().width,
+            h: frame.viewport().height,
         };
         self.pixel_w = pixel_w;
         self.pixel_h = pixel_h;
@@ -599,17 +606,21 @@ impl WgpuRenderer {
                 None,
                 &self.viewport,
             );
-            for (command_index, command) in frame.commands.iter().enumerate() {
+            let mut command_index = 0usize;
+            frame.visit_commands(&mut |command| {
                 if !rects_intersect(command.paint_bounds(), *damage_rect) {
-                    continue;
+                    command_index += 1;
+                    return;
                 }
                 let Some(clip) = rect_clip(*damage_rect, command.clip) else {
-                    continue;
+                    command_index += 1;
+                    return;
                 };
                 let scissor = self.scissor_for(Some(clip));
                 if scissor.2 == 0 || scissor.3 == 0 {
                     stats.skipped_empty_clip += 1;
-                    continue;
+                    command_index += 1;
+                    return;
                 }
                 stats.commands += 1;
                 self.append_payload(
@@ -622,7 +633,8 @@ impl WgpuRenderer {
                     command.opacity.clamp(0.0, 1.0),
                     &command.payload,
                 );
-            }
+                command_index += 1;
+            });
         }
         stats.batches = batches.iter().filter(|batch| !batch.is_empty()).count() as u32;
         stats.vertices = batches.iter().map(Batch::vertex_count).sum::<usize>() as u32;
@@ -632,7 +644,13 @@ impl WgpuRenderer {
             .filter(|batch| !batch.is_empty())
             .map(|batch| batch.prepare(&self.device))
             .collect();
-        self.last_diagnostics = diagnostics_for(frame, &stats, batches.first());
+        let mut first_input = None;
+        frame.visit_commands(&mut |command| {
+            if first_input.is_none() {
+                first_input = Some(diagnostics_input(command));
+            }
+        });
+        self.last_diagnostics = diagnostics_for(first_input.as_deref(), &stats, batches.first());
 
         let mut encoder = self
             .device
@@ -1113,21 +1131,23 @@ fn text_quad_geometry(layout: Rect, raster: &text::RasterizedText, dpi: f32) -> 
     }
 }
 
-fn diagnostics_for(frame: &UiFrame, stats: &RenderStats, first_batch: Option<&Batch>) -> String {
-    let input = frame
-        .commands
-        .first()
-        .map(|command| {
-            format!(
-                "input geometry=({:.1},{:.1},{:.1},{:.1}) payload={:?}",
-                command.geometry.x,
-                command.geometry.y,
-                command.geometry.w,
-                command.geometry.h,
-                command.payload
-            )
-        })
-        .unwrap_or_else(|| "input=<empty>".to_owned());
+fn diagnostics_input(command: &DrawCommand) -> String {
+    format!(
+        "input geometry=({:.1},{:.1},{:.1},{:.1}) payload={:?}",
+        command.geometry.x,
+        command.geometry.y,
+        command.geometry.w,
+        command.geometry.h,
+        command.payload
+    )
+}
+
+fn diagnostics_for(
+    input: Option<&str>,
+    stats: &RenderStats,
+    first_batch: Option<&Batch>,
+) -> String {
+    let input = input.unwrap_or("input=<empty>");
     let batch = first_batch
         .filter(|batch| !batch.is_empty())
         .map(Batch::diagnostics)

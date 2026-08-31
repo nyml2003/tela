@@ -2,8 +2,8 @@
 
 use std::cell::RefCell;
 
-use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppStatus, CursorKind};
-use tela_contract::UiResourceSet;
+use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppPublication, AppStatus, CursorKind};
+use tela_contract::{DirtyFlags, FrameDamage, UiResourceSet};
 use tela_icon_resources::MaterialIconFontProvider;
 use tela_mobile_demo::App;
 use tela_text_resources::ControlledTextMeasurer;
@@ -61,23 +61,32 @@ fn apply_event(app: &mut App, event: AppEvent) -> bool {
     }
 }
 
-fn publish_app(app: &mut App) -> Result<(&tela_contract::UiFrame, AppStatus), String> {
+fn publish_app(app: &mut App) -> Result<AppPublication, String> {
     app.ensure_frame();
-    Ok((
-        app.frame(),
-        AppStatus {
-            frame_token: AppFrameToken::new(app.active_frame_token()),
-            cursor: if app.input_focused() {
-                CursorKind::Text
-            } else {
-                CursorKind::Default
-            },
-            input_focused: app.input_focused(),
-            input_value: app.input_value(),
-            animation_active: app.animation_schedule().active,
-            next_deadline_ms: app.animation_schedule().next_deadline_ms,
+    let status = AppStatus {
+        frame_token: AppFrameToken::new(app.active_frame_token()),
+        cursor: if app.input_focused() {
+            CursorKind::Text
+        } else {
+            CursorKind::Default
         },
-    ))
+        input_focused: app.input_focused(),
+        input_value: app.input_value(),
+        animation_active: app.animation_schedule().active,
+        next_deadline_ms: app.animation_schedule().next_deadline_ms,
+    };
+    let token = status
+        .frame_token
+        .ok_or_else(|| "mobile guest has no active frame token".to_owned())?;
+    let frame = app.frame().clone();
+    Ok(AppPublication {
+        token,
+        damage: FrameDamage::full(frame.viewport, DirtyFlags::ALL),
+        frame,
+        spine: Vec::new(),
+        retained_tree: None,
+        status,
+    })
 }
 
 #[cfg(test)]

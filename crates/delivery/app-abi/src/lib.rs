@@ -13,12 +13,12 @@ mod frame;
 mod publication;
 mod transport;
 
-use tela_contract::{DirtyFlags, FrameDamage, UiFrame};
-
 pub use error::FrameCodecError;
 pub use event::{decode_event, decode_status, encode_event, encode_status};
-pub use frame::{WireFrame, decode_frame, encode_frame};
-pub use publication::{decode_publication, encode_publication};
+pub use frame::{WireFrame, decode_render_plan, encode_frame};
+pub use publication::{
+    decode_presented_effects, decode_publication, encode_presented_effects, encode_publication,
+};
 pub use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent,
     AppPointerKind, AppPointerPhase, AppPublication, AppStatus, ApplicationSession, CursorKind,
@@ -69,38 +69,15 @@ impl IntoDispatchOutcome for AppDispatchOutcome {
     }
 }
 
-/// 把 `publish` 回调的返回值胁迫为完整发布。
-///
-/// 旧形状 `Result<(&UiFrame, AppStatus), String>` 保持 effects 为空的旧行为；返回
-/// [`AppPublication`] 的应用让事务性 effects 随发布过线（线格式本就携带）。
-pub trait IntoPublicationResult {
-    /// 转换为完整发布。
-    fn into_publication_result(self) -> Result<AppPublication, String>;
-}
-
-impl IntoPublicationResult for Result<AppPublication, String> {
-    fn into_publication_result(self) -> Result<AppPublication, String> {
-        self
-    }
-}
-
-impl IntoPublicationResult for Result<(&UiFrame, AppStatus), String> {
-    fn into_publication_result(self) -> Result<AppPublication, String> {
-        self.and_then(|(frame, status)| {
-            let token = status
-                .frame_token
-                .ok_or_else(|| "publication status must contain a frame token".to_owned())?;
-            Ok(AppPublication {
-                token,
-                frame: frame.clone(),
-                damage: FrameDamage::full(frame.viewport, DirtyFlags::ALL),
-                spine: Vec::new(),
-                retained_tree: None,
-                status,
-                effects: Vec::new(),
-            })
-        })
-    }
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tela_guest_effect_batch {
+    ($with_app:path; $take_presented_effects:path) => {
+        $with_app(|app| $take_presented_effects(app))
+    };
+    ($with_app:path) => {
+        ::std::vec::Vec::<$crate::AppEffect>::new()
+    };
 }
 
 /// Exports the stable Tela guest ABI for one concrete application type.
@@ -121,16 +98,19 @@ impl IntoPublicationResult for Result<(&UiFrame, AppStatus), String> {
 /// ```
 ///
 /// `apply` receives `(&mut App, AppEvent)` and returns either `bool`（旧语义）or
-/// [`AppDispatchOutcome`]（完整协议）。`publish` receives `&mut App` and returns either
-/// `Result<(&UiFrame, AppStatus), String>`（effects 为空）or
-/// `Result<AppPublication, String>`（effects 随发布走）。`with_app` is the application's
-/// synchronous access helper and `reset` clears its concrete application state.
+/// [`AppDispatchOutcome`]（完整协议）。`publish` receives `&mut App` and returns
+/// `Result<AppPublication, String>`，因此 token、damage 与候选 frame/status 属于同一候选
+/// 发布。Effect 只在成功 `presented` 后通过单独的 committed-effects 导出出现。
+/// `with_app` is the application's synchronous access helper and `reset` clears its concrete
+/// application state.
 ///
 /// 可选的 `presented` / `rejected` 尾臂把呈现回执转发回应用：
 /// `presented = fn(&mut App, AppFrameToken) -> Result<AppDispatchOutcome, String>`，
 /// `rejected = fn(&mut App, AppFrameToken)`。会话运行时（如
 /// `tela_app_runtime::Application`）依赖 presented 提交候选帧；缺省时行为与旧宏逐字节
-/// 一致。
+/// 一致。若 `presented` 提交后可能释放 Host effect，再补
+/// `effects = fn(&mut App) -> Vec<AppEffect>`；后者必须和 `presented` 一起提供，宏只会在
+/// 该回执成功后调用它并导出结果。
 #[macro_export]
 macro_rules! export_guest {
     {
@@ -138,14 +118,30 @@ macro_rules! export_guest {
         with_app = $with_app:path;
         apply = $apply:path;
         publish = $publish:path;
+        $(rejected = $rejected:path;)?
+        effects = $take_presented_effects:path;
+    } => {
+        compile_error!(
+            "`export_guest!` 的 `effects = ...` 必须与 `presented = ...` 同时提供；Effect 只能由成功的呈现回执释放"
+        );
+    };
+    {
+        reset = $reset:path;
+        with_app = $with_app:path;
+        apply = $apply:path;
+        publish = $publish:path;
         $(presented = $presented:path;)?
         $(rejected = $rejected:path;)?
+        $(effects = $take_presented_effects:path;)?
     } => {
         ::std::thread_local! {
             static __TELA_INPUT_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
                 ::std::cell::RefCell::new(::std::vec::Vec::new())
             };
             static __TELA_PUBLICATION_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
+                ::std::cell::RefCell::new(::std::vec::Vec::new())
+            };
+            static __TELA_PRESENTED_EFFECT_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
                 ::std::cell::RefCell::new(::std::vec::Vec::new())
             };
             static __TELA_TRANSPORT_BYTES: ::std::cell::RefCell<::std::vec::Vec<u8>> = const {
@@ -178,6 +174,7 @@ macro_rules! export_guest {
         pub extern "C" fn tela_app_init() -> u32 {
             $reset();
             __TELA_PUBLICATION_BYTES.with(|slot| slot.borrow_mut().clear());
+            __TELA_PRESENTED_EFFECT_BYTES.with(|slot| slot.borrow_mut().clear());
             __TELA_TRANSPORT_BYTES.with(|slot| slot.borrow_mut().clear());
             __TELA_TRANSPORT.with(|slot| *slot.borrow_mut() = $crate::FrameTransportSender::default());
             __TELA_TRANSPORT_SEQUENCE.with(|slot| slot.set(0));
@@ -259,6 +256,22 @@ macro_rules! export_guest {
             __TELA_PUBLICATION_BYTES.with(|publication| publication.borrow().len() as u32)
         }
 
+        /// Returns the byte pointer for effects released by the most recent successful
+        /// `tela_app_presented` acknowledgement. It is empty before the first acknowledgement.
+        #[allow(unsafe_code)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn tela_app_presented_effects_ptr() -> *const u8 {
+            __TELA_PRESENTED_EFFECT_BYTES.with(|effects| effects.borrow().as_ptr())
+        }
+
+        /// Returns the byte length for effects released by the most recent successful
+        /// `tela_app_presented` acknowledgement.
+        #[allow(unsafe_code)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn tela_app_presented_effects_len() -> u32 {
+            __TELA_PRESENTED_EFFECT_BYTES.with(|effects| effects.borrow().len() as u32)
+        }
+
         #[allow(unsafe_code)]
         #[unsafe(no_mangle)]
         pub extern "C" fn tela_app_transport_ptr() -> *const u8 {
@@ -298,6 +311,17 @@ macro_rules! export_guest {
                     }
                 }
             )?
+            let effects = $crate::__tela_guest_effect_batch!(
+                $with_app $(; $take_presented_effects)?
+            );
+            let effect_bytes = match $crate::encode_presented_effects(&effects) {
+                ::std::result::Result::Ok(bytes) => bytes,
+                ::std::result::Result::Err(error) => {
+                    __tela_set_error(error.to_string());
+                    return 0;
+                }
+            };
+            __TELA_PRESENTED_EFFECT_BYTES.with(|slot| *slot.borrow_mut() = effect_bytes);
             __TELA_PRESENTED_TOKEN.with(|slot| slot.set(token));
             __TELA_PUBLISHED_TOKEN.with(|slot| slot.set(0));
             __TELA_TRANSPORT_SEQUENCE.with(|sequence| {
@@ -348,8 +372,7 @@ macro_rules! export_guest {
 
         fn __tela_publish() -> bool {
             let published = $with_app(|app| {
-                let publication =
-                    $crate::IntoPublicationResult::into_publication_result($publish(app))?;
+                let publication = $publish(app)?;
                 let token = publication.token;
                 let bytes = $crate::encode_publication(&publication)
                     .map_err(|error| error.to_string())?;
@@ -392,26 +415,19 @@ macro_rules! export_guest {
 
 /// ABI version expected by the current development bundle runtime.
 ///
-/// Version 8 adds acknowledged-base transport packets with retained tree coordinates for WebView
-/// guests.
+/// Version 10 removes Effect from an unacknowledged publication. Effects now have a separate
+/// post-present packet that becomes readable only after `tela_app_presented` commits the exact
+/// token. The guest-side effect drain is one-shot; the raw ABI exposes its resulting packet as a
+/// read-only snapshot for the host to consume immediately. Guest publication and in-memory
+/// transport use `RenderPlan`; only the binary wire codec flattens commands explicitly at its
+/// process boundary.
 /// Hosts reject bundles whose declared version does not exactly match.
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 10;
 
 #[cfg(test)]
 mod coercion_tests {
     use super::*;
-
-    fn frame() -> UiFrame {
-        UiFrame {
-            viewport: tela_contract::Viewport {
-                width: 16.0,
-                height: 8.0,
-            },
-            commands: Vec::new(),
-            hit_regions: Vec::new(),
-            scroll_bounds: Vec::new(),
-        }
-    }
+    use tela_contract::{FrameDamage, RenderPlan, UiFrame, Viewport};
 
     fn status(token: Option<AppFrameToken>) -> AppStatus {
         AppStatus {
@@ -448,41 +464,24 @@ mod coercion_tests {
     }
 
     #[test]
-    fn borrowed_frame_publication_keeps_effects_empty() {
-        let frame = frame();
-        let publication = Ok::<_, String>((&frame, status(Some(AppFrameToken::new(1).unwrap()))))
-            .into_publication_result()
-            .expect("publication");
-        assert_eq!(publication.token.get(), 1);
-        assert!(
-            publication.effects.is_empty(),
-            "旧形状必须保持 effects 为空"
-        );
-    }
-
-    #[test]
-    fn borrowed_frame_publication_requires_a_token() {
-        let frame = frame();
-        let error = Ok::<_, String>((&frame, status(None)))
-            .into_publication_result()
-            .unwrap_err();
-        assert!(error.contains("frame token"));
-    }
-
-    #[test]
-    fn owned_publication_passes_through_with_effects() {
+    fn publication_is_the_only_publish_result_shape() {
         let publication = AppPublication {
             token: AppFrameToken::new(2).unwrap(),
-            frame: frame(),
+            frame: RenderPlan::from_flat_frame(UiFrame {
+                viewport: Viewport {
+                    width: 16.0,
+                    height: 8.0,
+                },
+                commands: Vec::new(),
+                hit_regions: Vec::new(),
+                scroll_bounds: Vec::new(),
+            }),
             damage: FrameDamage::default(),
             spine: Vec::new(),
             retained_tree: None,
             status: status(Some(AppFrameToken::new(2).unwrap())),
-            effects: vec![AppEffect::Window(tela_contract::WindowCommand::Close)],
         };
-        let converted = Ok::<_, String>(publication.clone())
-            .into_publication_result()
-            .expect("publication");
-        assert_eq!(converted, publication);
+        assert_eq!(publication.status.frame_token, Some(publication.token));
+        assert_eq!(publication.frame.command_count(), 0);
     }
 }

@@ -1,6 +1,6 @@
 //! tela-core — 渲染器无关的 tela 核心。
 //!
-//! 树构建与校验、更新策略与 diff、key 身份分配、布局（Row/Column/Wrap/Frame/Stack/Overlay）、绘制命令生成、
+//! 树构建与校验、更新策略、key 身份解析、布局（Row/Column/Wrap/Frame/Stack/Overlay）、绘制命令生成、
 //! 命中测试、规约式焦点转移、模态栈、视图状态仓库。
 //!
 //! 基线编码规则（见 [010-落地路线] M0）：
@@ -16,7 +16,6 @@
 #![warn(missing_docs)]
 
 pub mod builder;
-mod identity;
 mod interact;
 mod layout;
 mod profile;
@@ -27,7 +26,6 @@ mod update;
 mod validate;
 
 pub use builder::{LayoutContainer, LogicalContainer, Primitive};
-pub use identity::IdentityAllocator;
 pub use interact::{
     KernelInputPlan, ensure_modal_focus, handle_kernel_input, restore_focus, save_focus,
 };

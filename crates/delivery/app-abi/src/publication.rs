@@ -4,11 +4,14 @@ use serde::{Deserialize, Serialize};
 use tela_app_session::{AppEffect, AppFrameToken, AppPublication};
 use tela_contract::{DirtyFlags, FrameDamage, Rect, SemanticKey, WindowCommand};
 
-use crate::{FrameCodecError, decode_frame, decode_status, encode_frame, encode_status};
+use crate::{FrameCodecError, decode_render_plan, decode_status, encode_frame, encode_status};
 
 const PUBLICATION_MAGIC: [u8; 4] = *b"TLPB";
-const PUBLICATION_VERSION: u16 = 3;
+const PUBLICATION_VERSION: u16 = 4;
 const HEADER_LEN: usize = PUBLICATION_MAGIC.len() + std::mem::size_of::<u16>();
+const EFFECTS_MAGIC: [u8; 4] = *b"TLEF";
+const EFFECTS_VERSION: u16 = 1;
+const EFFECTS_HEADER_LEN: usize = EFFECTS_MAGIC.len() + std::mem::size_of::<u16>();
 
 #[derive(Serialize, Deserialize)]
 struct WirePublication {
@@ -17,7 +20,6 @@ struct WirePublication {
     damage: WireDamage,
     spine: Vec<String>,
     status: Vec<u8>,
-    effects: Vec<WireEffect>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -46,7 +48,7 @@ enum WireWindowCommand {
     Close,
 }
 
-/// Encodes one frame/status/effect publication atomically.
+/// Encodes one candidate frame/status publication atomically.
 pub fn encode_publication(publication: &AppPublication) -> Result<Vec<u8>, FrameCodecError> {
     if publication.status.frame_token != Some(publication.token) {
         return Err(FrameCodecError::Encode(
@@ -59,7 +61,6 @@ pub fn encode_publication(publication: &AppPublication) -> Result<Vec<u8>, Frame
         damage: WireDamage::from(&publication.damage),
         spine: publication.spine.iter().map(|key| key.0.clone()).collect(),
         status: encode_status(&publication.status)?,
-        effects: publication.effects.iter().map(WireEffect::from).collect(),
     };
     let payload =
         postcard::to_allocvec(&wire).map_err(|error| FrameCodecError::Encode(error.to_string()))?;
@@ -70,7 +71,7 @@ pub fn encode_publication(publication: &AppPublication) -> Result<Vec<u8>, Frame
     Ok(bytes)
 }
 
-/// Decodes and validates one atomic application publication.
+/// Decodes and validates one atomic candidate publication.
 pub fn decode_publication(bytes: &[u8]) -> Result<AppPublication, FrameCodecError> {
     if bytes.len() < HEADER_LEN || bytes[..PUBLICATION_MAGIC.len()] != PUBLICATION_MAGIC {
         return Err(FrameCodecError::InvalidMagic);
@@ -95,13 +96,45 @@ pub fn decode_publication(bytes: &[u8]) -> Result<AppPublication, FrameCodecErro
     }
     Ok(AppPublication {
         token,
-        frame: decode_frame(&wire.frame)?,
+        frame: decode_render_plan(&wire.frame)?,
         damage: FrameDamage::try_from(wire.damage)?,
         spine: wire.spine.into_iter().map(SemanticKey).collect(),
         retained_tree: None,
         status,
-        effects: wire.effects.into_iter().map(AppEffect::from).collect(),
     })
+}
+
+/// Encodes effects that were released by a successful `presented(token)` acknowledgement.
+///
+/// This is intentionally a separate packet from [`encode_publication`]: an unacknowledged
+/// candidate must not expose executable effects to its host.
+pub fn encode_presented_effects(effects: &[AppEffect]) -> Result<Vec<u8>, FrameCodecError> {
+    let wire: Vec<WireEffect> = effects.iter().map(WireEffect::from).collect();
+    let payload =
+        postcard::to_allocvec(&wire).map_err(|error| FrameCodecError::Encode(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(EFFECTS_HEADER_LEN + payload.len());
+    bytes.extend_from_slice(&EFFECTS_MAGIC);
+    bytes.extend_from_slice(&EFFECTS_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    Ok(bytes)
+}
+
+/// Decodes effects released by a successful `presented(token)` acknowledgement.
+pub fn decode_presented_effects(bytes: &[u8]) -> Result<Vec<AppEffect>, FrameCodecError> {
+    if bytes.len() < EFFECTS_HEADER_LEN || bytes[..EFFECTS_MAGIC.len()] != EFFECTS_MAGIC {
+        return Err(FrameCodecError::InvalidMagic);
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if version != EFFECTS_VERSION {
+        return Err(FrameCodecError::UnsupportedVersion(version));
+    }
+    let (wire, remaining): (Vec<WireEffect>, &[u8]) =
+        postcard::take_from_bytes(&bytes[EFFECTS_HEADER_LEN..])
+            .map_err(|error| FrameCodecError::Decode(error.to_string()))?;
+    if !remaining.is_empty() {
+        return Err(FrameCodecError::TrailingBytes);
+    }
+    Ok(wire.into_iter().map(AppEffect::from).collect())
 }
 
 impl From<&FrameDamage> for WireDamage {
@@ -204,17 +237,19 @@ impl From<WireWindowCommand> for WindowCommand {
 mod tests {
     use tela_app_session::{AppEffect, AppFrameToken, AppPublication, AppStatus};
     use tela_contract::{
-        DirtyFlags, FrameDamage, Rect, SemanticKey, UiFrame, Viewport, WindowCommand,
+        DirtyFlags, FrameDamage, Rect, RenderPlan, SemanticKey, UiFrame, Viewport, WindowCommand,
     };
 
-    use super::{decode_publication, encode_publication};
+    use super::{
+        decode_presented_effects, decode_publication, encode_presented_effects, encode_publication,
+    };
 
     #[test]
-    fn atomic_publication_round_trips_frame_status_and_effects() {
+    fn candidate_publication_round_trips_frame_and_status() {
         let token = AppFrameToken::new(7).expect("non-zero token");
         let publication = AppPublication {
             token,
-            frame: UiFrame {
+            frame: RenderPlan::from_flat_frame(UiFrame {
                 viewport: Viewport {
                     width: 640.0,
                     height: 480.0,
@@ -222,7 +257,7 @@ mod tests {
                 commands: Vec::new(),
                 hit_regions: Vec::new(),
                 scroll_bounds: Vec::new(),
-            },
+            }),
             damage: FrameDamage {
                 flags: DirtyFlags::VISUAL,
                 rects: vec![Rect {
@@ -238,7 +273,6 @@ mod tests {
                 frame_token: Some(token),
                 ..AppStatus::default()
             },
-            effects: vec![AppEffect::Window(WindowCommand::Close)],
         };
 
         let decoded = decode_publication(
@@ -249,12 +283,24 @@ mod tests {
     }
 
     #[test]
+    fn presented_effects_round_trip_separately_from_a_candidate_publication() {
+        let effects = vec![AppEffect::Window(WindowCommand::Close)];
+        assert_eq!(
+            decode_presented_effects(
+                &encode_presented_effects(&effects).expect("encode presented effects"),
+            )
+            .expect("decode presented effects"),
+            effects,
+        );
+    }
+
+    #[test]
     fn publication_rejects_mismatched_status_token() {
         let token = AppFrameToken::new(7).expect("non-zero token");
         let other = AppFrameToken::new(8).expect("non-zero token");
         let publication = AppPublication {
             token,
-            frame: UiFrame {
+            frame: RenderPlan::from_flat_frame(UiFrame {
                 viewport: Viewport {
                     width: 1.0,
                     height: 1.0,
@@ -262,7 +308,7 @@ mod tests {
                 commands: Vec::new(),
                 hit_regions: Vec::new(),
                 scroll_bounds: Vec::new(),
-            },
+            }),
             damage: tela_contract::FrameDamage::default(),
             spine: Vec::new(),
             retained_tree: None,
@@ -270,7 +316,6 @@ mod tests {
                 frame_token: Some(other),
                 ..AppStatus::default()
             },
-            effects: Vec::new(),
         };
 
         assert!(encode_publication(&publication).is_err());

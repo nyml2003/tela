@@ -77,6 +77,7 @@ impl Default for SegmentedStyle {
 }
 
 /// 分段项的受控显示与动作定义。
+#[derive(Clone)]
 pub struct SegmentedItem {
     label: String,
     action_key: SemanticKey,
@@ -117,6 +118,7 @@ impl SegmentedItem {
 }
 
 /// 一组受控的单选分段。
+#[derive(Clone)]
 pub struct Segmented {
     items: Vec<SegmentedItem>,
     size: SegmentedSize,
@@ -268,7 +270,7 @@ mod tests {
     use tela_contract::{Fill, Size};
 
     #[test]
-    fn selected_item_keeps_a_distinct_surface_and_stable_action_target() {
+    fn selected_item_keeps_a_distinct_surface_and_stable_interaction_identity() {
         let node = Segmented::new()
             .width(200.0)
             .item(SegmentedItem::new("列表", "view.list"))

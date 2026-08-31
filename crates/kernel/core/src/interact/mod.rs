@@ -8,9 +8,9 @@
 pub(crate) mod focus;
 
 use tela_contract::{
-    FocusDirection, GestureAxis, GestureEvent, GestureKind, GesturePhase, HitRole, InputEvent,
-    KernelInteraction, KeyboardIntent, KeyboardIntentEvent, NodeId, NodeKind, Point, PointerEvent,
-    PointerId, PointerKind, PointerPhase, SemanticKey, TextInputEvent, UiFrame, UiNode,
+    FocusDirection, FrameInputSource, GestureAxis, GestureEvent, GestureKind, GesturePhase,
+    HitRole, InputEvent, KernelInteraction, KeyboardIntent, KeyboardIntentEvent, NodeId, NodeKind,
+    Point, PointerEvent, PointerId, PointerKind, PointerPhase, SemanticKey, TextInputEvent, UiNode,
 };
 
 use crate::state::{ActiveGesture, FocusSlot, GestureCandidate, PointerSession, ViewStateStore};
@@ -34,7 +34,7 @@ pub struct KernelInputPlan {
 
 impl KernelInputPlan {
     /// Builds the reusable interaction plan for a resolved tree/frame pair.
-    pub fn new(tree: &UiTree, frame: &UiFrame) -> Self {
+    pub fn new<F: FrameInputSource + ?Sized>(tree: &UiTree, frame: &F) -> Self {
         let (nodes, ids, keys) = tree.node_table();
         let focus = build_focus_context(&nodes, &ids, &keys);
         Self {
@@ -42,7 +42,7 @@ impl KernelInputPlan {
             ids,
             keys,
             focus,
-            hit_regions: frame.hit_regions.clone(),
+            hit_regions: frame.hit_regions().to_vec(),
         }
     }
 
@@ -85,9 +85,9 @@ impl KernelInputPlan {
 /// 交互会话：处理一个输入事件，产出类型化动作（见 008-4）。
 ///
 /// `frame` 为本帧 `resolve` 输出（命中区域）；`state` 为跨帧视图状态仓库。
-pub fn handle_kernel_input(
+pub fn handle_kernel_input<F: FrameInputSource + ?Sized>(
     tree: &UiTree,
-    frame: &UiFrame,
+    frame: &F,
     state: &mut ViewStateStore,
     event: &InputEvent,
 ) -> Vec<KernelInteraction> {
@@ -99,7 +99,11 @@ pub fn handle_kernel_input(
 /// Hosts use this query before dispatching a native hit-test result. It must use the current
 /// pointer position rather than the previously committed hover state, otherwise a custom title
 /// bar can classify the first pointer entry as non-client and never deliver `WM_MOUSEMOVE`.
-pub(crate) fn hit_test_interactive(tree: &UiTree, frame: &UiFrame, position: Point) -> bool {
+pub(crate) fn hit_test_interactive<F: FrameInputSource + ?Sized>(
+    tree: &UiTree,
+    frame: &F,
+    position: Point,
+) -> bool {
     KernelInputPlan::new(tree, frame).hit_test_interactive(position)
 }
 
@@ -211,6 +215,21 @@ impl<'a> Session<'a> {
             .current_focus_key()
             .and_then(|key| self.plan.keys.iter().position(|k| k == key))
             .map(|idx| self.plan.ids[idx])
+    }
+
+    /// Resolves the presented-tree origin for a semantic shortcut.
+    ///
+    /// A modal owns keyboard priority even before it has projected a new focus target. Outside a
+    /// modal, the current focus establishes the logical bubbling path; the tree root is the
+    /// deterministic fallback for an unfocused window.
+    fn shortcut_origin_id(&self) -> Option<NodeId> {
+        let focused = self.current_focus_id();
+        if let Some(modal) = self.top_modal_node_id() {
+            return focused
+                .filter(|node_id| self.is_in_modal(*node_id, modal))
+                .or(Some(modal));
+        }
+        focused.or_else(|| self.plan.ids.first().copied())
     }
 
     // ---------- 文本输入 ----------
@@ -943,9 +962,12 @@ impl<'a> Session<'a> {
             KeyboardIntent::Activate => self.handle_nav(NavInput::Confirm),
             KeyboardIntent::Cancel => self.handle_nav(NavInput::Cancel),
             KeyboardIntent::Invoke(shortcut_id) => {
-                self.actions.push(KernelInteraction::ShortcutActivated {
-                    shortcut_id: shortcut_id.clone(),
-                })
+                if let Some(origin_node_id) = self.shortcut_origin_id() {
+                    self.actions.push(KernelInteraction::ShortcutActivated {
+                        origin_node_id,
+                        shortcut_id: shortcut_id.clone(),
+                    });
+                }
             }
         }
         std::mem::take(&mut self.actions)

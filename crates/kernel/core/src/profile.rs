@@ -8,9 +8,10 @@ use std::collections::{BTreeSet, HashMap};
 
 use tela_contract::{
     DirtyFlags, FocusAppearance, FrameDamage, InputEvent, KernelInteraction, Point, Rect,
-    ScrollState, SemanticKey, TextMeasurer, UiFrame, UiLayoutError, Viewport,
+    RenderPlan, ScrollState, SemanticKey, TextMeasurer, UiLayoutError, Viewport,
 };
 
+use crate::resolve::RenderPlanCache;
 use crate::{LayoutCache, UiTree, ViewStateStore, ensure_modal_focus, handle_kernel_input};
 
 /// The concrete, built-in Tela kernel combination.
@@ -24,6 +25,11 @@ pub struct DefaultApplicationProfile {
     /// Candidate cache built while a frame is awaiting present. It must never become active on a
     /// failed surface acquisition or renderer preflight.
     candidate_layout_cache: Option<LayoutCache>,
+    /// Local retained draw fragments belonging to the last successfully presented candidate.
+    render_plan_cache: RenderPlanCache,
+    /// Candidate-local draw fragment cache. It follows the same present/reject promotion rule as
+    /// `candidate_layout_cache`, so rejected plans never become an active cache base.
+    candidate_render_plan_cache: Option<RenderPlanCache>,
     /// Shared tree belonging to the last successfully presented frame. It is the identity
     /// baseline for geometry-boundary layout; candidate trees never replace it before present.
     active_tree: Option<UiTree>,
@@ -49,7 +55,41 @@ impl PaintSnapshot {
         tree: &UiTree,
         viewport: Viewport,
         mut node_rects: HashMap<SemanticKey, Rect>,
+        focus_key: Option<&SemanticKey>,
+        focus_appearance: Option<FocusAppearance>,
     ) -> Self {
+        // A focus ring is emitted after the node subtree and its stroke can extend beyond the
+        // layout box. Capture that extent before visual offsets/shadows reshape the ordinary
+        // node paint bound, then union it back into the focused node's coordinate. This lets the
+        // host name the old and new focus keys as explicit damage coordinates without comparing
+        // draw commands.
+        let focus_extent = focus_key.and_then(|key| {
+            let appearance = focus_appearance?;
+            let node = tree.shared_node_for_key(key)?;
+            if !node
+                .interact
+                .as_ref()
+                .is_some_and(|interact| interact.focusable)
+                || appearance.width <= 0.0
+            {
+                return None;
+            }
+            let rect = node_rects.get(key).copied()?;
+            let inset = appearance.inset.max(0.0);
+            if rect.w <= inset * 2.0 || rect.h <= inset * 2.0 {
+                return None;
+            }
+            let outset = (appearance.width * 0.5 - inset).max(0.0);
+            Some((
+                key.clone(),
+                Rect {
+                    x: rect.x - outset,
+                    y: rect.y - outset,
+                    w: rect.w + outset * 2.0,
+                    h: rect.h + outset * 2.0,
+                },
+            ))
+        });
         for (key, rect) in &mut node_rects {
             let Some(node) = tree.shared_node_for_key(key) else {
                 continue;
@@ -84,10 +124,28 @@ impl PaintSnapshot {
                 h: rect.h + pad * 2.0,
             };
         }
+        if let Some((key, focus_rect)) = focus_extent
+            && let Some(rect) = node_rects.get_mut(&key)
+        {
+            *rect = union_rects(*rect, focus_rect);
+        }
         Self {
             viewport,
             node_rects,
         }
+    }
+}
+
+fn union_rects(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = (a.x + a.w).max(b.x + b.w);
+    let y1 = (a.y + a.h).max(b.y + b.h);
+    Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
     }
 }
 
@@ -96,6 +154,8 @@ impl Default for DefaultApplicationProfile {
         Self {
             layout_cache: LayoutCache::new(),
             candidate_layout_cache: None,
+            render_plan_cache: RenderPlanCache::default(),
+            candidate_render_plan_cache: None,
             active_tree: None,
             candidate_tree: None,
             active_paint: None,
@@ -138,7 +198,7 @@ impl DefaultApplicationProfile {
         scroll_inputs: &HashMap<SemanticKey, ScrollState>,
         view_state: &ViewStateStore,
         focus_appearance: Option<FocusAppearance>,
-    ) -> Result<UiFrame, UiLayoutError> {
+    ) -> Result<RenderPlan, UiLayoutError> {
         self.resolve_with_dirty(
             tree,
             viewport,
@@ -168,20 +228,24 @@ impl DefaultApplicationProfile {
         focus_appearance: Option<FocusAppearance>,
         dirty_keys: Option<&BTreeSet<SemanticKey>>,
         dirty_flags: DirtyFlags,
-    ) -> Result<UiFrame, UiLayoutError> {
-        let cache = self
+    ) -> Result<RenderPlan, UiLayoutError> {
+        let layout_cache = self
             .candidate_layout_cache
             .get_or_insert_with(|| self.layout_cache.clone());
-        let resolved = crate::resolve::resolve_tree_dirty_incremental_with_focus_details(
+        let render_cache = self
+            .candidate_render_plan_cache
+            .get_or_insert_with(|| self.render_plan_cache.clone());
+        let resolved = crate::resolve::resolve_tree_dirty_incremental_plan_with_focus_details(
             tree,
             self.active_tree.as_ref(),
             dirty_keys,
             viewport,
             text_measurer,
             scroll_inputs,
-            cache,
+            layout_cache,
             view_state.current_focus_key(),
             focus_appearance,
+            render_cache,
         );
         let resolved = match resolved {
             Ok(resolved) => resolved,
@@ -190,11 +254,17 @@ impl DefaultApplicationProfile {
                 return Err(error);
             }
         };
-        let paint = PaintSnapshot::from_resolved(tree, viewport, resolved.node_rects);
+        let paint = PaintSnapshot::from_resolved(
+            tree,
+            viewport,
+            resolved.node_rects,
+            view_state.current_focus_key(),
+            focus_appearance,
+        );
         self.candidate_damage = Some(self.damage_for_candidate(&paint, dirty_keys, dirty_flags));
         self.candidate_paint = Some(paint);
         self.candidate_tree = Some(tree.clone());
-        Ok(resolved.frame)
+        Ok(resolved.plan)
     }
 
     /// 以纯方式解析一个尚未发布的 Host 候选帧。
@@ -211,7 +281,7 @@ impl DefaultApplicationProfile {
         scroll_inputs: &HashMap<SemanticKey, ScrollState>,
         view_state: &ViewStateStore,
         focus_appearance: Option<FocusAppearance>,
-    ) -> Result<UiFrame, UiLayoutError> {
+    ) -> Result<RenderPlan, UiLayoutError> {
         tree.resolve_with_focus(
             viewport,
             text_measurer,
@@ -226,6 +296,9 @@ impl DefaultApplicationProfile {
     pub fn commit_candidate(&mut self) {
         if let Some(cache) = self.candidate_layout_cache.take() {
             self.layout_cache = cache;
+        }
+        if let Some(cache) = self.candidate_render_plan_cache.take() {
+            self.render_plan_cache = cache;
         }
         if let Some(tree) = self.candidate_tree.take() {
             self.active_tree = Some(tree);
@@ -242,6 +315,7 @@ impl DefaultApplicationProfile {
     /// frame. The application runtime restores its graph dirty keys separately.
     pub fn discard_candidate(&mut self) {
         self.candidate_layout_cache = None;
+        self.candidate_render_plan_cache = None;
         self.candidate_tree = None;
         self.candidate_paint = None;
         self.candidate_damage = None;
@@ -260,7 +334,7 @@ impl DefaultApplicationProfile {
     pub fn dispatch_kernel_input(
         &self,
         tree: &UiTree,
-        frame: &UiFrame,
+        frame: &RenderPlan,
         view_state: &mut ViewStateStore,
         event: &InputEvent,
     ) -> Vec<KernelInteraction> {
@@ -271,13 +345,14 @@ impl DefaultApplicationProfile {
     ///
     /// This is the coordinate-aware counterpart to the committed hover state and is intended for
     /// native hosts that must choose between a client-area and non-client hit-test result.
-    pub fn hit_test_interactive(&self, tree: &UiTree, frame: &UiFrame, position: Point) -> bool {
+    pub fn hit_test_interactive(&self, tree: &UiTree, frame: &RenderPlan, position: Point) -> bool {
         crate::interact::hit_test_interactive(tree, frame, position)
     }
 
     /// Discards only cached layout results; view state and application data remain intact.
     pub fn clear_layout_cache(&mut self) {
         self.layout_cache.clear();
+        self.render_plan_cache.clear();
         self.discard_candidate();
         self.active_paint = None;
         self.active_tree = None;
@@ -297,6 +372,14 @@ impl DefaultApplicationProfile {
         self.candidate_layout_cache
             .as_ref()
             .unwrap_or(&self.layout_cache)
+            .entry_count()
+    }
+
+    /// 保留绘制片段缓存条目数（候选存在时返回候选副本；用于诊断缓存边界）。
+    pub fn render_plan_cache_entry_count(&self) -> usize {
+        self.candidate_render_plan_cache
+            .as_ref()
+            .unwrap_or(&self.render_plan_cache)
             .entry_count()
     }
 
@@ -346,12 +429,12 @@ mod tests {
 
     use tela_contract::{
         Color, DirtyFlags, Fill, FocusAppearance, IdentityConcern, Insets, InteractConcern,
-        KeyStrategy, LayoutConcern, PixelOffset, Point, SemanticKey, ShadowSpec, Size, TextContent,
-        UiNode, UpdateMode, Viewport, VisualConcern,
+        KeyStrategy, LayoutConcern, PixelOffset, Point, Rect, SemanticKey, ShadowSpec, Size,
+        TextContent, UiNode, UpdateMode, Viewport, VisualConcern,
     };
 
     use crate::{
-        IdentityAllocator, UiTree, ViewStateStore,
+        FocusSlot, UiTree, ViewStateStore,
         builder::{LayoutContainer, Primitive},
     };
 
@@ -392,7 +475,7 @@ mod tests {
             ..VisualConcern::default()
         })
         .into();
-        UiTree::new_with_allocator(root, &mut IdentityAllocator::new()).expect("valid tree")
+        UiTree::new(root).expect("valid tree")
     }
 
     fn hoverable_tree() -> UiTree {
@@ -413,6 +496,31 @@ mod tests {
             })
             .into();
         UiTree::new(root).expect("valid hoverable tree")
+    }
+
+    fn focusable_tree() -> UiTree {
+        let root: UiNode = LayoutContainer::frame(Primitive::rect())
+            .layout(LayoutConcern {
+                width: Some(Size::fixed(40.0)),
+                height: Some(Size::fixed(24.0)),
+                ..LayoutConcern::default()
+            })
+            .visual(VisualConcern {
+                fill: Some(Fill::Solid(Color::WHITE)),
+                ..VisualConcern::default()
+            })
+            .interact(InteractConcern {
+                focusable: true,
+                ..InteractConcern::default()
+            })
+            .identity(IdentityConcern {
+                key_strategy: KeyStrategy::SemanticId,
+                update_mode: UpdateMode::Dirty,
+                semantic_key: Some(SemanticKey::from("focus-root")),
+                key_segment: None,
+            })
+            .into();
+        UiTree::new(root).expect("valid focusable tree")
     }
 
     fn painted_tree(color: Color) -> UiTree {
@@ -522,12 +630,13 @@ mod tests {
                 state.current_focus_key(),
                 appearance,
             )
-            .expect("direct frame");
+            .expect("direct frame")
+            .to_ui_frame();
         let profile = &mut DefaultApplicationProfile::new();
         let selected = profile
             .resolve(&tree, viewport, &FixedText, &scrolls, &state, appearance)
             .expect("profile frame");
-        assert_eq!(selected, direct);
+        assert_eq!(selected.to_ui_frame(), direct);
     }
 
     #[test]
@@ -660,10 +769,11 @@ mod tests {
             "only B and its changed text are remeasured"
         );
         assert_eq!(
-            stable_frame,
+            stable_frame.to_ui_frame(),
             same_geometry
                 .resolve(viewport, &FixedText, &scrolls)
-                .expect("full reference frame"),
+                .expect("full reference frame")
+                .to_ui_frame(),
             "the spliced layout box must retain the parent-owned child position"
         );
         profile.commit_candidate();
@@ -689,10 +799,11 @@ mod tests {
             "B and text are measured once, then root consumes the changed geometry"
         );
         assert_eq!(
-            wider_frame,
+            wider_frame.to_ui_frame(),
             wider
                 .resolve(viewport, &FixedText, &scrolls)
                 .expect("full reference frame")
+                .to_ui_frame()
         );
     }
 
@@ -743,6 +854,67 @@ mod tests {
     }
 
     #[test]
+    fn focus_damage_covers_the_focus_ring_outset() {
+        let viewport = Viewport {
+            width: 100.0,
+            height: 80.0,
+        };
+        let tree = focusable_tree();
+        let key = SemanticKey::from("focus-root");
+        let mut state = ViewStateStore::new();
+        state.set_current_focus(FocusSlot {
+            node_id: None,
+            key: Some(key.clone()),
+        });
+        let scrolls = HashMap::new();
+        let appearance = Some(FocusAppearance {
+            color: Color::BLUE,
+            width: 6.0,
+            inset: 0.0,
+        });
+        let mut profile = DefaultApplicationProfile::new();
+        profile
+            .resolve_with_dirty(
+                &tree,
+                viewport,
+                &FixedText,
+                &scrolls,
+                &state,
+                appearance,
+                None,
+                DirtyFlags::ALL,
+            )
+            .expect("focused initial frame");
+        profile.commit_candidate();
+
+        state.clear_current_focus();
+        let dirty = BTreeSet::from([key]);
+        profile
+            .resolve_with_dirty(
+                &tree,
+                viewport,
+                &FixedText,
+                &scrolls,
+                &state,
+                appearance,
+                Some(&dirty),
+                DirtyFlags::VISUAL,
+            )
+            .expect("focus removal candidate");
+
+        assert_eq!(
+            profile.frame_damage().rects,
+            vec![Rect {
+                x: -3.0,
+                y: -3.0,
+                w: 46.0,
+                h: 30.0,
+            }],
+            "damage must include pixels touched by the removed focus-ring stroke"
+        );
+    }
+
+    #[test]
     fn rejected_candidate_does_not_advance_layout_or_paint_baseline() {
         let viewport = Viewport {
             width: 100.0,
@@ -767,6 +939,7 @@ mod tests {
         profile.commit_candidate();
         let active_measures = profile.layout_measure_count();
         let active_damage = profile.frame_damage().clone();
+        let active_render_entries = profile.render_plan_cache_entry_count();
 
         let dirty = BTreeSet::from([SemanticKey::from("paint-root")]);
         profile
@@ -782,9 +955,18 @@ mod tests {
             )
             .expect("candidate frame");
         assert!(profile.layout_measure_count() > active_measures);
+        assert!(
+            profile.render_plan_cache_entry_count() > active_render_entries,
+            "the rejected candidate may build local fragments, but only in its candidate cache"
+        );
         profile.discard_candidate();
 
         assert_eq!(profile.layout_measure_count(), active_measures);
+        assert_eq!(
+            profile.render_plan_cache_entry_count(),
+            active_render_entries,
+            "rejecting a candidate must discard its local-fragment cache instead of promoting it"
+        );
         assert_eq!(profile.frame_damage(), &active_damage);
     }
 

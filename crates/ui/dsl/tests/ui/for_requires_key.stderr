@@ -1,5 +1,0 @@
-error: missing required key={...} attribute
- --> tests/ui/for_requires_key.rs:8:14
-  |
-8 |             <For each={values}>
-  |              ^^^

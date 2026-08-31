@@ -1,155 +1,94 @@
-//! retained 求值语义（默认，无注解）的一致性与粒度集成测试。
-//!
-//! 对齐 `m5_update.rs` 的 Full/Dirty 一致性风格：同一 signal 变更序列下，
-//! retained 帧与全量渲染帧必须产出完全相同的树，且 render 只重跑订阅被标脏的
-//! 组件（derive 契约：输入只有 `#[watch]` 边，命中判定是纯 SignalId 比较）。
+//! Retained render integration coverage for the v3 component contract.
 
 use std::{cell::Cell, collections::BTreeSet};
 
-use tela_contract::{NodeKind, SemanticKey, UiFrame, UiNode, Viewport};
+use tela_contract::{ContentConcern, NodeKind, RenderPlan, UiFrame, UiNode, Viewport};
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{
-    Body, DslComponent, FrameCoordinator, Signal, ViewBuild, ViewChild, ViewOutput, ViewResult,
-    ViewSite, ui,
+    Body, Children, DirtySet, DslComponent, FrameCoordinator, Signal, SlotName, ViewBuild,
+    ViewChild, ViewOutput, ViewResult, ViewSite, signal, ui,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Action {
-    #[allow(dead_code)]
-    Ping,
-}
-
-// 计数器用 thread_local：集成测试并行运行，静态全局会被相邻用例串扰。
 thread_local! {
-    static RENDER_A: Cell<usize> = const { Cell::new(0) };
-    static RENDER_B: Cell<usize> = const { Cell::new(0) };
-    static RENDER_INNER: Cell<usize> = const { Cell::new(0) };
+    static RENDER_COUNT: Cell<usize> = const { Cell::new(0) };
+    static OUTER_RENDER_COUNT: Cell<usize> = const { Cell::new(0) };
+    static INNER_RENDER_COUNT: Cell<usize> = const { Cell::new(0) };
+    static SLOT_CHILD_RENDER_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-fn bump_a() {
-    RENDER_A.with(|count| count.set(count.get() + 1));
+fn reset_render_count() {
+    RENDER_COUNT.with(|count| count.set(0));
 }
 
-fn bump_b() {
-    RENDER_B.with(|count| count.set(count.get() + 1));
+fn render_count() -> usize {
+    RENDER_COUNT.with(Cell::get)
 }
 
-fn bump_inner() {
-    RENDER_INNER.with(|count| count.set(count.get() + 1));
+fn reset_nested_render_counts() {
+    OUTER_RENDER_COUNT.with(|count| count.set(0));
+    INNER_RENDER_COUNT.with(|count| count.set(0));
 }
 
-fn renders_a() -> usize {
-    RENDER_A.with(Cell::get)
+fn outer_render_count() -> usize {
+    OUTER_RENDER_COUNT.with(Cell::get)
 }
 
-fn renders_b() -> usize {
-    RENDER_B.with(Cell::get)
+fn inner_render_count() -> usize {
+    INNER_RENDER_COUNT.with(Cell::get)
 }
 
-fn renders_inner() -> usize {
-    RENDER_INNER.with(Cell::get)
+fn reset_slot_child_render_count() {
+    SLOT_CHILD_RENDER_COUNT.with(|count| count.set(0));
 }
 
-/// 面板 A：订阅独立 signal；默认 retained（无 children 即参与缓存）。
+fn slot_child_render_count() -> usize {
+    SLOT_CHILD_RENDER_COUNT.with(Cell::get)
+}
+
 #[derive(DslComponent)]
-struct PanelA {
+struct WatchedText {
     #[watch]
     value: Signal<u32>,
 }
 
-impl PanelA {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        bump_a();
+impl WatchedText {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        _children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        RENDER_COUNT.with(|count| count.set(count.get() + 1));
         ui!(build {
-            <Text value={format!("A:{}", self.value.get())} />
+            <Text value={format!("value={}", self.value.get())} />
         })
     }
 }
 
-/// A non-primitive retained root, so it is valid as a keyed `<For>` item root.
+fn render_root(build: &mut ViewBuild<()>, value: &Signal<u32>) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <Column>
+            <WatchedText value={value.clone()} />
+        </Column>
+    })
+}
+
 #[derive(DslComponent)]
-struct ForPanel {
+struct NestedOuter {
     #[watch]
     value: Signal<u32>,
 }
 
-impl ForPanel {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        bump_a();
-        ui!(build {
-            <Column>
-                <Text value={format!("F:{}", self.value.get())} />
-            </Column>
-        })
-    }
-}
-
-/// 面板 B：A 的不相关兄弟组件。
-#[derive(DslComponent)]
-struct PanelB {
-    #[watch]
-    value: Signal<u32>,
-}
-
-impl PanelB {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        bump_b();
-        ui!(build {
-            <Text value={format!("B:{}", self.value.get())} />
-        })
-    }
-}
-
-/// 嵌套内层：Outer 的直接子组件，订阅独立的 b。
-#[derive(DslComponent)]
-struct InnerPanel {
-    #[watch]
-    value: Signal<u32>,
-}
-
-impl InnerPanel {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        bump_inner();
-        ui!(build {
-            <Text value={format!("I:{}", self.value.get())} />
-        })
-    }
-}
-
-/// 嵌套外层：订阅 a，body 内包含 InnerPanel——Outer 的缓存子树携带 Inner 的订阅。
-#[derive(DslComponent)]
-struct OuterPanel {
-    #[watch]
-    value: Signal<u32>,
-}
-
-impl OuterPanel {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        bump_a();
-        ui!(build {
-            <Column>
-                <Text value={format!("O:{}", self.value.get())} />
-                <InnerPanel value={self.inner_source()} />
-            </Column>
-        })
-    }
-
-    // Outer 不拥有 Inner 的 signal（由测试在 props 之外注入）：为让嵌套用例使用
-    // 独立 b 源，这里经全局槽传递，见 nested fixture。
-}
-
-/// A derive parent that consumes caller-provided children. Its retained entry must retain the
-/// materialized child slots rather than retaining the `ui!` closure that produced them.
-#[derive(DslComponent)]
-struct SlotHost {
-    #[watch]
-    value: Signal<u32>,
-}
-
-impl SlotHost {
-    fn view<A>(&self, build: &mut ViewBuild<A>, children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        bump_a();
-        let node = build.container(UiNode::new(NodeKind::Column), children)?;
+impl NestedOuter {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        OUTER_RENDER_COUNT.with(|count| count.set(count.get() + 1));
+        let children = children.build(build)?;
+        let node = build
+            .container(UiNode::new(NodeKind::Column), children)?
+            .with_semantic_key("nested-outer");
         build.finish(
             Body::new(vec![ViewChild::view_node(node)], Vec::new()),
             ViewSite::new(file!(), line!(), column!()),
@@ -157,486 +96,885 @@ impl SlotHost {
     }
 }
 
-// 嵌套用例的 Inner signal 槽：Outer 构造时从这里取（thread_local 保存 Rc 句柄）。
-thread_local! {
-    static NESTED_INNER: std::cell::RefCell<Option<Signal<u32>>> =
-        const { std::cell::RefCell::new(None) };
+#[derive(DslComponent)]
+struct NestedInner {
+    #[watch]
+    value: Signal<u32>,
 }
 
-fn render_root(
-    build: &mut ViewBuild<Action>,
-    a: &Signal<u32>,
-    b: &Signal<u32>,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <PanelA value={a.clone()} />
-            <PanelB value={b.clone()} />
-        </Column>
-    })
-}
-
-fn render_nested(
-    build: &mut ViewBuild<Action>,
-    outer: &Signal<u32>,
-    inner: &Signal<u32>,
-) -> ViewResult<ViewOutput<Action>> {
-    NESTED_INNER.with(|slot| *slot.borrow_mut() = Some(inner.clone()));
-    ui!(build {
-        <Column>
-            <OuterPanel value={outer.clone()} />
-        </Column>
-    })
-}
-
-fn render_for_panels(
-    build: &mut ViewBuild<Action>,
-    items: &[(u32, Signal<u32>)],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.0}>
-                {|item|
-                    <ForPanel value={item.1.clone()} />
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_slot_host(
-    build: &mut ViewBuild<Action>,
-    parent: &Signal<u32>,
-    child: &Signal<u32>,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <SlotHost value={parent.clone()}>
-            <InnerPanel value={child.clone()} />
-        </SlotHost>
-    })
-}
-
-impl OuterPanel {
-    fn inner_source(&self) -> Signal<u32> {
-        NESTED_INNER.with(|slot| {
-            slot.borrow()
-                .clone()
-                .expect("nested fixture installs the inner signal before render")
+impl NestedInner {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        _children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        INNER_RENDER_COUNT.with(|count| count.set(count.get() + 1));
+        ui!(build {
+            <Text value={format!("nested={}", self.value.get())} />
         })
     }
 }
 
-fn empty_frame() -> UiFrame {
-    UiFrame {
-        viewport: Viewport {
-            width: 100.0,
-            height: 100.0,
-        },
-        commands: Vec::new(),
-        hit_regions: Vec::new(),
-        scroll_bounds: Vec::new(),
-    }
+fn nested_root(
+    build: &mut ViewBuild<()>,
+    outer: Signal<u32>,
+    inner: Signal<u32>,
+) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <NestedOuter value={outer}>
+            <NestedInner value={inner} />
+        </NestedOuter>
+    })
 }
 
-struct Fixture {
-    coordinator: FrameCoordinator<Action>,
-    a: Signal<u32>,
-    b: Signal<u32>,
+fn mixed_retained_and_binding_root(
+    build: &mut ViewBuild<()>,
+    watched: Signal<u32>,
+    bound: Signal<String>,
+) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <Column>
+            <WatchedText value={watched} />
+            <Text value={bound} />
+        </Column>
+    })
 }
 
-impl Fixture {
-    fn new(a: u32, b: u32) -> Self {
-        Self {
-            coordinator: FrameCoordinator::new(),
-            a: Signal::new(a),
-            b: Signal::new(b),
-        }
-    }
+fn retained_parent_with_bound_child(
+    build: &mut ViewBuild<()>,
+    outer: Signal<u32>,
+    value: Signal<String>,
+) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <NestedOuter value={outer}>
+            <Text value={value} />
+        </NestedOuter>
+    })
+}
 
-    /// 用指定 dirty 集发布一帧；signal 写入后由调用方取走 dirty。
-    fn publish(&mut self, dirty: BTreeSet<SemanticKey>, retained_enabled: bool) {
-        let mut build = self
-            .coordinator
-            .begin_build_for_frame(dirty, retained_enabled);
-        let root = render_root(&mut build, &self.a, &self.b).expect("root view");
-        let prepared = self.coordinator.prepare(root).expect("candidate frame");
-        let resolved = prepared
-            .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-            .expect("resolved frame");
-        self.coordinator.commit(resolved);
-    }
+#[derive(DslComponent)]
+struct ConditionalChildrenHost {
+    #[watch]
+    visible: Signal<bool>,
+}
 
-    /// 不运行 root projection，直接以 active retained 坐标重入一批 dirty component。
-    fn publish_retained_dirty(&mut self, dirty: BTreeSet<SemanticKey>) {
-        let prepared = self
-            .coordinator
-            .prepare_retained_dirty(dirty)
-            .expect("retained candidate")
-            .expect("dirty component has an active retained coordinate");
-        let resolved = prepared
-            .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-            .expect("resolved retained candidate");
-        self.coordinator.commit(resolved);
-    }
-
-    /// 写入 A 的 signal 并取走 dirty 集。
-    fn touch_a(&mut self, value: u32) -> BTreeSet<SemanticKey> {
-        self.a.set(value);
-        self.coordinator.runtime().take_dirty()
-    }
-
-    fn touch_b(&mut self, value: u32) -> BTreeSet<SemanticKey> {
-        self.b.set(value);
-        self.coordinator.runtime().take_dirty()
-    }
-
-    fn tree_debug(&self) -> String {
-        format!(
-            "{:?}",
-            self.coordinator
-                .active()
-                .expect("active frame")
-                .tree()
-                .root()
+impl ConditionalChildrenHost {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let body = if self.visible.get() {
+            children.build(build)?
+        } else {
+            Body::new(Vec::new(), Vec::new())
+        };
+        let node = build
+            .container(UiNode::new(NodeKind::View), body)?
+            .with_semantic_key("conditional-children-host");
+        build.finish(
+            Body::new(vec![ViewChild::view_node(node)], Vec::new()),
+            ViewSite::new(file!(), line!(), column!()),
         )
     }
 }
 
-#[test]
-fn retained_frame_renders_only_the_dirty_component() {
-    let mut fixture = Fixture::new(1, 1);
-    RENDER_A.with(|c| c.set(0));
-    RENDER_B.with(|c| c.set(0));
-
-    // 首帧：全量渲染并记录缓存。
-    fixture.publish(BTreeSet::new(), true);
-    assert_eq!(renders_a(), 1);
-    assert_eq!(renders_b(), 1);
-
-    // A 的 signal 变化：只重跑 A，B 命中缓存（纯 SignalId + 脏集判定）。
-    let dirty = fixture.touch_a(5);
-    assert_eq!(dirty.len(), 1, "只有一个组件的订阅被标脏");
-    assert_eq!(
-        fixture
-            .coordinator
-            .outermost_dirty_retained_roots(&dirty)
-            .len(),
-        1,
-        "dirty key resolves directly to one retained coordinate"
-    );
-    fixture.publish(dirty, true);
-    assert_eq!(renders_a(), 2);
-    assert_eq!(renders_b(), 1, "不相关组件命中缓存");
-
-    // B 的 signal 变化：只重跑 B，A 命中缓存。
-    let dirty = fixture.touch_b(7);
-    assert_eq!(dirty.len(), 1);
-    fixture.publish(dirty, true);
-    assert_eq!(renders_a(), 2, "不相关组件命中缓存");
-    assert_eq!(renders_b(), 2);
-
-    // 相同值写入被相等性短路：无 dirty，无重建。
-    let dirty = fixture.touch_a(5);
-    assert!(dirty.is_empty());
-    fixture.publish(BTreeSet::new(), true);
-    assert_eq!(renders_a(), 2);
-    assert_eq!(renders_b(), 2);
+#[derive(DslComponent)]
+struct SlotChild {
+    #[watch]
+    value: Signal<u32>,
 }
 
-#[test]
-fn dirty_coordinate_reenters_without_running_the_root_projection() {
-    let mut fixture = Fixture::new(1, 1);
-    RENDER_A.with(|c| c.set(0));
-    RENDER_B.with(|c| c.set(0));
-    fixture.publish(BTreeSet::new(), true);
+const HEADER_SLOT: SlotName = SlotName::new("header");
+const FOOTER_SLOT: SlotName = SlotName::new("footer");
 
-    let before = fixture.tree_debug();
-    let dirty = fixture.touch_a(9);
-    fixture.publish_retained_dirty(dirty);
-
-    assert_eq!(
-        renders_a(),
-        2,
-        "only the retained root responsible for A re-entered"
-    );
-    assert_eq!(
-        renders_b(),
-        1,
-        "the clean sibling stayed on its shared subtree"
-    );
-    assert_ne!(
-        fixture.tree_debug(),
-        before,
-        "the spliced output contains A's new value"
-    );
-
-    // A direct commit must keep B's unvisited retained entry alive for the next independent
-    // dirty coordinate; otherwise this would fall back to a rooted projection.
-    let dirty = fixture.touch_b(4);
-    fixture.publish_retained_dirty(dirty);
-    assert_eq!(renders_a(), 2);
-    assert_eq!(
-        renders_b(),
-        2,
-        "clean sibling cache survived the previous direct commit"
-    );
+#[derive(DslComponent)]
+struct NamedSlotsHost {
+    #[watch]
+    epoch: Signal<u32>,
+    #[watch]
+    footer_visible: Signal<bool>,
 }
 
-#[test]
-fn for_item_retained_root_uses_its_resolved_watch_coordinate() {
-    let mut coordinator = FrameCoordinator::<Action>::new();
-    let first = Signal::new(1_u32);
-    let second = Signal::new(2_u32);
-    let items = vec![(10_u32, first.clone()), (20_u32, second.clone())];
-    RENDER_A.with(|c| c.set(0));
+/// A non-reactive Context capability is deliberately different from a normal derive Prop:
+/// the provider names the lexical boundary explicitly and the consumer can only read the value.
+/// The pair below also verifies that a parent reassembly never reuses a retained snapshot that
+/// still contains the previous capability.
+#[derive(DslComponent)]
+struct ContextProvider {
+    #[provide]
+    label: String,
+}
 
-    let mut build = coordinator.begin_build_for_frame(BTreeSet::new(), true);
-    let root = render_for_panels(&mut build, &items).expect("for root");
+impl ContextProvider {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let body = children.build(build)?;
+        build.finish(body, ViewSite::new(file!(), line!(), column!()))
+    }
+}
+
+#[derive(DslComponent)]
+struct ContextConsumer {
+    #[inject]
+    label: String,
+}
+
+impl ContextConsumer {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        _children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        ui!(build {
+            <Text value={self.label.clone()} />
+        })
+    }
+}
+
+impl NamedSlotsHost {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let _epoch = self.epoch.get();
+        let mut sections = Vec::new();
+        if children.has_named(HEADER_SLOT) {
+            let header = children.build_named(HEADER_SLOT, build)?;
+            let node = build
+                .container(UiNode::new(NodeKind::View), header)?
+                .with_semantic_key("named-slot-header");
+            sections.push(ViewChild::view_node(node));
+        }
+
+        let default = children.build(build)?;
+        let default = build
+            .container(UiNode::new(NodeKind::View), default)?
+            .with_semantic_key("named-slot-default");
+        sections.push(ViewChild::view_node(default));
+
+        if self.footer_visible.get() && children.has_named(FOOTER_SLOT) {
+            let footer = children.build_named(FOOTER_SLOT, build)?;
+            let node = build
+                .container(UiNode::new(NodeKind::View), footer)?
+                .with_semantic_key("named-slot-footer");
+            sections.push(ViewChild::view_node(node));
+        }
+
+        let root = build
+            .container(
+                UiNode::new(NodeKind::Column),
+                Body::new(sections, Vec::new()),
+            )?
+            .with_semantic_key("named-slots-host");
+        build.finish(
+            Body::new(vec![ViewChild::view_node(root)], Vec::new()),
+            ViewSite::new(file!(), line!(), column!()),
+        )
+    }
+}
+
+impl SlotChild {
+    fn view<A: 'static>(
+        &self,
+        build: &mut ViewBuild<A>,
+        _children: &Children<'_, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        SLOT_CHILD_RENDER_COUNT.with(|count| count.set(count.get() + 1));
+        ui!(build {
+            <Text value={format!("slot={}", self.value.get())} />
+        })
+    }
+}
+
+fn conditional_children_root(
+    build: &mut ViewBuild<()>,
+    visible: Signal<bool>,
+    child: Signal<u32>,
+) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <ConditionalChildrenHost visible={visible}>
+            <SlotChild value={child} />
+        </ConditionalChildrenHost>
+    })
+}
+
+fn named_slots_root(
+    build: &mut ViewBuild<()>,
+    epoch: Signal<u32>,
+    footer_visible: Signal<bool>,
+    header: Signal<u32>,
+    default: Signal<u32>,
+    footer: Signal<u32>,
+) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <NamedSlotsHost epoch={epoch} footer_visible={footer_visible}>
+            <Fragment slot={"header"}>
+                <SlotChild value={header} />
+            </Fragment>
+            <SlotChild value={default} />
+            <Fragment slot={"footer"}>
+                <SlotChild value={footer} />
+            </Fragment>
+        </NamedSlotsHost>
+    })
+}
+
+fn context_capability_root(build: &mut ViewBuild<()>, label: String) -> ViewResult<ViewOutput<()>> {
+    ui!(build {
+        <ContextProvider label={label}>
+            <ContextConsumer />
+        </ContextProvider>
+    })
+}
+
+fn empty_frame() -> RenderPlan {
+    RenderPlan::from_flat_frame(UiFrame {
+        viewport: Viewport {
+            width: 160.0,
+            height: 80.0,
+        },
+        commands: Vec::new(),
+        hit_regions: Vec::new(),
+        scroll_bounds: Vec::new(),
+    })
+}
+
+fn publish<D: Into<DirtySet>>(
+    coordinator: &mut FrameCoordinator<()>,
+    dirty: D,
+    value: &Signal<u32>,
+) {
+    let mut build = coordinator.begin_build_for_frame(dirty.into(), true);
+    let root = render_root(&mut build, value).expect("render root");
     let resolved = coordinator
         .prepare(root)
-        .expect("for candidate")
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("for frame");
-    coordinator.commit(resolved);
-    assert_eq!(renders_a(), 2);
-    let keys_before = coordinator
-        .active()
-        .expect("active for frame")
-        .tree()
-        .keys()
-        .to_vec();
+        .expect("prepare retained frame")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve retained frame");
+    coordinator
+        .commit(resolved)
+        .expect("current retained frame");
+}
 
-    second.set(3);
+fn publish_nested<D: Into<DirtySet>>(
+    coordinator: &mut FrameCoordinator<()>,
+    dirty: D,
+    outer: Signal<u32>,
+    inner: Signal<u32>,
+) {
+    let mut build = coordinator.begin_build_for_frame(dirty.into(), true);
+    let root = nested_root(&mut build, outer, inner).expect("render nested root");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("prepare nested retained frame")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve nested retained frame");
+    coordinator
+        .commit(resolved)
+        .expect("current nested retained frame");
+}
+
+fn publish_mixed_retained_and_binding<D: Into<DirtySet>>(
+    coordinator: &mut FrameCoordinator<()>,
+    dirty: D,
+    watched: Signal<u32>,
+    bound: Signal<String>,
+) {
+    let mut build = coordinator.begin_build_for_frame(dirty.into(), true);
+    let root = mixed_retained_and_binding_root(&mut build, watched, bound)
+        .expect("render mixed retained and binding root");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("prepare mixed retained and binding frame")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve mixed retained and binding frame");
+    coordinator
+        .commit(resolved)
+        .expect("current mixed retained and binding frame");
+}
+
+fn publish_conditional_children<D: Into<DirtySet>>(
+    coordinator: &mut FrameCoordinator<()>,
+    dirty: D,
+    visible: Signal<bool>,
+    child: Signal<u32>,
+) {
+    let mut build = coordinator.begin_build_for_frame(dirty.into(), true);
+    let root = conditional_children_root(&mut build, visible, child)
+        .expect("render conditional children root");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("prepare conditional children frame")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve conditional children frame");
+    coordinator
+        .commit(resolved)
+        .expect("commit conditional children frame");
+}
+
+fn publish_named_slots<D: Into<DirtySet>>(
+    coordinator: &mut FrameCoordinator<()>,
+    dirty: D,
+    epoch: Signal<u32>,
+    footer_visible: Signal<bool>,
+    header: Signal<u32>,
+    default: Signal<u32>,
+    footer: Signal<u32>,
+) {
+    let mut build = coordinator.begin_build_for_frame(dirty.into(), true);
+    let root = named_slots_root(&mut build, epoch, footer_visible, header, default, footer)
+        .expect("named-slot root assembles");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("named-slot root prepares")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("named-slot root resolves");
+    coordinator
+        .commit(resolved)
+        .expect("named-slot root commits");
+}
+
+fn publish_context_capability(coordinator: &mut FrameCoordinator<()>, label: &str) {
+    let mut build = coordinator.begin_build_for_frame(DirtySet::default(), true);
+    let root = context_capability_root(&mut build, label.to_owned())
+        .expect("context capability root assembles");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("context capability root prepares")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("context capability root resolves");
+    coordinator
+        .commit(resolved)
+        .expect("context capability root commits");
+}
+
+fn active_root_text(coordinator: &FrameCoordinator<()>) -> String {
+    fn find(node: &UiNode) -> Option<String> {
+        if let Some(ContentConcern::Text(text)) = node.content.as_ref() {
+            return Some(text.text.clone());
+        }
+        node.children.iter().find_map(|child| find(child))
+    }
+
+    find(
+        coordinator
+            .active()
+            .expect("context frame is active")
+            .tree()
+            .root(),
+    )
+    .expect("context consumer emits a Text node")
+}
+
+#[test]
+fn watched_signal_invalidates_its_retained_component_but_clean_input_reuses_it() {
+    reset_render_count();
+    let (writer, value) = signal(1_u32);
+    let mut coordinator = FrameCoordinator::new();
+
+    publish(&mut coordinator, BTreeSet::new(), &value);
+    assert_eq!(render_count(), 1);
+
+    coordinator.runtime().begin_frame();
+    writer.set(2);
     let dirty = coordinator.runtime().take_dirty();
-    let prepared = coordinator
-        .prepare_retained_dirty(dirty)
-        .expect("for retained candidate")
-        .expect("For-decorated retained root keeps a direct coordinate");
-    let resolved = prepared
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("for retained frame");
-    coordinator.commit(resolved);
-    assert_eq!(renders_a(), 3, "only the dirty keyed item re-entered");
+    assert_eq!(dirty.len(), 1, "the explicit #[watch] edge became dirty");
+    publish(&mut coordinator, dirty, &value);
+    assert_eq!(render_count(), 2, "dirty input re-renders the component");
+
+    coordinator.runtime().begin_frame();
+    publish(&mut coordinator, BTreeSet::new(), &value);
+    assert_eq!(
+        render_count(),
+        2,
+        "clean inputs reuse the retained component output without calling view again"
+    );
+}
+
+#[test]
+fn derived_context_capabilities_are_lexical_and_never_freeze_on_parent_reassembly() {
+    let mut coordinator = FrameCoordinator::new();
+
+    publish_context_capability(&mut coordinator, "first capability");
+    assert_eq!(active_root_text(&coordinator), "first capability");
+
+    // Same component sites and no Signal dirtiness: only the explicit Context capability differs.
+    // A cache hit here would incorrectly retain the old provider/consumer pair.
+    publish_context_capability(&mut coordinator, "second capability");
+    assert_eq!(active_root_text(&coordinator), "second capability");
+}
+
+#[test]
+fn derived_children_slots_mount_only_when_the_view_consumes_them() {
+    reset_slot_child_render_count();
+    let (visible_writer, visible) = signal(false);
+    let (_child_writer, child) = signal(1_u32);
+    let mut coordinator = FrameCoordinator::new();
+
+    publish_conditional_children(
+        &mut coordinator,
+        BTreeSet::new(),
+        visible.clone(),
+        child.clone(),
+    );
+    assert_eq!(
+        slot_child_render_count(),
+        0,
+        "an ignored Children slot must not assemble its DSL child closure"
+    );
+    assert!(
+        coordinator
+            .active()
+            .expect("initial conditional frame is active")
+            .tree()
+            .root()
+            .children
+            .is_empty(),
+        "unconsumed children do not appear in the presented tree"
+    );
+
+    visible_writer.set(true);
+    coordinator.runtime().begin_frame();
+    let dirty = coordinator.runtime().take_dirty();
+    assert!(
+        coordinator
+            .prepare_retained_dirty(dirty.clone())
+            .expect("selection is not an error")
+            .is_none(),
+        "a previously unconsumed closure has no cross-frame retained slot and must reassemble at the root"
+    );
+    publish_conditional_children(&mut coordinator, dirty, visible.clone(), child.clone());
+    assert_eq!(
+        slot_child_render_count(),
+        1,
+        "the child is first assembled exactly when the host consumes its slot"
+    );
     assert_eq!(
         coordinator
             .active()
-            .expect("active direct frame")
+            .expect("visible conditional frame is active")
             .tree()
-            .keys(),
-        keys_before,
-        "direct re-entry preserves the For item's business-key identity shell"
+            .root()
+            .children
+            .len(),
+        1,
+        "the consumed child is now present"
+    );
+
+    visible_writer.set(false);
+    coordinator.runtime().begin_frame();
+    let dirty = coordinator.runtime().take_dirty();
+    assert!(
+        coordinator
+            .prepare_retained_dirty(dirty.clone())
+            .expect("selection is not an error")
+            .is_none(),
+        "stopping consumption is a structural removal, so retained re-entry falls back rather than retaining the old child"
+    );
+    publish_conditional_children(&mut coordinator, dirty, visible, child);
+    assert_eq!(
+        slot_child_render_count(),
+        1,
+        "the removed child is not reassembled or retained during the fallback projection"
+    );
+    assert!(
+        coordinator
+            .active()
+            .expect("hidden conditional frame is active")
+            .tree()
+            .root()
+            .children
+            .is_empty(),
+        "the former child is unmounted once the host stops consuming its slot"
     );
 }
 
 #[test]
-fn retained_frames_match_full_renders_tree_for_tree() {
-    let mut retained = Fixture::new(1, 1);
-    let mut full = Fixture::new(1, 1);
+fn named_children_slots_are_independent_retained_lifecycle_edges() {
+    reset_slot_child_render_count();
+    let (epoch_writer, epoch) = signal(0_u32);
+    let (footer_visible_writer, footer_visible) = signal(true);
+    let (_header_writer, header) = signal(10_u32);
+    let (_default_writer, default) = signal(20_u32);
+    let (_footer_writer, footer) = signal(30_u32);
+    let mut coordinator = FrameCoordinator::new();
 
-    retained.publish(BTreeSet::new(), true);
-    full.publish(BTreeSet::new(), false);
-    assert_eq!(retained.tree_debug(), full.tree_debug());
-
-    let dirty = retained.touch_a(5);
-    full.a.set(5);
-    let _ = full.coordinator.runtime().take_dirty();
-    retained.publish(dirty, true);
-    full.publish(BTreeSet::new(), false);
-    assert_eq!(retained.tree_debug(), full.tree_debug());
-
-    let dirty_b = retained.touch_b(9);
-    let dirty_a = retained.touch_a(11);
-    full.b.set(9);
-    full.a.set(11);
-    let _ = full.coordinator.runtime().take_dirty();
-    let merged: BTreeSet<SemanticKey> = dirty_b.union(&dirty_a).cloned().collect();
-    retained.publish(merged, true);
-    full.publish(BTreeSet::new(), false);
-    assert_eq!(retained.tree_debug(), full.tree_debug());
-}
-
-#[test]
-fn disabled_frames_refresh_watch_keys_and_do_not_pollute_cache() {
-    let mut fixture = Fixture::new(1, 1);
-
-    // retained 帧记录缓存。
-    fixture.publish(BTreeSet::new(), true);
-
-    // 关闭 retained 的全量帧：watch keys 仍随提交刷新。
-    fixture.publish(BTreeSet::new(), false);
-
-    // 重新启用且无脏：两个组件都应命中（树结构未变，key 映射未陈旧）。
-    RENDER_A.with(|c| c.set(0));
-    RENDER_B.with(|c| c.set(0));
-    fixture.publish(BTreeSet::new(), true);
-    fixture.publish(BTreeSet::new(), true);
-    assert_eq!(renders_a(), 0, "两次干净帧全部命中缓存");
-    assert_eq!(renders_b(), 0);
-
-    // signal 变化仍能穿透缓存（key 映射在禁用帧后被正确刷新）。
-    let dirty = fixture.touch_a(3);
-    assert_eq!(dirty.len(), 1);
-    fixture.publish(dirty, true);
-    assert_eq!(renders_a(), 1);
-}
-
-#[test]
-fn rejected_candidate_discards_pending_memo_entries() {
-    let mut fixture = Fixture::new(1, 1);
-    fixture.publish(BTreeSet::new(), true);
-    let before = fixture.tree_debug();
-
-    // 构建一个会在 resolve 阶段失败的候选：记录了新缓存但从未提交。
-    let dirty = fixture.touch_a(5);
-    let mut build = fixture
-        .coordinator
-        .begin_build_for_frame(dirty.clone(), true);
-    let root = render_root(&mut build, &fixture.a, &fixture.b).expect("root view");
-    let prepared = fixture.coordinator.prepare(root).expect("candidate frame");
-    let rejected = prepared.resolve(|_| Err::<UiFrame, String>("layout failed".to_owned()));
-    assert!(rejected.is_err());
-    // 宿主在 frame_rejected 时同样恢复 dirty（app-runtime 语义），这里保持一致。
-    fixture.coordinator.abort_component_transaction();
-    fixture.coordinator.runtime().restore_dirty(dirty);
-
-    // 旧 active 树保持不变。
-    assert_eq!(fixture.tree_debug(), before);
-
-    // 恢复的 dirty 驱动下一次重建：失败候选的缓存条目被丢弃，A 重新渲染。
-    let dirty = fixture.coordinator.runtime().take_dirty();
-    assert_eq!(dirty.len(), 1, "失败候选消费过的脏标被恢复");
-    RENDER_A.with(|c| c.set(0));
-    RENDER_B.with(|c| c.set(0));
-    fixture.publish(dirty, true);
-    assert_eq!(renders_a(), 1, "失败候选未留下缓存");
-    assert_eq!(renders_b(), 0, "未受影响的组件仍命中旧 active 缓存");
-    assert_ne!(fixture.tree_debug(), before, "A 的新值已生效");
-}
-
-#[test]
-fn nested_retained_inner_stays_frozen_when_outer_renders() {
-    let mut coordinator = FrameCoordinator::<Action>::new();
-    let outer_source = Signal::new(1_u32);
-    let inner_source = Signal::new(1_u32);
-
-    let publish = |coordinator: &mut FrameCoordinator<Action>,
-                   outer: &Signal<u32>,
-                   inner: &Signal<u32>,
-                   dirty: BTreeSet<SemanticKey>,
-                   enabled: bool| {
-        let mut build = coordinator.begin_build_for_frame(dirty, enabled);
-        let root = render_nested(&mut build, outer, inner).expect("nested root");
-        let prepared = coordinator.prepare(root).expect("candidate frame");
-        let resolved = prepared
-            .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-            .expect("resolved frame");
-        coordinator.commit(resolved);
-    };
-
-    // 首帧：Outer 与 Inner 各渲染一次并记录。
-    RENDER_A.with(|c| c.set(0));
-    RENDER_INNER.with(|c| c.set(0));
-    publish(
+    publish_named_slots(
         &mut coordinator,
-        &outer_source,
-        &inner_source,
         BTreeSet::new(),
-        true,
+        epoch.clone(),
+        footer_visible.clone(),
+        header.clone(),
+        default.clone(),
+        footer.clone(),
     );
-    assert_eq!(renders_a(), 1);
-    assert_eq!(renders_inner(), 1);
+    assert_eq!(
+        slot_child_render_count(),
+        3,
+        "each explicitly consumed slot assembles exactly its own child closure"
+    );
+    assert_eq!(
+        coordinator
+            .active()
+            .expect("initial named-slot frame is active")
+            .tree()
+            .root()
+            .children
+            .len(),
+        3,
+        "header, default and footer are three separately placed slots"
+    );
 
-    // Outer 的 signal 变化：Outer miss 重渲染，Inner 的边未脏 → 命中冻结。
-    outer_source.set(2);
+    epoch_writer.set(1);
+    coordinator.runtime().begin_frame();
     let dirty = coordinator.runtime().take_dirty();
     let prepared = coordinator
         .prepare_retained_dirty(dirty)
-        .expect("outer retained candidate")
-        .expect("outer dirty coordinate");
+        .expect("named-slot retained selection is not an error")
+        .expect("all consumed slots can be restored in one retained candidate");
     let resolved = prepared
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("resolved outer retained candidate");
-    coordinator.commit(resolved);
-    assert_eq!(renders_a(), 2, "Outer 的订阅脏 → 重渲染");
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("named-slot retained candidate resolves");
+    coordinator
+        .commit(resolved)
+        .expect("named-slot retained candidate commits");
     assert_eq!(
-        renders_inner(),
-        1,
-        "嵌套内层命中缓存（父也未运行 root projection）"
+        slot_child_render_count(),
+        3,
+        "parent re-entry restores all three slot snapshots without re-running clean children"
     );
 
-    // Inner 的 signal 变化：选择最内层 retained coordinate，直接替换 Inner；Outer
-    // 的共享父树不执行 view。
-    inner_source.set(3);
+    footer_visible_writer.set(false);
+    coordinator.runtime().begin_frame();
     let dirty = coordinator.runtime().take_dirty();
-    assert_eq!(
-        coordinator.outermost_dirty_retained_roots(&dirty).len(),
-        1,
-        "nested dirty scope resolves to the innermost retained root"
+    assert!(
+        coordinator
+            .prepare_retained_dirty(dirty.clone())
+            .expect("selection itself is not an error")
+            .is_none(),
+        "stopping consumption of one named slot is a structural removal and must not retain it implicitly"
     );
-    let prepared = coordinator
-        .prepare_retained_dirty(dirty)
-        .expect("inner retained candidate")
-        .expect("nested dirty coordinate");
-    let resolved = prepared
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("resolved inner retained candidate");
-    coordinator.commit(resolved);
-    assert_eq!(renders_a(), 2, "父级共享子树不因子级边脏而重跑");
-    assert_eq!(renders_inner(), 2, "内层重渲染");
+    publish_named_slots(
+        &mut coordinator,
+        dirty,
+        epoch,
+        footer_visible,
+        header,
+        default,
+        footer,
+    );
+    assert_eq!(
+        slot_child_render_count(),
+        3,
+        "the unconsumed footer closure is not reassembled during structural removal"
+    );
+    assert_eq!(
+        coordinator
+            .active()
+            .expect("footer removal frame is active")
+            .tree()
+            .root()
+            .children
+            .len(),
+        2,
+        "only the retained header and default slots remain mounted"
+    );
 }
 
 #[test]
-fn retained_children_restore_parent_body_without_retaining_the_ui_closure() {
-    let mut coordinator = FrameCoordinator::<Action>::new();
-    let parent = Signal::new(1_u32);
-    let child = Signal::new(1_u32);
-    RENDER_A.with(|count| count.set(0));
-    RENDER_INNER.with(|count| count.set(0));
+fn nested_retained_dirty_roots_share_one_candidate_through_child_slots() {
+    reset_nested_render_counts();
+    let (outer_writer, outer) = signal(1_u32);
+    let (inner_writer, inner) = signal(1_u32);
+    let mut coordinator = FrameCoordinator::new();
 
-    let publish = |coordinator: &mut FrameCoordinator<Action>, dirty: BTreeSet<SemanticKey>| {
-        let mut build = coordinator.begin_build_for_frame(dirty, true);
-        let root = render_slot_host(&mut build, &parent, &child).expect("slot host root");
-        let resolved = coordinator
-            .prepare(root)
-            .expect("slot host candidate")
-            .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-            .expect("slot host frame");
-        coordinator.commit(resolved);
-    };
-
-    publish(&mut coordinator, BTreeSet::new());
-    assert_eq!(renders_a(), 1);
-    assert_eq!(renders_inner(), 1);
-
-    // The parent re-enters from a retained Body snapshot. The original `ui!` child closure has
-    // already been consumed, so this catches accidental cross-frame closure retention.
-    parent.set(2);
-    let dirty = coordinator.runtime().take_dirty();
-    let prepared = coordinator
-        .prepare_retained_dirty(dirty)
-        .expect("parent retained candidate")
-        .expect("parent retained coordinate");
-    let resolved = prepared
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("parent retained frame");
-    coordinator.commit(resolved);
-    assert_eq!(renders_a(), 2);
-    assert_eq!(renders_inner(), 1, "child node was restored by Rc identity");
-
-    child.set(3);
-    let dirty = coordinator.runtime().take_dirty();
-    let prepared = coordinator
-        .prepare_retained_dirty(dirty)
-        .expect("child retained candidate")
-        .expect("child retained coordinate");
-    let resolved = prepared
-        .resolve(|_| Ok::<UiFrame, ()>(empty_frame()))
-        .expect("child retained frame");
-    coordinator.commit(resolved);
-    assert_eq!(
-        renders_a(),
-        2,
-        "child dirty edge does not re-enter the parent"
+    publish_nested(
+        &mut coordinator,
+        BTreeSet::new(),
+        outer.clone(),
+        inner.clone(),
     );
-    assert_eq!(renders_inner(), 2);
+    assert_eq!((outer_render_count(), inner_render_count()), (1, 1));
+
+    outer_writer.set(2);
+    inner_writer.set(2);
+    coordinator.runtime().begin_frame();
+    let dirty = coordinator.runtime().take_dirty();
+    assert_eq!(dirty.len(), 2, "parent and child own separate dirty edges");
+    assert_eq!(
+        coordinator
+            .independently_reenterable_dirty_roots(&dirty.semantic_keys())
+            .expect("both direct retained watches are candidate-reenterable")
+            .len(),
+        2,
+        "the scheduler retains the parent/child relation instead of rejecting it as an overlap"
+    );
+    let prepared = coordinator
+        .prepare_retained_dirty(dirty)
+        .expect("selection is not an error")
+        .expect("the child slot lets parent and child share one candidate");
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("nested retained candidate resolves");
+    coordinator
+        .commit(resolved)
+        .expect("nested retained candidate commits atomically");
+    assert_eq!(
+        (outer_render_count(), inner_render_count()),
+        (2, 2),
+        "the deepest child and its parent both re-enter exactly once"
+    );
+    let text = coordinator
+        .active()
+        .expect("nested candidate is active")
+        .tree()
+        .root()
+        .children
+        .first()
+        .and_then(|node| node.content.as_ref())
+        .and_then(|content| match content {
+            ContentConcern::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+    assert_eq!(text, Some("nested=2"));
+
+    // The parent entry committed above must now own the child's new slot, rather than the
+    // pre-update snapshot it restored while building the candidate.
+    outer_writer.set(3);
+    coordinator.runtime().begin_frame();
+    let prepared = coordinator
+        .prepare_retained_dirty(coordinator.runtime().take_dirty())
+        .expect("prepare parent-only follow-up")
+        .expect("parent-only retained candidate");
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve parent-only follow-up");
+    coordinator
+        .commit(resolved)
+        .expect("commit parent-only follow-up");
+    assert_eq!(
+        (outer_render_count(), inner_render_count()),
+        (3, 2),
+        "a later parent re-entry restores the committed child slot without rerunning the child"
+    );
+    let text = coordinator
+        .active()
+        .expect("parent-only candidate is active")
+        .tree()
+        .root()
+        .children
+        .first()
+        .and_then(|node| node.content.as_ref())
+        .and_then(|content| match content {
+            ContentConcern::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+    assert_eq!(text, Some("nested=2"));
+}
+
+#[test]
+fn stale_nested_candidate_retries_every_rejected_input_edge() {
+    reset_nested_render_counts();
+    let (outer_writer, outer) = signal(1_u32);
+    let (inner_writer, inner) = signal(1_u32);
+    let mut coordinator = FrameCoordinator::new();
+
+    publish_nested(
+        &mut coordinator,
+        BTreeSet::new(),
+        outer.clone(),
+        inner.clone(),
+    );
+
+    outer_writer.set(2);
+    inner_writer.set(2);
+    coordinator.runtime().begin_frame();
+    let dirty = coordinator.runtime().take_dirty();
+    let prepared = coordinator
+        .prepare_retained_dirty(dirty.clone())
+        .expect("prepare nested candidate")
+        .expect("nested candidate");
+    // This invalidates the candidate after both parent and child work have already happened.
+    inner_writer.set(3);
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve stale nested candidate");
+    assert!(
+        coordinator.commit(resolved).is_err(),
+        "a late source rejects the complete candidate transaction"
+    );
+
+    let active_text = coordinator
+        .active()
+        .expect("rejected candidate keeps the old active tree")
+        .tree()
+        .root()
+        .children
+        .first()
+        .and_then(|node| node.content.as_ref())
+        .and_then(|content| match content {
+            ContentConcern::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+    assert_eq!(active_text, Some("nested=1"));
+
+    let retry = coordinator.runtime().take_dirty();
+    assert!(
+        retry.semantic_keys().is_superset(&dirty.semantic_keys()),
+        "rollback restores the full candidate input set, not only the late child source"
+    );
+    let prepared = coordinator
+        .prepare_retained_dirty(retry)
+        .expect("retry selection")
+        .expect("retry nested candidate");
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve retry candidate");
+    coordinator
+        .commit(resolved)
+        .expect("commit retry candidate");
+
+    let text = coordinator
+        .active()
+        .expect("retry is active")
+        .tree()
+        .root()
+        .children
+        .first()
+        .and_then(|node| node.content.as_ref())
+        .and_then(|content| match content {
+            ContentConcern::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+    assert_eq!(text, Some("nested=3"));
+}
+
+#[test]
+fn disjoint_retained_watch_and_presentation_binding_share_one_candidate() {
+    reset_render_count();
+    let (watched_writer, watched) = signal(1_u32);
+    let (bound_writer, bound) = signal("before".to_owned());
+    let mut coordinator = FrameCoordinator::new();
+
+    publish_mixed_retained_and_binding(
+        &mut coordinator,
+        BTreeSet::new(),
+        watched.clone(),
+        bound.clone(),
+    );
+    assert_eq!(render_count(), 1);
+
+    watched_writer.set(2);
+    bound_writer.set("after".to_owned());
+    coordinator.runtime().begin_frame();
+    let dirty = coordinator.runtime().take_dirty();
+    assert_eq!(
+        dirty.len(),
+        2,
+        "both explicit sources contribute a dirty coordinate"
+    );
+    assert!(
+        coordinator
+            .prepare_presentation_dirty(dirty.clone())
+            .expect("binding selection is not an error")
+            .is_none(),
+        "a binding-only candidate cannot consume a normal retained watch"
+    );
+    let prepared = coordinator
+        .prepare_retained_dirty(dirty)
+        .expect("mixed candidate selection is not an error")
+        .expect("a disjoint binding can join the retained candidate");
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("mixed candidate resolves");
+    coordinator
+        .commit(resolved)
+        .expect("mixed candidate commits atomically");
+    assert_eq!(
+        render_count(),
+        2,
+        "the retained component re-enters while the root function remains out of the path"
+    );
+    let text = coordinator
+        .active()
+        .expect("mixed candidate is active")
+        .tree()
+        .root()
+        .children
+        .get(1)
+        .and_then(|node| node.content.as_ref())
+        .and_then(|content| match content {
+            ContentConcern::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+    assert_eq!(text, Some("after"));
+}
+
+#[test]
+fn retained_reentry_synchronizes_a_dirty_binding_in_a_restored_child_slot() {
+    reset_nested_render_counts();
+    let (outer_writer, outer) = signal(1_u32);
+    let (value_writer, value) = signal("before".to_owned());
+    let mut coordinator = FrameCoordinator::new();
+
+    let mut build = coordinator.begin_build_for_frame(DirtySet::default(), true);
+    let root = retained_parent_with_bound_child(&mut build, outer.clone(), value.clone())
+        .expect("build retained parent with bound child");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("prepare initial retained parent")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve initial retained parent");
+    coordinator
+        .commit(resolved)
+        .expect("commit initial retained parent");
+    assert_eq!(outer_render_count(), 1);
+
+    outer_writer.set(2);
+    value_writer.set("after".to_owned());
+    coordinator.runtime().begin_frame();
+    let dirty = coordinator.runtime().take_dirty();
+    assert_eq!(
+        dirty.len(),
+        2,
+        "the parent watch and its restored child's binding are separate graph edges"
+    );
+    let prepared = coordinator
+        .prepare_retained_dirty(dirty)
+        .expect("selection is not an error")
+        .expect("the binding can join the parent retained candidate");
+    let resolved = prepared
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("resolve mixed parent/child candidate");
+    coordinator
+        .commit(resolved)
+        .expect("commit mixed parent/child candidate");
+
+    assert_eq!(
+        outer_render_count(),
+        2,
+        "only the parent re-enters; its materialized child does not require root projection"
+    );
+    let text = coordinator
+        .active()
+        .expect("mixed candidate is active")
+        .tree()
+        .root()
+        .children
+        .first()
+        .and_then(|node| node.content.as_ref())
+        .and_then(|content| match content {
+            ContentConcern::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        });
+    assert_eq!(
+        text,
+        Some("after"),
+        "the candidate writes the new Signal value into the restored child before present"
+    );
 }

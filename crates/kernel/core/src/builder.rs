@@ -83,7 +83,10 @@ impl LogicalContainer {
         C: IntoIterator,
         C::Item: Into<UiNode>,
     {
-        self.node.children = children.into_iter().map(|child| Rc::new(child.into())).collect();
+        self.node.children = children
+            .into_iter()
+            .map(|child| Rc::new(child.into()))
+            .collect();
         self
     }
 }

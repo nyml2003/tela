@@ -121,7 +121,7 @@ impl Default for LayoutBox {
     }
 }
 
-/// 逻辑画布尺寸，保存在输出的 `UiFrame` 中自描述（见 003-场景树与节点模型 7）。
+/// 逻辑画布尺寸，保存在输出的 `RenderPlan` 中自描述（见 003-场景树与节点模型 7）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Viewport {
     /// 逻辑画布宽度。

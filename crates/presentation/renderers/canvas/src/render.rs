@@ -1,7 +1,7 @@
 //! 帧 → canvas 调用翻译（见 007-绘制与渲染后端 2/3）。
 
 use tela_contract::{
-    BackendCapabilities, BorderStroke, Color, DrawPayload, Gradient, Rect, UiFrame,
+    BackendCapabilities, BorderStroke, Color, DrawCommandSource, DrawPayload, Gradient, Rect,
 };
 
 /// 宿主 canvas 2D 能力（浏览器 context / 测试 mock 实现）。
@@ -60,8 +60,12 @@ pub trait Canvas2D {
 }
 
 /// 渲染一帧：遍历有序命令（树序 = z 序，后画覆盖前），按能力集降级。
-pub fn render_frame(canvas: &mut impl Canvas2D, frame: &UiFrame, caps: &BackendCapabilities) {
-    for command in &frame.commands {
+pub fn render_frame<S: DrawCommandSource + ?Sized>(
+    canvas: &mut impl Canvas2D,
+    frame: &S,
+    caps: &BackendCapabilities,
+) {
+    frame.visit_commands(&mut |command| {
         // 预合并 clip：save + clip，绘制后 restore（命令级裁剪，不维护裁剪栈）。
         if let Some(clip) = &command.clip {
             canvas.save();
@@ -77,7 +81,7 @@ pub fn render_frame(canvas: &mut impl Canvas2D, frame: &UiFrame, caps: &BackendC
         if command.clip.is_some() {
             canvas.restore();
         }
-    }
+    });
 }
 
 /// 填充降级：纯色直通；渐变取首断点纯色（canvas 本地行为，见 007-3 降级表）。

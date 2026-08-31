@@ -11,8 +11,10 @@ use crate::{ViewBuildError, ViewResult, ViewSite};
 /// 供 `provide` 写入一个词法 Context 的已拥有能力值。
 ///
 /// 单线程 `Rc` 体系（与 `Signal` 一致）：作用域可以携带 `Signal<T>` / `Computed<T>`，
-/// 使 provide/inject 成为响应式边的另一种源端发现方式（001 §2）——但注意
-/// 恒定值与信号都可注入；**会变的值必须以信号节点注入**，普通值注入即契约恒定。
+/// 使 provide/inject 成为响应式边的另一种源端发现方式（001 §2）。普通值是本次词法
+/// 装配的只读快照：它不会单独登记失效边，但父级候选重装配时会重新解析。需要让已
+/// 提交的消费者独立因变化重入时，必须注入 `Signal<T>` / `Computed<T>`，而不是把普通
+/// capability 当成隐式订阅源。
 #[derive(Clone)]
 pub struct ProvidedValue {
     type_id: TypeId,

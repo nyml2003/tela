@@ -12,10 +12,11 @@ use jni::{
     objects::{JObject, JString},
     sys::{jboolean, jint, jstring},
 };
-use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppStatus};
+use tela_app_abi::{AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppStatus};
 use tela_bridge::BridgeResult;
 use tela_contract::{
-    Color, DrawCommand, DrawPayload, Rect, TextContent, TextStyleRef, UiFrame, Viewport,
+    Color, DrawCommand, DrawPayload, Rect, RenderPlan, TextContent, TextStyleRef, UiFrame,
+    Viewport, WindowCommand,
 };
 use tela_guest_runtime::{GuestRuntime, load_remote_bundle};
 use tela_render_wgpu::WgpuRenderer;
@@ -241,7 +242,7 @@ struct AndroidHost {
     window: Option<Arc<Window>>,
     gpu: Option<GpuSession>,
     runtime: Option<GuestRuntime>,
-    frame: Option<UiFrame>,
+    frame: Option<RenderPlan>,
     frame_token: Option<AppFrameToken>,
     presented_frame_token: Option<AppFrameToken>,
     touch: TouchAdapter,
@@ -468,6 +469,46 @@ impl AndroidHost {
         })
     }
 
+    /// Commits the just-drawn guest candidate, installs any follow-up candidate it requests, and
+    /// consumes the post-present effect batch before another frame can overwrite it.
+    fn acknowledge_presented_frame(&mut self, token: AppFrameToken) -> Result<(), String> {
+        let acknowledged = {
+            let runtime = self
+                .runtime
+                .as_mut()
+                .ok_or_else(|| "acknowledge without a live guest runtime".to_owned())?;
+            runtime
+                .presented(token)
+                .map_err(|error| error.to_string())?
+        };
+
+        for effect in acknowledged.effects {
+            match effect {
+                AppEffect::Window(WindowCommand::Close) => request_activity_finish(),
+                AppEffect::Window(command) => {
+                    // Android has no meaningful minimize/maximize equivalent. Treat this as an
+                    // explicit host capability gap instead of silently dropping a committed effect.
+                    eprintln!(
+                        "tela-target-android: unsupported committed window command: {command:?}"
+                    );
+                }
+            }
+        }
+        if acknowledged.outcome.publish_requested {
+            let publication = self
+                .runtime
+                .as_mut()
+                .expect("guest runtime exists while acknowledging")
+                .publish_latest()
+                .map_err(|error| error.to_string())?;
+            publish_guest_status(&publication.status);
+            self.frame_token = Some(publication.token);
+            self.frame = Some(publication.frame);
+            self.request_redraw();
+        }
+        Ok(())
+    }
+
     fn handle_system_back(&mut self) {
         if self.runtime.is_none() {
             request_activity_finish();
@@ -542,10 +583,10 @@ impl AndroidHost {
         match render_result {
             RenderOutcome::Presented { suboptimal } => {
                 if frame_token != self.presented_frame_token
-                    && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), frame_token)
-                    && let Err(error) = runtime.presented(token)
+                    && let Some(token) = frame_token
+                    && let Err(error) = self.acknowledge_presented_frame(token)
                 {
-                    self.fail(error.to_string());
+                    self.fail(error);
                     return;
                 }
                 self.presented_frame_token = frame_token;
@@ -603,7 +644,7 @@ impl AndroidHost {
         }
     }
 
-    fn diagnostic_frame(&self) -> UiFrame {
+    fn diagnostic_frame(&self) -> RenderPlan {
         let viewport = self.logical_viewport();
         let (title, detail, accent) = match self.failure.as_deref() {
             Some(error) => (
@@ -622,7 +663,7 @@ impl AndroidHost {
                 Color::rgba(0.12, 0.38, 0.92, 1.0),
             ),
         };
-        UiFrame {
+        RenderPlan::from_flat_frame(UiFrame {
             viewport,
             commands: vec![
                 DrawCommand {
@@ -670,7 +711,7 @@ impl AndroidHost {
             ],
             hit_regions: Vec::new(),
             scroll_bounds: Vec::new(),
-        }
+        })
     }
 
     fn logical_viewport(&self) -> Viewport {
@@ -935,7 +976,7 @@ impl GpuSession {
         Ok(())
     }
 
-    fn render(&mut self, frame: &UiFrame) -> RenderOutcome {
+    fn render(&mut self, frame: &RenderPlan) -> RenderOutcome {
         let (texture, suboptimal) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),

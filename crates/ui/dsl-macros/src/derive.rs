@@ -3,11 +3,14 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Error, Expr, Field, Fields, Ident, Result, Type};
+use syn::{
+    Data, DeriveInput, Error, Expr, Field, Fields, GenericArgument, Ident, Path, PathArguments,
+    Result, Type,
+};
 
 use crate::dsl_path;
 
-/// `#[prop(...)]` / `#[inject]` / `#[provide]` / `#[watch(...)]` 字段语义。
+/// `#[prop(...)]` / `#[inject]` / `#[provide]` / `#[watch]` / `#[bind(...)]` 字段语义。
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum FieldKind {
     /// 普通 prop：`..Default` 兜底，组装 `unwrap_or_default()`（T: Default assert）。
@@ -18,10 +21,25 @@ enum FieldKind {
     Option,
     /// `#[inject]`：从 Context 注入（T: Clone assert）。
     Inject,
-    /// `#[provide]`：压入子作用域（T: Clone + Send + Sync + 'static）。
+    /// `#[provide]`：压入子作用域（T: Clone + 'static）。
     Provide,
     /// `#[watch(key = "...")]`：订阅 Signal（类型必须 `Signal<T>`）。
     Watch,
+    /// `#[bind(paint = path)]` 或 `#[bind(layout = path)]`：静态呈现绑定（类型必须
+    /// `Signal<T>`）。它不触发组件重装配。
+    Bind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindKind {
+    Paint,
+    Layout,
+}
+
+struct BindingSpec {
+    kind: BindKind,
+    apply: Path,
+    value_ty: Type,
 }
 
 struct FieldSpec {
@@ -32,6 +50,7 @@ struct FieldSpec {
     /// 解析 Signal/Computed（inject 边化：provide 的响应式节点直达注入点）。
     watch_inject: bool,
     default_expr: Option<Expr>,
+    binding: Option<BindingSpec>,
 }
 
 pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
@@ -59,18 +78,27 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         specs.push(parse_field(field)?);
     }
 
-    // 契约（001 §2）：derive 组件的输入只能是图上的边——`#[watch]` 字段
-    // （Signal/Computed，可叠加 `#[inject]` 从作用域解析）或身份用的 `key`。
-    // 普通值 props / 渲染期 inject / provide 一律编译错误：会变的值以节点传递，
-    // 恒定能力在 setup 期注入，常量写进 view 体。
+    // 契约（001 §2）：derive 组件的动态数据输入只能是图上的边——`#[watch]` 字段
+    // （Signal/Computed，可叠加 `#[inject]` 从作用域解析）、`#[bind]` Signal 边，或
+    // 身份用的 `key`。普通值 Props 仍不是 derive 的动态数据通道。
+    //
+    // `#[inject]` / `#[provide]` 是唯一的额外例外：它们传递的是显式 Context capability，
+    // 不是一个由宏猜测的响应式值。它们在父候选重装配时必须重新解析，因此不会参与
+    // derive retained 的普通 memo hit；但一次已经提交的 retained 子树可以在自己的
+    // 显式 Signal 边变脏时使用原 capability 快照独立重入。
     for spec in &specs {
-        if spec.kind != FieldKind::Watch && spec.ident != "key" {
+        if !matches!(
+            spec.kind,
+            FieldKind::Watch | FieldKind::Bind | FieldKind::Inject | FieldKind::Provide
+        ) && spec.ident != "key"
+        {
             return Err(Error::new_spanned(
                 spec.ty.clone(),
                 format!(
-                    "derive 组件字段 '{}' 只允许 #[watch]（Signal/Computed）或 `key`；\
-                     动态数据用 Signal/Computed 传递（可叠加 #[inject] 从作用域解析），\
-                     恒定能力在 setup 期注入，常量写进 view 体",
+                    "derive 组件字段 '{}' 只允许 #[watch]（Signal/Computed）、\
+                     #[bind(paint = path)] / #[bind(layout = path)]（Signal）、\
+                     #[inject] / #[provide] Context capability 或 `key`；\
+                     动态数据用 Signal/Computed 传递，普通值写进 view 体或手写 UiSpec",
                     spec.ident
                 ),
             ));
@@ -129,6 +157,10 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 }
                 FieldKind::Watch => {
                     let binding = format_ident!("__tela_watch_{ident}");
+                    quote!(#ident: #binding.clone(),)
+                }
+                FieldKind::Bind => {
+                    let binding = format_ident!("__tela_bind_{ident}");
                     quote!(#ident: #binding.clone(),)
                 }
             }
@@ -194,6 +226,26 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
             quote!(__tela_build.watch_source(&#binding, __tela_site))
         });
 
+    // ---- static presentation bindings ----
+    // `#[bind]` is deliberately separate from `#[watch]`: it records a function-pointer edge
+    // from one read-only Signal to this component's own output root, but never reruns `view`.
+    let bind_code = specs.iter().filter_map(|spec| {
+        if spec.kind != FieldKind::Bind {
+            return None;
+        }
+        let ident = &spec.ident;
+        let binding = format_ident!("__tela_bind_{ident}");
+        Some(quote! {
+            let #binding = match props.#ident {
+                Some(value) => value,
+                None => return Err(#dsl::ViewBuildError::MissingRequiredProp {
+                    name: stringify!(#ident),
+                    site: __tela_site,
+                }),
+            };
+        })
+    });
+
     // Retained re-entry receives the previous component instance directly, so it must rebuild
     // the local bindings that the normal props/inject path created before entering `view`.
     let memo_watch_bindings = specs
@@ -237,7 +289,10 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
             let ty = &spec.ty;
             let ident = &spec.ident;
             let binding = format_ident!("__tela_provide_{ident}");
-            quote!(#dsl::ProvidedValue::new::<#ty>(#binding))
+            // `view` needs the value through the child scope while the retained snapshot keeps
+            // its own component field. Context is a read-only capability, so the scope gets an
+            // owned clone rather than consuming the Props-side binding.
+            quote!(#dsl::ProvidedValue::new::<#ty>(#binding.clone()))
         });
 
     // ---- 类型 assert：仅定义检查函数并在未执行的 __check 中引用（编译期强制）----
@@ -254,6 +309,102 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         })
         .collect();
 
+    let binding_assert_calls = specs.iter().filter_map(|spec| {
+        let binding = spec.binding.as_ref()?;
+        let value_ty = &binding.value_ty;
+        Some(quote!(__assert_clone::<#value_ty>();))
+    });
+
+    let binding_snapshot_name = format_ident!("__Tela{}BindingSnapshot", name);
+    let binding_table_name = format_ident!("__TELA_{}_BINDINGS", name);
+    let binding_slots_name = format_ident!("__TELA_{}_BINDING_SLOTS", name);
+    let binding_specs = specs
+        .iter()
+        .filter_map(|spec| spec.binding.as_ref().map(|binding| (spec, binding)))
+        .collect::<Vec<_>>();
+    let binding_snapshot_fields = binding_specs.iter().map(|(spec, _)| {
+        let ident = &spec.ident;
+        let ty = &spec.ty;
+        quote!(#ident: #ty,)
+    });
+    let binding_snapshot_values = binding_specs.iter().map(|(spec, _)| {
+        let ident = &spec.ident;
+        quote!(#ident: __tela_inst.#ident.clone(),)
+    });
+    let binding_sources = binding_specs.iter().map(|(spec, binding)| {
+        let ident = &spec.ident;
+        let value_ty = &binding.value_ty;
+        let source = format_ident!("__tela_{}_{}_binding_source", name, ident);
+        quote! {
+            #[doc(hidden)]
+            #[allow(non_snake_case)]
+            fn #source(component: &#binding_snapshot_name) -> &#dsl::Signal<#value_ty> {
+                &component.#ident
+            }
+        }
+    });
+    let binding_slots = binding_specs.iter().map(|(spec, binding)| {
+        let ident = &spec.ident;
+        let value_ty = &binding.value_ty;
+        let source = format_ident!("__tela_{}_{}_binding_source", name, ident);
+        let slot = format_ident!("__TELA_{}_{}_BINDING_SLOT", name, ident);
+        let apply = &binding.apply;
+        let constructor = match binding.kind {
+            BindKind::Paint => quote!(#dsl::BindingSlot::paint),
+            BindKind::Layout => quote!(#dsl::BindingSlot::layout),
+        };
+        quote! {
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            static #slot: #dsl::BindingSlot<#binding_snapshot_name, #value_ty, #dsl::NodePresentation> =
+                #constructor(#source, #apply);
+        }
+    });
+    let binding_slot_refs = binding_specs.iter().map(|(spec, _)| {
+        let ident = &spec.ident;
+        let slot = format_ident!("__TELA_{}_{}_BINDING_SLOT", name, ident);
+        quote!( &#slot )
+    });
+    let binding_support = if binding_specs.is_empty() {
+        quote!()
+    } else {
+        let binding_count = binding_specs.len();
+        quote! {
+            #[doc(hidden)]
+            #[derive(Clone)]
+            struct #binding_snapshot_name {
+                #(#binding_snapshot_fields)*
+            }
+
+            #(#binding_sources)*
+            #(#binding_slots)*
+
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            static #binding_slots_name: [&dyn #dsl::BindingSlotDyn<#binding_snapshot_name, #dsl::NodePresentation>; #binding_count] = [
+                #(#binding_slot_refs),*
+            ];
+
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            static #binding_table_name: #dsl::StaticBindingTable<#binding_snapshot_name, #dsl::NodePresentation> =
+                #dsl::StaticBindingTable::new(&#binding_slots_name);
+        }
+    };
+    let binding_attach = if binding_specs.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            __tela_out = __tela_out.attach_static_presentation_binding(
+                #binding_snapshot_name {
+                    #(#binding_snapshot_values)*
+                },
+                &#binding_table_name,
+                __tela_site,
+            );
+        }
+    };
+
     // ---- render 主体 ----
     let has_provide = specs.iter().any(|spec| spec.kind == FieldKind::Provide);
     let view_call = if has_provide {
@@ -262,12 +413,12 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
                 vec![#(#provided_values),*],
                 __tela_site,
                 |__tela_build| {
-                    __tela_inst.view(__tela_build, __tela_body)
+                    __tela_inst.view(__tela_build, &__tela_children)
                 },
             )
         }
     } else {
-        quote!({ __tela_inst.view(__tela_build, __tela_body) })
+        quote!({ __tela_inst.view(__tela_build, &__tela_children) })
     };
     let watch_attach = if specs.iter().any(|spec| spec.kind == FieldKind::Watch) {
         quote! {
@@ -287,13 +438,15 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
 
     // ---- retained 求值语义（默认，001 §2）：入边无脏 → 不重求值 ----
     // 命中判定 = 上次实例快照的纯身份比较（watch 字段比 SignalId，key 已含于身份）。
-    // children 在首次 render 后被物化为无动作槽位快照。命中不会执行调用栈闭包；
-    // 定点重入则用同一组 Rc 节点和 watch 边恢复 Body。不可快照的 children（动作、
-    // 组件动作、动画）仍然退出 retained，保持候选事务边界。
+    // children 只有被 view 显式消费后才物化为候选快照。命中不会执行调用栈闭包；定点
+    // 重入把同一组 Rc 节点、watch 边、可克隆 HostInput route blueprint 和动画 scope
+    // 作为单次 Children 槽位交还 view，由它决定是否继续消费。
+    // 组件自身的 Output / HostInput 路由和动画调度同样由运行时作为候选 blueprint 保存并
+    // 重装，保持候选事务边界。
     let memo_snapshot_name = format_ident!("__Tela{}MemoSnapshot", name);
     let memo_field_matches = specs
         .iter()
-        .filter(|spec| spec.kind == FieldKind::Watch)
+        .filter(|spec| matches!(spec.kind, FieldKind::Watch | FieldKind::Bind))
         .map(|spec| {
             let ident = &spec.ident;
             quote!(self.#ident.id() == cached.component.#ident.id())
@@ -302,81 +455,111 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
         const _: () = {
             impl #name {
                 #[doc(hidden)]
-                fn __tela_memo_matches(&self, cached: &dyn ::core::any::Any) -> bool {
+                fn __tela_memo_matches<__TelaAction: 'static>(
+                    &self,
+                    cached: &dyn ::core::any::Any,
+                ) -> bool {
                     cached
-                        .downcast_ref::<#memo_snapshot_name>()
+                        .downcast_ref::<#memo_snapshot_name<__TelaAction>>()
                         .is_some_and(|cached| true #(&& #memo_field_matches)*)
                 }
             }
         };
     };
+    // Context capability is an explicit lexical input, but it has neither a signal identity nor
+    // a value-comparison contract. A parent reassembly must therefore resolve it again instead
+    // of claiming a retained hit based only on the component's Signal fields. We still record a
+    // retained snapshot below: a descendant may independently re-enter against the capability
+    // snapshot that belongs to the currently committed parent tree.
+    let memo_hit_is_safe = specs
+        .iter()
+        .all(|spec| matches!(spec.kind, FieldKind::Watch | FieldKind::Bind) || spec.ident == "key");
     let memo_render = quote! {
         let __tela_memo = __tela_build.memo_enabled();
-        if __tela_memo {
+        if __tela_memo && #memo_hit_is_safe {
             if let Some(__tela_cached) =
-                __tela_build.memo_hit(|cached| __tela_inst.__tela_memo_matches(cached))
+                __tela_build.memo_hit(|cached| {
+                    __tela_inst.__tela_memo_matches::<__TelaAction>(cached)
+                })
             {
                 // 命中：缓存输出已携带 watch 声明，直接拼回，跳过 view 与重复 attach。
                 return Ok(__tela_cached);
             }
         }
-        let (__tela_body, __tela_retained_children) =
-            __tela_children.build_with_retained(__tela_build)?;
         let mut __tela_out = #view_call?;
         #watch_attach
-        if __tela_memo && let Some(__tela_retained_children) = __tela_retained_children {
-            // 记录上次实例快照（自包含 retained element：全 watch 句柄 + 坐标 + view）。
-            // 快照由绑定重新构造（句柄 clone = Rc 递增），不要求组件结构体 Clone。
-            // 必须发生在 watch attach 之后：缓存条目要携带组件自身的订阅，
-            // 否则脏检查看不到它的 scope，signal 变化会被误命中。
-            __tela_build.memo_record(
-                #memo_snapshot_name {
-                    component: #name { #(#assembly)* },
-                    children: __tela_retained_children,
-                },
-                &__tela_out,
-                #name::__tela_memo_reenter::<A>,
-                __tela_site,
-            );
+        #binding_attach
+        if __tela_memo {
+            if let Some(__tela_retained_children) = __tela_children.retained_snapshot() {
+                // 记录上次实例快照（自包含 retained element：全 watch 句柄 + 坐标 + view）。
+                // 快照由绑定重新构造（句柄 clone = Rc 递增），不要求组件结构体 Clone。
+                // 必须发生在 watch attach 之后：缓存条目要携带组件自身的订阅，
+                // 否则脏检查看不到它的 scope，signal 变化会被误命中。
+                __tela_build.memo_record(
+                    #memo_snapshot_name::<__TelaAction> {
+                        component: #name { #(#assembly)* },
+                        marker: ::core::marker::PhantomData,
+                    },
+                    __tela_retained_children,
+                    &__tela_out,
+                    #name::__tela_memo_reenter::<__TelaAction>,
+                    __tela_site,
+                );
+            } else {
+                __tela_build.memo_forget_current();
+            }
         }
         Ok(__tela_out)
     };
 
     let impl_block = quote! {
         #[doc(hidden)]
-        struct #memo_snapshot_name {
+        struct #memo_snapshot_name<__TelaAction: 'static> {
             component: #name,
-            children: #dsl::RetainedChildren,
+            marker: ::core::marker::PhantomData<__TelaAction>,
         }
 
         impl #name {
             #[doc(hidden)]
-            fn __tela_memo_reenter<A>(
-                __tela_build: &mut #dsl::ViewBuild<A>,
+            fn __tela_memo_reenter<__TelaAction: 'static>(
+                __tela_build: &mut #dsl::ViewBuild<__TelaAction>,
                 __tela_cached: ::std::rc::Rc<dyn ::core::any::Any>,
                 __tela_site: #dsl::ViewSite,
-            ) -> #dsl::ViewResult<#dsl::ViewOutput<A>> {
+            ) -> #dsl::ViewResult<#dsl::ViewOutput<__TelaAction>> {
                 let __tela_snapshot = __tela_cached
-                    .downcast_ref::<#memo_snapshot_name>()
+                    .downcast_ref::<#memo_snapshot_name<__TelaAction>>()
                     .expect("retained evaluator and snapshot component type must agree");
                 let __tela_inst = &__tela_snapshot.component;
-                __tela_build.retain_retained_children(&__tela_snapshot.children);
-                let __tela_body = __tela_snapshot.children.restore::<A>();
+                let __tela_children = __tela_build.retained_children_slot();
                 #(#memo_watch_bindings)*
                 #(#memo_provide_bindings)*
-                let mut __tela_out = #view_call?;
+                // Independent retained re-entry begins below the original lexical parent. The
+                // build context restores this component's existing private Output scope so any
+                // nested component still routes its Output to the same logical owner.
+                let mut __tela_out = __tela_build
+                    .with_retained_output_scope::<(), _>(|__tela_build| #view_call)?;
                 #watch_attach
-                __tela_build.memo_record_erased(
-                    __tela_cached,
-                    &__tela_out,
-                    #name::__tela_memo_reenter::<A>,
-                    __tela_site,
-                );
+                #binding_attach
+                if let Some(__tela_retained_children) = __tela_children.retained_snapshot() {
+                    __tela_build.memo_record_erased(
+                        __tela_cached,
+                        __tela_retained_children,
+                        &__tela_out,
+                        #name::__tela_memo_reenter::<__TelaAction>,
+                        __tela_site,
+                    );
+                } else {
+                    __tela_build.memo_forget_current();
+                }
                 Ok(__tela_out)
             }
         }
 
         impl #dsl::DslComponent for #name {
+            type UiSpec<__TelaAction: 'static> = Self;
+        }
+
+        impl<__TelaAction: 'static> #dsl::UiSpec<__TelaAction> for #name {
             type Props = #props_name;
             type State = ();
             type Event = ();
@@ -384,16 +567,17 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
 
             #identity_key
 
-            fn render<'__tela_children, A>(
-                __tela_context: &mut #dsl::ComponentRenderContext<'_, A>,
+            fn assemble<'__tela_children>(
+                __tela_context: &mut #dsl::ComponentAssembleContext<'_, __TelaAction>,
                 props: Self::Props,
                 _state: &Self::State,
-                __tela_children: #dsl::Children<'__tela_children, A>,
-            ) -> #dsl::ViewResult<#dsl::ViewOutput<A>> {
+                __tela_children: #dsl::Children<'__tela_children, __TelaAction>,
+            ) -> #dsl::ViewResult<#dsl::ViewOutput<__TelaAction>> {
                 let __tela_site = __tela_context.site();
                 let __tela_build = __tela_context.build();
                 #(#inject_code)*
                 #(#watch_code)*
+                #(#bind_code)*
                 #(#provide_code)*
                 let __tela_inst = #name {
                     #(#assembly)*
@@ -410,12 +594,14 @@ pub fn expand_derive(input: DeriveInput) -> Result<TokenStream2> {
             fn __assert_clone<T: Clone>() {}
             fn __check() {
                 #(#assert_calls)*
+                #(#binding_assert_calls)*
             }
         };
     };
 
     let mut output = TokenStream2::new();
     output.extend(props_struct);
+    output.extend(binding_support);
     output.extend(impl_block);
 
     Ok(output)
@@ -431,6 +617,7 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
     let mut kind = FieldKind::Plain;
     let mut watch_inject = false;
     let mut default_expr = None;
+    let mut binding = None;
 
     for attr in &field.attrs {
         if !attr.path().is_ident("prop") {
@@ -463,6 +650,47 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
                         ));
                     }
                 }
+                continue;
+            }
+            if attr.path().is_ident("bind") {
+                set_kind(&mut kind, FieldKind::Bind, attr, &ident)?;
+                let mut parsed = None;
+                attr.parse_nested_meta(|meta| {
+                    let kind = if meta.path.is_ident("paint") {
+                        BindKind::Paint
+                    } else if meta.path.is_ident("layout") {
+                        BindKind::Layout
+                    } else {
+                        return Err(meta.error(
+                            "unknown #[bind(...)] option; expected paint = function_path or layout = function_path",
+                        ));
+                    };
+                    if parsed.is_some() {
+                        return Err(meta.error(
+                            "#[bind(...)] accepts exactly one of paint = function_path or layout = function_path",
+                        ));
+                    }
+                    let apply = meta.value()?.parse::<Path>()?;
+                    parsed = Some((kind, apply));
+                    Ok(())
+                })?;
+                let Some((kind, apply)) = parsed else {
+                    return Err(Error::new_spanned(
+                        attr,
+                        "#[bind(...)] requires paint = function_path or layout = function_path",
+                    ));
+                };
+                let Some(value_ty) = signal_value_type(&ty) else {
+                    return Err(Error::new_spanned(
+                        &ty,
+                        "#[bind(...)] field must have type Signal<T>",
+                    ));
+                };
+                binding = Some(BindingSpec {
+                    kind,
+                    apply,
+                    value_ty,
+                });
                 continue;
             }
             // 非 DSL 属性（derive/其他）忽略
@@ -505,6 +733,7 @@ fn parse_field(field: &Field) -> Result<FieldSpec> {
         kind,
         watch_inject,
         default_expr,
+        binding,
     })
 }
 
@@ -518,7 +747,7 @@ fn set_kind(
         return Err(Error::new_spanned(
             attr,
             format!(
-                "field '{}' has conflicting DSL attributes (inject/provide/watch/prop are exclusive)",
+                "field '{}' has conflicting DSL attributes (inject/provide/watch/bind/prop are exclusive)",
                 ident
             ),
         ));
@@ -529,6 +758,31 @@ fn set_kind(
 
 fn is_option_type(ty: &Type) -> bool {
     is_named_generic(ty, "Option")
+}
+
+/// Returns `T` for a direct `Signal<T>` field type.
+///
+/// A static presentation slot needs `&Signal<T>` as a function-pointer source. `Computed<T>` is
+/// intentionally not accepted here until it has the same erased subscription surface; falling
+/// back to `#[watch]` remains explicit and sound.
+fn signal_value_type(ty: &Type) -> Option<Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Signal" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        GenericArgument::Type(value) => Some(value.clone()),
+        _ => None,
+    })
 }
 
 /// 类型是否为 `Name<...>`（允许 `std::option::Option<U>` 等路径）。

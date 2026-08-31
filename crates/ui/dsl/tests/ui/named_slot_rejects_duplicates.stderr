@@ -1,0 +1,5 @@
+error: duplicate named Fragment slot in one component invocation
+  --> tests/ui/named_slot_rejects_duplicates.rs:11:29
+   |
+11 |             <Fragment slot={"header"}>
+   |                             ^^^^^^^^

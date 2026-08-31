@@ -9,6 +9,7 @@ use tela_core::LayoutContainer;
 use crate::shared::{TEXT, TEXT_SECONDARY, field_box, text};
 
 /// 文本输入框。
+#[derive(Clone)]
 pub struct Input {
     value: String,
     placeholder: String,
@@ -139,6 +140,7 @@ impl From<Input> for UiNode {
 }
 
 /// 数字输入框：值 + 步进箭头（▲▼），受控数字。
+#[derive(Clone)]
 pub struct InputNumber {
     value: f64,
     min: f64,

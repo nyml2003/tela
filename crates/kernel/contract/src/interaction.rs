@@ -469,6 +469,11 @@ pub enum KernelInteraction {
     },
     /// 快捷键语义。
     ShortcutActivated {
+        /// 已呈现树中用于语义冒泡的分发起点。
+        ///
+        /// 这不是物理命中目标，也不是应用动作地址。它由 Kernel 从当前模态、焦点或根
+        /// 节点选出，只用于让组件路由在同一已呈现树中寻找拥有者。
+        origin_node_id: NodeId,
         /// 快捷键 id。
         shortcut_id: ShortcutId,
     },
@@ -479,7 +484,7 @@ pub enum KernelInteraction {
 }
 
 impl KernelInteraction {
-    /// 返回当前交互的帧内目标；全局焦点和快捷键没有单一目标。
+    /// 返回当前交互的帧内路由节点；全局焦点没有单一节点。
     pub const fn target_node_id(&self) -> Option<NodeId> {
         match self {
             Self::Pointer { node_id, .. }
@@ -493,10 +498,8 @@ impl KernelInteraction {
             | Self::OpenModal { node_id }
             | Self::CloseModal { node_id } => Some(*node_id),
             Self::OutsidePress { teleport_node_id } => Some(*teleport_node_id),
-            Self::FocusChanged { .. }
-            | Self::ShortcutActivated { .. }
-            | Self::SaveFocus
-            | Self::RestoreFocus => None,
+            Self::ShortcutActivated { origin_node_id, .. } => Some(*origin_node_id),
+            Self::FocusChanged { .. } | Self::SaveFocus | Self::RestoreFocus => None,
         }
     }
 }

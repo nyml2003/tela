@@ -38,6 +38,7 @@ export interface TelaWebviewBindings {
   validate_development_bundle(index: DevelopmentBundleIndex, bytes: Uint8Array): ValidatedBundle;
   decode_app_publication(bytes: Uint8Array): WebAppPublication;
   decode_app_transport_publication(bytes: Uint8Array): WebAppPublication;
+  validate_browser_presented_effects(bytes: Uint8Array): void;
   decode_app_status(bytes: Uint8Array): WebAppStatus;
   event_viewport(width: number, height: number): Uint8Array;
   event_tick(timestampMs: bigint): Uint8Array;

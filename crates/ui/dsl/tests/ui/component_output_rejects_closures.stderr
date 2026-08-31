@@ -1,5 +1,5 @@
 error: component output requires a function path
- --> tests/ui/component_output_rejects_closures.rs:8:39
+ --> tests/ui/component_output_rejects_closures.rs:6:40
   |
-8 |         <Text value={"ready"} output={|_: ()| Some(())} />
-  |                                       ^^^^^^^^^^^^^^^^
+6 |         <Text value={"ready"} @output={|_: ()| ()} />
+  |                                        ^^^^^^^^^^

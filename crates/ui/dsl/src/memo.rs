@@ -3,8 +3,10 @@
 //! 命中条件（同时满足才允许记录/命中）：
 //! - 组件经 `#[derive(DslComponent)]` 声明（State = ()，无"私有状态变化绕过边"的
 //!   陈旧风险）；
-//! - child 内容已物化为无动作的 retained 槽位快照（不会跨帧保存调用栈 closure）；
-//! - render 输出只携带 watch 计划（无 ActionTarget / 组件动作 / 动画调度请求）；
+//! - child 内容已物化为 retained 槽位快照（不会跨帧保存调用栈 closure；路由与动画以
+//!   candidate-cloneable blueprint 保存）；
+//! - HostInput、Parent Event 路由和按组件 scope 归属的动画调度都以不可变 blueprint / 快照
+//!   随 retained entry 保存，并在候选中重新安装；
 //! - 宿主经 `begin_build_for_frame` 声明本帧 dirty 集（signal 驱动帧），且缓存子树
 //!   内任何订阅的解析 key 都不在 dirty 集；
 //! - 上次实例快照的身份比较通过（宏生成的纯 `SignalId` u64 比较，零内容比较）。
@@ -22,8 +24,11 @@ use std::{
 use tela_contract::{SemanticKey, UiNode};
 use tela_core::UiTree;
 
-use crate::owner::{ComponentIdentity, ScopeId};
-use crate::view::{PendingWatch, ViewBuild, ViewOutput, ViewResult, ViewSite};
+use crate::owner::{ComponentEventRoute, ComponentHostInputRoute, ComponentIdentity, ScopeId};
+use crate::view::{
+    AnimationSchedules, HostInputKeyOwners, PendingPresentationBinding, PendingStructuralWatch,
+    PendingWatch, RetainedSlots, ViewBuild, ViewOutput, ViewResult, ViewSite,
+};
 
 /// Type-erased, monomorphized retained evaluator generated for each derive component.
 ///
@@ -42,6 +47,10 @@ pub(crate) type RetainedEntry<A> = (ScopeId, SemanticKey, Rc<MemoEntry<A>>);
 pub(crate) struct MemoEntry<A> {
     /// 类型擦除的上次组件实例快照（字段全为 Signal/Computed 句柄，clone = Rc 递增）。
     pub(crate) inputs: Rc<dyn Any>,
+    /// Candidate-owned materialized children slots. Keeping these outside the type-erased
+    /// component snapshot lets a deepest-first re-entry replace a child slot without cloning or
+    /// mutating the parent component instance that owns the snapshot.
+    pub(crate) children: RetainedSlots<A>,
     /// Stable component identity required to re-enter this element without walking its parent.
     pub(crate) identity: ComponentIdentity,
     /// Original call site, retained for scoped provide diagnostics during re-entry.
@@ -53,6 +62,28 @@ pub(crate) struct MemoEntry<A> {
     /// 缓存输出携带的全部 watch（含嵌套子树，锚点已 rebase 到缓存节点内的最终位置）；
     /// 命中时原样重新声明，`ComponentRuntime::reconcile` 按 `(key, signal_id)` 复用订阅。
     pub(crate) watches: Vec<PendingWatch>,
+    /// Transparent built-ins may own an explicit source edge without owning a physical node.
+    /// The lease target travels with the same retained snapshot so re-entry neither borrows a
+    /// descendant key nor loses the edge for an empty structure.
+    pub(crate) structural_watches: Vec<PendingStructuralWatch>,
+    /// Cached static presentation bindings travel with the same immutable output root. A memo
+    /// hit must re-register them so structural reconciliation neither leaks an unmounted binding
+    /// nor silently drops a retained one.
+    pub(crate) presentation_bindings: Vec<PendingPresentationBinding>,
+    /// HostInput route blueprints declared by this retained output. They are copied into every
+    /// candidate that reuses or independently rebuilds this entry; active routes remain live
+    /// until that candidate is presented.
+    pub(crate) host_input_routes: Vec<Box<dyn ComponentHostInputRoute<A>>>,
+    /// Private provenance for the route targets above. Retained reuse carries this proof with
+    /// the immutable route blueprints, so a wrapper cannot claim a descendant it did not create.
+    pub(crate) host_input_key_owners: HostInputKeyOwners,
+    /// Nested child-to-parent Event handlers declared while this entry was first assembled.
+    /// The outer component's own handler is registered after `UiSpec::assemble` returns and is
+    /// therefore intentionally not stored here.
+    pub(crate) component_events: BTreeMap<ComponentIdentity, Box<dyn ComponentEventRoute<A>>>,
+    /// Active animation requests owned by component scopes in this retained subtree. A re-entry
+    /// replaces these scopes instead of preserving an old active request.
+    pub(crate) animation_schedules: AnimationSchedules,
     /// 本子树内所有组件身份（含自身），供 owner frame 补登记 `seen`，
     /// 防止跳过子树被误判 Unmounted / 丢 State。
     pub(crate) subtree: BTreeSet<ComponentIdentity>,
@@ -91,13 +122,20 @@ impl<A> Default for MemoCandidate<A> {
 /// `Rc` 共享快照：每帧只克隆句柄，不深拷整表。
 pub(crate) type WatchKeysByScope = BTreeMap<ScopeId, BTreeSet<SemanticKey>>;
 
+/// 已解析的树坐标反查到直接声明它的组件 scope。
+///
+/// 这个索引和 retained 子树索引刻意不是一回事：一个父 retained 条目会覆盖子树的
+/// 所有 watch，但只有直接 owning scope 才能说明哪一个 view 必须重新执行。把二者混为
+/// 一谈会在父子同时变脏时错误地只重入最深子树，丢掉父自己的变化。
+type WatchScopesByKey = BTreeMap<SemanticKey, BTreeSet<ScopeId>>;
+
 /// retained 运行时。与动作类型无关，可挂在任意 `FrameCoordinator` 上。
 pub(crate) struct RenderMemoRuntime<A> {
     active: BTreeMap<ScopeId, Rc<MemoEntry<A>>>,
     root_keys: BTreeMap<ScopeId, SemanticKey>,
-    /// Graph dirty key -> every retained root whose cached subtree contains that watch.
-    /// Built on commit, so frame-time tree scheduling never scans all retained entries.
-    dirty_entries_by_key: BTreeMap<SemanticKey, BTreeSet<ScopeId>>,
+    /// Graph dirty key -> the scopes that directly declared that watch. Built on commit, so
+    /// frame-time retained scheduling never scans all active component entries.
+    watch_scopes_by_key: WatchScopesByKey,
     pending: Option<Rc<RefCell<MemoCandidate<A>>>>,
     watch_keys: Rc<WatchKeysByScope>,
 }
@@ -107,7 +145,7 @@ impl<A> Default for RenderMemoRuntime<A> {
         Self {
             active: BTreeMap::new(),
             root_keys: BTreeMap::new(),
-            dirty_entries_by_key: BTreeMap::new(),
+            watch_scopes_by_key: BTreeMap::new(),
             pending: None,
             watch_keys: Rc::new(BTreeMap::new()),
         }
@@ -168,7 +206,7 @@ impl<A> RenderMemoRuntime<A> {
             .filter(|(scope, _)| self.active.contains_key(scope))
             .collect();
         self.watch_keys = Rc::new(watch_keys);
-        self.rebuild_dirty_entry_index();
+        self.rebuild_watch_scope_index();
         self.pending = None;
     }
 
@@ -180,7 +218,7 @@ impl<A> RenderMemoRuntime<A> {
             watch_keys.entry(scope).or_default().insert(key);
         }
         self.watch_keys = Rc::new(watch_keys);
-        self.rebuild_dirty_entry_index();
+        self.rebuild_watch_scope_index();
     }
 
     /// 丢弃未随成功帧提交的候选记忆（`Rc` 丢弃即可；active 不受影响）。
@@ -188,22 +226,14 @@ impl<A> RenderMemoRuntime<A> {
         self.pending = None;
     }
 
-    fn rebuild_dirty_entry_index(&mut self) {
-        let mut index = BTreeMap::<SemanticKey, BTreeSet<ScopeId>>::new();
-        for (retained_scope, entry) in &self.active {
-            for identity in &entry.subtree {
-                let Some(keys) = self.watch_keys.get(&identity.scope()) else {
-                    continue;
-                };
-                for key in keys {
-                    index
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(*retained_scope);
-                }
+    fn rebuild_watch_scope_index(&mut self) {
+        let mut index = WatchScopesByKey::new();
+        for (scope, keys) in self.watch_keys.iter() {
+            for key in keys {
+                index.entry(key.clone()).or_default().insert(*scope);
             }
         }
-        self.dirty_entries_by_key = index;
+        self.watch_scopes_by_key = index;
     }
 
     /// Records each retained entry's actual root coordinate after the candidate tree has been
@@ -246,45 +276,44 @@ impl<A> RenderMemoRuntime<A> {
         }
     }
 
-    /// Returns the innermost retained roots responsible for this dirty set. A retained parent
-    /// may hold materialized children slots, so a child's dirty edge must re-enter that child
-    /// directly and splice it into the shared parent subtree instead of rebuilding the parent.
-    /// The result is tree-coordinate based; no component input or rendered content participates
-    /// in this selection.
-    pub(crate) fn outermost_dirty_roots(
+    /// Returns retained roots eligible for one candidate re-entry pass.
+    ///
+    /// A selected root must directly own every dirty watch assigned to it. Roots may nest: the
+    /// frame coordinator evaluates the deepest entry first and passes its candidate child slot
+    /// into each ancestor before selecting only outermost node replacements for the final tree
+    /// splice. Ordinary components without their own retained entry still force rooted assembly.
+    ///
+    /// `None` means that this dirty set is not safe for independent re-entry. The result remains
+    /// tree-coordinate based; no component input or rendered content participates in selection.
+    pub(crate) fn independently_reenterable_dirty_roots(
         &self,
         tree: &UiTree,
         dirty: &BTreeSet<SemanticKey>,
-    ) -> Vec<(ScopeId, SemanticKey)> {
-        let scopes = dirty
-            .iter()
-            .filter_map(|key| self.dirty_entries_by_key.get(key))
-            .flat_map(|scopes| scopes.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let mut candidates: Vec<(ScopeId, SemanticKey, Vec<tela_contract::NodeId>)> = scopes
-            .into_iter()
-            .filter_map(|scope| {
-                let key = self.root_keys.get(&scope)?.clone();
-                let node = tree.node_id_for_key(&key)?;
-                Some((scope, key, tree.logical_path(node)?))
-            })
-            .collect();
-        candidates.sort_by_key(|(_, _, path)| std::cmp::Reverse(path.len()));
-        let mut selected = Vec::new();
-        for (scope, key, path) in candidates {
-            if selected.iter().any(
-                |(_, _, descendant): &(ScopeId, SemanticKey, Vec<tela_contract::NodeId>)| {
-                    descendant.starts_with(&path)
-                },
-            ) {
-                continue;
-            }
-            selected.push((scope, key, path));
+    ) -> Option<Vec<(ScopeId, SemanticKey)>> {
+        let mut scopes = BTreeSet::new();
+        for key in dirty {
+            let watched_scopes = self.watch_scopes_by_key.get(key)?;
+            scopes.extend(watched_scopes.iter().copied());
         }
-        selected
-            .into_iter()
-            .map(|(scope, key, _)| (scope, key))
-            .collect()
+        let mut candidates = Vec::with_capacity(scopes.len());
+        for scope in scopes {
+            // A watch owned by an ordinary component/root function has no retained entry of its
+            // own. It cannot be skipped merely because another dirty key happens to have one.
+            // Falling back here preserves the one rooted candidate as the semantic authority.
+            let key = self.root_keys.get(&scope)?.clone();
+            let node = tree.node_id_for_key(&key)?;
+            candidates.push((scope, key, tree.logical_path(node)?));
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by_key(|(_, _, path)| path.len());
+        Some(
+            candidates
+                .into_iter()
+                .map(|(scope, key, _)| (scope, key))
+                .collect(),
+        )
     }
 
     /// Clones the active entries selected for independent re-entry. The clone is only an `Rc`
@@ -341,6 +370,7 @@ mod tests {
     fn entry(inputs_value: u32) -> Rc<MemoEntry<()>> {
         Rc::new(MemoEntry {
             inputs: Rc::new(inputs_value),
+            children: RetainedSlots::empty(),
             identity: ComponentIdentity::from_scoped_site(
                 "memo-test",
                 ScopeId::ROOT,
@@ -351,6 +381,12 @@ mod tests {
             rerender: unused_rerender,
             node: Rc::new(UiNode::new(NodeKind::View)),
             watches: Vec::new(),
+            structural_watches: Vec::new(),
+            presentation_bindings: Vec::new(),
+            host_input_routes: Vec::new(),
+            host_input_key_owners: HostInputKeyOwners::new(),
+            component_events: BTreeMap::new(),
+            animation_schedules: AnimationSchedules::new(),
             subtree: BTreeSet::new(),
         })
     }

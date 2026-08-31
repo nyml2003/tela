@@ -11,5 +11,7 @@ serde = { version = "1", features = ["derive"] }
 tela-contract = { path = "../../kernel/contract" }
 tela-app-session = { path = "../app-session" }
 
-[lints]
-workspace = true
+[lints.rust]
+# The library itself keeps `#![forbid(unsafe_code)]`. Integration tests expand
+# `export_guest!`, whose audited FFI exports locally allow unsafe attributes.
+unsafe_code = "deny"

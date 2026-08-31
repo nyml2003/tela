@@ -11,7 +11,7 @@
 use std::{any::Any, rc::Rc};
 
 use crate::runtime::WatchSignal;
-use crate::signal::{Signal, SignalId};
+use crate::signal::{Signal, SignalId, signal};
 
 /// 派生节点：对读取方表现为只读信号；源订阅令牌由 `Rc` 保活，clone 共享同一派生。
 pub struct Computed<T> {
@@ -57,6 +57,10 @@ impl<T: 'static> WatchSignal for Computed<T> {
         self.signal.id()
     }
 
+    fn version(&self) -> u64 {
+        self.signal.version()
+    }
+
     fn subscribe_erased(&self, listener: Rc<dyn Fn()>) -> Box<dyn Any> {
         self.signal.subscribe_erased(listener)
     }
@@ -68,18 +72,15 @@ where
     A: 'static,
     T: Clone + PartialEq + 'static,
 {
-    let out = Signal::new(a.with(|value| f(value)));
+    let (out, signal) = signal(a.with(|value| f(value)));
     let read_a = a.clone();
-    let recompute = {
-        let out = out.clone();
-        Rc::new(move || out.set(read_a.with(|value| f(value)))) as Rc<dyn Fn()>
-    };
+    let recompute = { Rc::new(move || out.set(read_a.with(|value| f(value)))) as Rc<dyn Fn()> };
     let _keep_alive = {
         let recompute = Rc::clone(&recompute);
         Rc::new(a.subscribe(move || recompute())) as Rc<dyn Any>
     };
     Computed {
-        signal: out,
+        signal,
         _keep_alive,
     }
 }
@@ -95,11 +96,10 @@ where
     B: 'static,
     T: Clone + PartialEq + 'static,
 {
-    let out = Signal::new(a.with(|a| b.with(|b| f(a, b))));
+    let (out, signal) = signal(a.with(|a| b.with(|b| f(a, b))));
     let read_a = a.clone();
     let read_b = b.clone();
     let recompute = {
-        let out = out.clone();
         Rc::new(move || {
             let next = read_a.with(|a| read_b.with(|b| f(a, b)));
             out.set(next)
@@ -115,7 +115,7 @@ where
     };
     let _keep_alive = Rc::new((sub_a, sub_b)) as Rc<dyn Any>;
     Computed {
-        signal: out,
+        signal,
         _keep_alive,
     }
 }
@@ -133,12 +133,11 @@ where
     C: 'static,
     T: Clone + PartialEq + 'static,
 {
-    let out = Signal::new(a.with(|a| b.with(|b| c.with(|c| f(a, b, c)))));
+    let (out, signal) = signal(a.with(|a| b.with(|b| c.with(|c| f(a, b, c)))));
     let read_a = a.clone();
     let read_b = b.clone();
     let read_c = c.clone();
     let recompute = {
-        let out = out.clone();
         Rc::new(move || {
             let next = read_a.with(|a| read_b.with(|b| read_c.with(|c| f(a, b, c))));
             out.set(next)
@@ -158,7 +157,7 @@ where
     };
     let _keep_alive = Rc::new((sub_a, sub_b, sub_c)) as Rc<dyn Any>;
     Computed {
-        signal: out,
+        signal,
         _keep_alive,
     }
 }
@@ -171,20 +170,20 @@ mod tests {
 
     #[test]
     fn recomputes_on_source_change_and_stops_on_equal_output() {
-        let source = Signal::new(2_u32);
+        let (source_writer, source) = signal(2_u32);
         // 派生输出被钳制在 10 以内：输出相等时传播终止（阻尼）。
         let clamped = computed(&source, |value| (*value).min(10));
         assert_eq!(clamped.get(), 2);
 
-        source.set(3);
+        source_writer.set(3);
         assert_eq!(clamped.get(), 3);
         assert_eq!(clamped.version(), 1);
 
-        source.set(11);
+        source_writer.set(11);
         assert_eq!(clamped.get(), 10);
         let version_at_cap = clamped.version();
 
-        source.set(20);
+        source_writer.set(20);
         assert_eq!(clamped.get(), 10, "重算发生但输出相等");
         assert_eq!(
             clamped.version(),
@@ -195,54 +194,54 @@ mod tests {
 
     #[test]
     fn two_sources_drive_one_derived_node() {
-        let a = Signal::new(2_u32);
-        let b = Signal::new(3_u32);
+        let (a_writer, a) = signal(2_u32);
+        let (b_writer, b) = signal(3_u32);
         let sum = computed2(&a, &b, |a, b| a + b);
         assert_eq!(sum.get(), 5);
 
-        a.set(10);
+        a_writer.set(10);
         assert_eq!(sum.get(), 13);
-        b.set(0);
+        b_writer.set(0);
         assert_eq!(sum.get(), 10);
     }
 
     #[test]
     fn three_sources_drive_one_derived_node() {
-        let a = Signal::new(1_u32);
-        let b = Signal::new(2_u32);
-        let c = Signal::new(3_u32);
+        let (_a_writer, a) = signal(1_u32);
+        let (_b_writer, b) = signal(2_u32);
+        let (c_writer, c) = signal(3_u32);
         let sum = computed3(&a, &b, &c, |a, b, c| a + b + c);
         assert_eq!(sum.get(), 6);
 
-        c.set(10);
+        c_writer.set(10);
         assert_eq!(sum.get(), 13);
     }
 
     #[test]
     fn clones_share_identity_and_subscriptions_stay_alive() {
-        let source = Signal::new(1_u32);
+        let (source_writer, source) = signal(1_u32);
         let derived = computed(&source, |value| value * 2);
         let clone = derived.clone();
         assert_eq!(derived.id(), clone.id());
 
         // 原句柄 drop 后，clone 仍保持派生（订阅令牌由 Rc 共享保活）。
         drop(derived);
-        source.set(5);
+        source_writer.set(5);
         assert_eq!(clone.get(), 10);
     }
 
     #[test]
     fn derived_feeds_watch_subscriptions() {
-        let source = Signal::new(1_u32);
+        let (source_writer, source) = signal(1_u32);
         let derived = computed(&source, |value| value * 2);
         let mut runtime = ComponentRuntime::new();
         let key = tela_contract::SemanticKey("/derived/".to_owned());
         runtime.watch(key.clone(), &derived);
         assert!(runtime.take_dirty().is_empty());
 
-        source.set(3);
+        source_writer.set(3);
         assert_eq!(
-            runtime.take_dirty(),
+            runtime.take_dirty().semantic_keys(),
             std::collections::BTreeSet::from([key]),
             "watch 经 Computed 建立：源变 → 派生变 → key 脏"
         );

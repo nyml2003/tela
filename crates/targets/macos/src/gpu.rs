@@ -10,7 +10,7 @@ use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     RawDisplayHandle, RawWindowHandle,
 };
-use tela_contract::{Color, FrameDamage, UiFrame};
+use tela_contract::{Color, FrameDamage, RenderPlan};
 use tela_render_wgpu::{WgpuRenderer, renderer::RetainedFrameTarget};
 
 use crate::view::TelaView;
@@ -162,7 +162,7 @@ impl GpuSession {
     }
 
     /// Renders the current portable frame into the next AppKit drawable.
-    pub fn render(&mut self, frame: &UiFrame, damage: &FrameDamage) -> RenderOutcome {
+    pub fn render(&mut self, frame: &RenderPlan, damage: &FrameDamage) -> RenderOutcome {
         let (texture, suboptimal) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),

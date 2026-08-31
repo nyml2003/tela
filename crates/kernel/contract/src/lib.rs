@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-/// 绘制结果：`UiFrame`/`DrawCommand`/`HitRegion`/`ClipRect`/`BackendCapabilities`。
+/// 绘制结果：`RenderPlan`/`UiFrame`/`DrawCommand`/`HitRegion`/`ClipRect`/`BackendCapabilities`。
 mod draw;
 /// 类型化错误：`UiBuildError`/`UiLayoutError`。
 mod error;
@@ -33,8 +33,9 @@ mod text;
 mod window;
 
 pub use draw::{
-    BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DirtyFlags, DrawCommand, DrawPayload,
-    FrameDamage, FrameSink, HitRegion, HitRole, ScrollBounds, UiFrame,
+    BackendCapabilities, BorderStroke, ClipRect, CustomDraw, DirtyFlags, DrawCommand,
+    DrawCommandSource, DrawPayload, FrameDamage, FrameInputSource, FrameSink, HitRegion, HitRole,
+    RenderPlan, RenderPlanChild, RenderPlanNode, RenderPlanOverlay, ScrollBounds, UiFrame,
 };
 pub use error::{UiBuildError, UiLayoutError};
 pub use geometry::{BorderRadius, Color, Insets, PixelOffset, Point, Rect, snap};
@@ -69,6 +70,7 @@ pub use window::WindowCommand;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
 
     #[test]
     fn ui_node_defaults() {
@@ -114,6 +116,149 @@ mod tests {
             scroll_bounds: vec![],
         };
         assert_eq!(frame.clone(), frame);
+    }
+
+    #[test]
+    fn render_plan_projects_local_fragments_in_paint_order() {
+        let child = Rc::new(RenderPlanNode::new(
+            vec![DrawCommand {
+                geometry: Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    w: 3.0,
+                    h: 4.0,
+                },
+                clip: Some(ClipRect {
+                    rect: Rect {
+                        x: -8.0,
+                        y: -17.0,
+                        w: 20.0,
+                        h: 20.0,
+                    },
+                }),
+                opacity: 1.0,
+                payload: DrawPayload::Text {
+                    text: TextContent {
+                        text: "child".to_owned(),
+                        font: TextStyleRef::new("test"),
+                        font_size: 12.0,
+                        line_height: 16.0,
+                        color: Color::BLACK,
+                    },
+                    baseline_y: 3.0,
+                },
+            }]
+            .into(),
+            Vec::new(),
+            Rc::from([]),
+        ));
+        let root = Rc::new(RenderPlanNode::new(
+            vec![DrawCommand {
+                geometry: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::Rect {
+                    fill: Some(Color::BLACK),
+                    border: None,
+                },
+            }]
+            .into(),
+            vec![RenderPlanChild::new(
+                Point { x: 10.0, y: 20.0 },
+                Some(ClipRect {
+                    rect: Rect {
+                        x: 2.0,
+                        y: 3.0,
+                        w: 5.0,
+                        h: 7.0,
+                    },
+                }),
+                child,
+            )],
+            vec![DrawCommand {
+                geometry: Rect {
+                    x: 2.0,
+                    y: 3.0,
+                    w: 1.0,
+                    h: 1.0,
+                },
+                clip: None,
+                opacity: 1.0,
+                payload: DrawPayload::Rect {
+                    fill: Some(Color::WHITE),
+                    border: None,
+                },
+            }]
+            .into(),
+        ));
+        let overlay = RenderPlanOverlay::new(
+            Point { x: 30.0, y: 40.0 },
+            Rc::new(RenderPlanNode::new(
+                vec![DrawCommand {
+                    geometry: Rect {
+                        x: 2.0,
+                        y: 3.0,
+                        w: 4.0,
+                        h: 5.0,
+                    },
+                    clip: None,
+                    opacity: 1.0,
+                    payload: DrawPayload::Rect {
+                        fill: Some(Color::WHITE),
+                        border: None,
+                    },
+                }]
+                .into(),
+                Vec::new(),
+                Rc::from([]),
+            )),
+        );
+        let plan = RenderPlan::new(
+            Viewport {
+                width: 80.0,
+                height: 60.0,
+            },
+            Point { x: 5.0, y: 6.0 },
+            root,
+            vec![overlay],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(plan.command_count(), 4);
+        let frame = plan.to_ui_frame();
+        assert_eq!(frame.commands.len(), 4);
+        assert_eq!(frame.commands[0].geometry.x, 5.0);
+        assert_eq!(frame.commands[0].geometry.y, 6.0);
+        assert_eq!(frame.commands[1].geometry.x, 16.0);
+        assert_eq!(frame.commands[1].geometry.y, 28.0);
+        assert_eq!(
+            frame.commands[1].clip,
+            Some(ClipRect {
+                rect: Rect {
+                    x: 7.0,
+                    y: 9.0,
+                    w: 5.0,
+                    h: 7.0,
+                },
+            })
+        );
+        assert!(matches!(
+            frame.commands[1].payload,
+            DrawPayload::Text {
+                baseline_y: 29.0,
+                ..
+            }
+        ));
+        assert_eq!(frame.commands[2].geometry.x, 7.0);
+        assert_eq!(frame.commands[2].geometry.y, 9.0);
+        assert_eq!(frame.commands[3].geometry.x, 32.0);
+        assert_eq!(frame.commands[3].geometry.y, 43.0);
     }
 
     #[test]

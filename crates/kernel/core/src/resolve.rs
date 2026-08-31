@@ -1,24 +1,29 @@
-//! `resolve` 纯操作：树 → 布局测量 → `UiFrame`（绘制命令 + 命中区域，预合并 clip）（见 003-6/7）。
+//! `resolve` 纯操作：树 → 布局测量 → `RenderPlan`（局部绘制片段 + 命中区域）（见 003-6/7）。
 //!
-//! 纯操作保证：相同输入（同树 + 同 viewport + 同度量 + 同滚动输入）必定得到相同的 `UiFrame`；
+//! 纯操作保证：相同输入（同树 + 同 viewport + 同度量 + 同滚动输入）必定得到相同的 `RenderPlan`；
 //! 不读时钟、随机数、设备输入。滚动偏移由调用方作为外部只读输入（`scroll_inputs`）注入，
 //! `resolve` 不持久保存（跨帧记忆归 M4 视图状态仓库，见 006-布局引擎 5）。
 
 use std::collections::{BTreeSet, HashMap};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use tela_contract::{
     AnchorAlign, AnchorSide, AnchoredPlacement, BorderRadius, BorderStroke, ClipRect,
     ContentConcern, DrawCommand, DrawPayload, Fill, FocusAppearance, HitRegion, LayoutBox, NodeId,
-    NodeKind, Overflow, Point, Rect, ScrollBounds, ScrollState, SemanticKey, TeleportSource,
-    TeleportSpec, TextConstraint, TextContent, TextMeasureRequest, TextMeasurer, TextOverflow,
-    UiFrame, UiLayoutError, UiNode, Viewport,
+    NodeKind, Overflow, Point, Rect, RenderPlan, RenderPlanChild, RenderPlanNode,
+    RenderPlanOverlay, ScrollBounds, ScrollState, SemanticKey, TeleportSource, TeleportSpec,
+    TextConstraint, TextContent, TextMeasureRequest, TextMeasurer, TextOverflow, UiLayoutError,
+    UiNode, Viewport,
 };
+
+#[cfg(test)]
+use tela_contract::UiFrame;
 
 use crate::layout::{DefaultLayoutEngine, LayoutEngine};
 use crate::tree::UiTree;
 use crate::update::{LayoutCache, measure_dirty_shared};
 
 /// emit 上下文：命令/命中区域收集、滚动输入、节点 id/key 映射、Teleport 顶层队列。
+#[cfg(test)]
 struct EmitContext<'a, M: TextMeasurer + ?Sized> {
     commands: Vec<DrawCommand>,
     hit_regions: Vec<HitRegion>,
@@ -37,23 +42,83 @@ struct EmitContext<'a, M: TextMeasurer + ?Sized> {
     text_measurer: &'a M,
 }
 
-/// Internal resolve product retained by the application profile for paint-damage planning.
-///
-/// `UiFrame` deliberately stays self-contained for existing renderer APIs. The rectangle index
-/// is kernel bookkeeping: it associates stable tree coordinates with their emitted screen-space
-/// extent without adding backend-only provenance to every draw command.
+/// Test-only flat projection used to prove command-for-command parity with [`RenderPlan`].
+#[cfg(test)]
 pub(crate) struct ResolvedTreeFrame {
     pub(crate) frame: UiFrame,
+}
+
+/// Internal resolve product for the retained render-plan path.
+///
+/// The plan keeps drawing local and tree-shaped; `node_rects` is still a guest-only coordinate
+/// index for damage, focus and Teleport anchoring.
+pub(crate) struct ResolvedTreePlan {
+    pub(crate) plan: RenderPlan,
     pub(crate) node_rects: HashMap<SemanticKey, Rect>,
 }
 
+/// Candidate-owned cache of local plan fragments.
+///
+/// Entries are keyed by `Rc<UiNode>` allocation identity plus the small layout facts that affect
+/// a node's own drawing. They intentionally do not contain an absolute origin or inherited clip:
+/// those belong to [`RenderPlanChild`] edges and are applied by consumers at visit time.
+#[derive(Clone, Default)]
+pub(crate) struct RenderPlanCache {
+    entries: HashMap<RenderPlanFragmentKey, CachedRenderPlanFragment>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RenderPlanFragmentKey {
+    node_address: usize,
+    width_bits: u32,
+    height_bits: u32,
+    first_baseline_bits: Option<u32>,
+}
+
+#[derive(Clone)]
+struct CachedRenderPlanFragment {
+    node: Weak<UiNode>,
+    before_children: Rc<[DrawCommand]>,
+    child_order: Rc<[usize]>,
+}
+
+#[derive(Clone)]
+struct RenderPlanFragment {
+    before_children: Rc<[DrawCommand]>,
+    child_order: Rc<[usize]>,
+}
+
 /// Teleport 提升项（节点 + 布局盒 + 祖先平移；提升后视觉独立于父布局）。
+#[cfg(test)]
 struct TeleportEntry {
     node: usize,
     box_: LayoutBox,
     spec: TeleportSpec,
 }
 
+/// Render-plan emission context. Input projections stay absolute for hit testing, while drawing
+/// fragments remain local and acquire their translation/clip from plan edges.
+struct PlanEmitContext<'a, M: TextMeasurer + ?Sized> {
+    hit_regions: Vec<HitRegion>,
+    scroll_bounds: Vec<ScrollBounds>,
+    scroll_inputs: &'a HashMap<SemanticKey, ScrollState>,
+    node_meta: HashMap<usize, (NodeId, SemanticKey)>,
+    pending_teleports: Vec<PlanTeleportEntry>,
+    node_rects: HashMap<SemanticKey, Rect>,
+    viewport: Viewport,
+    focus_key: Option<&'a SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+    text_measurer: &'a M,
+    cache: &'a mut RenderPlanCache,
+}
+
+struct PlanTeleportEntry {
+    node: Rc<UiNode>,
+    box_: LayoutBox,
+    spec: TeleportSpec,
+}
+
+#[cfg(test)]
 impl<M: TextMeasurer + ?Sized> EmitContext<'_, M> {
     fn node_meta(&self, node: &UiNode) -> (NodeId, SemanticKey) {
         self.node_meta
@@ -63,7 +128,86 @@ impl<M: TextMeasurer + ?Sized> EmitContext<'_, M> {
     }
 }
 
+impl<M: TextMeasurer + ?Sized> PlanEmitContext<'_, M> {
+    fn node_meta(&self, node: &UiNode) -> (NodeId, SemanticKey) {
+        self.node_meta
+            .get(&(node as *const UiNode as usize))
+            .cloned()
+            .expect("UiTree 节点必须拥有构建期 id/key")
+    }
+}
+
+impl RenderPlanCache {
+    fn fragment_for<M: TextMeasurer + ?Sized>(
+        &mut self,
+        node: &Rc<UiNode>,
+        box_: &LayoutBox,
+        text_measurer: &M,
+    ) -> RenderPlanFragment {
+        // Text projection can depend on the resource-provided measurer even when the retained
+        // node identity and layout box stay unchanged. Keep text out of this structural cache so
+        // a font/resource revision cannot surface a stale ellipsis or clip.
+        let cacheable = node.kind != NodeKind::Text;
+        let key = RenderPlanFragmentKey {
+            node_address: Rc::as_ptr(node) as usize,
+            width_bits: box_.w.to_bits(),
+            height_bits: box_.h.to_bits(),
+            first_baseline_bits: box_.first_baseline.map(f32::to_bits),
+        };
+        if cacheable
+            && let Some(entry) = self.entries.get(&key)
+            && let Some(cached_node) = entry.node.upgrade()
+            && Rc::ptr_eq(&cached_node, node)
+        {
+            return RenderPlanFragment {
+                before_children: Rc::clone(&entry.before_children),
+                child_order: Rc::clone(&entry.child_order),
+            };
+        }
+
+        let before_children: Rc<[DrawCommand]> = local_draw_command(node, box_, text_measurer)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+        let mut child_order: Vec<usize> = (0..node.children.len()).collect();
+        if node.kind.is_layout_container() {
+            child_order.sort_by_key(|&index| draw_order_key(&node.children[index]));
+        }
+        let child_order: Rc<[usize]> = child_order.into();
+        if cacheable {
+            self.entries.insert(
+                key,
+                CachedRenderPlanFragment {
+                    node: Rc::downgrade(node),
+                    before_children: Rc::clone(&before_children),
+                    child_order: Rc::clone(&child_order),
+                },
+            );
+            // Stale weak entries can only arise from retained-tree replacement. Keep cleanup
+            // bounded without using node-content comparison or making a rejected candidate
+            // observable.
+            if self.entries.len() > 4096 {
+                self.entries
+                    .retain(|_, entry| entry.node.strong_count() > 0);
+            }
+        }
+        RenderPlanFragment {
+            before_children,
+            child_order,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// 树 → `UiFrame`（纯操作）。
+#[cfg(test)]
 pub(crate) fn resolve_tree(
     tree: &UiTree,
     viewport: Viewport,
@@ -74,6 +218,7 @@ pub(crate) fn resolve_tree(
 }
 
 /// 树 → `UiFrame`，带只读焦点外观输入。
+#[cfg(test)]
 pub(crate) fn resolve_tree_with_focus(
     tree: &UiTree,
     viewport: Viewport,
@@ -94,6 +239,7 @@ pub(crate) fn resolve_tree_with_focus(
 }
 
 /// Full resolve with the coordinate index needed by retained paint planning.
+#[cfg(test)]
 pub(crate) fn resolve_tree_with_focus_details(
     tree: &UiTree,
     viewport: Viewport,
@@ -130,88 +276,126 @@ pub(crate) fn resolve_tree_with_focus_details(
     )
 }
 
-/// 树 → `UiFrame`（Dirty 布局：按 key 逐节点缓存，仅脏节点重算，见 004、010-M5）。
-pub(crate) fn resolve_tree_dirty(
-    tree: &UiTree,
-    viewport: Viewport,
-    text_measurer: &(impl TextMeasurer + ?Sized),
-    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
-    cache: &mut LayoutCache,
-) -> Result<UiFrame, UiLayoutError> {
-    resolve_tree_dirty_with_focus(
-        tree,
-        viewport,
-        text_measurer,
-        scroll_inputs,
-        cache,
-        None,
-        None,
-    )
-}
-
-/// Dirty 布局版本：带只读焦点外观输入。
-pub(crate) fn resolve_tree_dirty_with_focus(
-    tree: &UiTree,
-    viewport: Viewport,
-    text_measurer: &(impl TextMeasurer + ?Sized),
-    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
-    cache: &mut LayoutCache,
-    focus_key: Option<&SemanticKey>,
-    focus_appearance: Option<FocusAppearance>,
-) -> Result<UiFrame, UiLayoutError> {
-    resolve_tree_dirty_with_focus_details(
-        tree,
-        viewport,
-        text_measurer,
-        scroll_inputs,
-        cache,
-        focus_key,
-        focus_appearance,
-    )
-    .map(|resolved| resolved.frame)
-}
-
-/// Dirty resolve with the coordinate index needed by retained paint planning.
-pub(crate) fn resolve_tree_dirty_with_focus_details(
-    tree: &UiTree,
-    viewport: Viewport,
-    text_measurer: &(impl TextMeasurer + ?Sized),
-    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
-    cache: &mut LayoutCache,
-    focus_key: Option<&SemanticKey>,
-    focus_appearance: Option<FocusAppearance>,
-) -> Result<ResolvedTreeFrame, UiLayoutError> {
-    resolve_tree_dirty_incremental_with_focus_details(
-        tree,
-        None,
-        None,
-        viewport,
-        text_measurer,
-        scroll_inputs,
-        cache,
-        focus_key,
-        focus_appearance,
-    )
-}
-
-/// Dirty resolve with a last-presented tree and graph coordinates.
+/// Resolves a tree into a retained [`RenderPlan`] using a short-lived local-fragment cache.
 ///
-/// The optional active tree is a transaction-owned identity baseline. When every dirty path can
-/// be measured under its prior constraints and reaches a geometrically stable ancestor, only
-/// that local box is spliced into the old root layout. Unknown coordinates, structural changes,
-/// `Full` scopes, and geometry that reaches the root deliberately use the ordinary Dirty path.
+/// Application profiles should use the candidate-aware variant below so a failed presentation
+/// cannot install cache entries as active state. This helper is the pure, one-shot tree API.
+pub(crate) fn resolve_tree_plan(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+) -> Result<RenderPlan, UiLayoutError> {
+    resolve_tree_plan_with_focus(tree, viewport, text_measurer, scroll_inputs, None, None)
+}
+
+/// Retained-plan resolve with a read-only focus appearance input.
+pub(crate) fn resolve_tree_plan_with_focus(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Result<RenderPlan, UiLayoutError> {
+    let mut cache = RenderPlanCache::default();
+    resolve_tree_plan_with_focus_details(
+        tree,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        focus_key,
+        focus_appearance,
+        &mut cache,
+    )
+    .map(|resolved| resolved.plan)
+}
+
+/// Full retained-plan resolve with the coordinate index needed by damage planning.
+pub(crate) fn resolve_tree_plan_with_focus_details(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+    cache: &mut RenderPlanCache,
+) -> Result<ResolvedTreePlan, UiLayoutError> {
+    if !(viewport.width > 0.0 && viewport.height > 0.0) {
+        return Err(UiLayoutError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
+    }
+    let mut engine = DefaultLayoutEngine::new(text_measurer);
+    let root_constraints = tela_contract::Constraints {
+        min_w: 0.0,
+        max_w: viewport.width,
+        min_h: 0.0,
+        max_h: viewport.height,
+    };
+    let root_box = engine.measure(&tree.root, root_constraints)?;
+    emit_render_plan_tree(
+        tree,
+        &root_box,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        focus_key,
+        focus_appearance,
+        cache,
+    )
+}
+
+/// One-shot dirty resolve into a retained plan.
+///
+/// The caller owns the layout cache but intentionally receives a temporary render-fragment
+/// cache. Applications that span a candidate/present transaction use
+/// [`resolve_tree_dirty_incremental_plan_with_focus_details`] directly instead.
+pub(crate) fn resolve_tree_dirty_plan_with_focus(
+    tree: &UiTree,
+    viewport: Viewport,
+    text_measurer: &(impl TextMeasurer + ?Sized),
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    layout_cache: &mut LayoutCache,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Result<RenderPlan, UiLayoutError> {
+    let mut render_cache = RenderPlanCache::default();
+    resolve_tree_dirty_incremental_plan_with_focus_details(
+        tree,
+        None,
+        None,
+        viewport,
+        text_measurer,
+        scroll_inputs,
+        layout_cache,
+        focus_key,
+        focus_appearance,
+        &mut render_cache,
+    )
+    .map(|resolved| resolved.plan)
+}
+
+/// Candidate-aware dirty resolve for the retained render-plan path.
+///
+/// Layout follows the same identity/cache/geometry-boundary algorithm as the legacy frame path;
+/// only the emit product differs. Keeping this function adjacent to the existing resolve makes
+/// the transaction boundary explicit: callers pass a candidate `RenderPlanCache` and promote it
+/// only after `presented(token)`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_tree_dirty_incremental_with_focus_details(
+pub(crate) fn resolve_tree_dirty_incremental_plan_with_focus_details(
     tree: &UiTree,
     active_tree: Option<&UiTree>,
     dirty_keys: Option<&BTreeSet<SemanticKey>>,
     viewport: Viewport,
     text_measurer: &(impl TextMeasurer + ?Sized),
     scroll_inputs: &HashMap<SemanticKey, ScrollState>,
-    cache: &mut LayoutCache,
+    layout_cache: &mut LayoutCache,
     focus_key: Option<&SemanticKey>,
     focus_appearance: Option<FocusAppearance>,
-) -> Result<ResolvedTreeFrame, UiLayoutError> {
+    render_cache: &mut RenderPlanCache,
+) -> Result<ResolvedTreePlan, UiLayoutError> {
     if !(viewport.width > 0.0 && viewport.height > 0.0) {
         return Err(UiLayoutError::InvalidViewport {
             width: viewport.width,
@@ -225,12 +409,11 @@ pub(crate) fn resolve_tree_dirty_incremental_with_focus_details(
         max_h: viewport.height,
     };
     let mut engine = DefaultLayoutEngine::new(text_measurer);
-    // 根生效模式 = 根节点声明的更新策略（默认 Full 全量，见 004-1）；Dirty 需显式声明。
     let root_mode = tree
         .root
         .identity
         .as_ref()
-        .map(|i| i.update_mode)
+        .map(|identity| identity.update_mode)
         .unwrap_or(tela_contract::UpdateMode::Full);
     engine.reset_measure_audit();
     let root_box = match try_measure_dirty_incrementally(
@@ -239,7 +422,7 @@ pub(crate) fn resolve_tree_dirty_incremental_with_focus_details(
         dirty_keys,
         root_constraints,
         &mut engine,
-        cache,
+        layout_cache,
     )? {
         Some(root_box) => root_box,
         None => measure_dirty_shared(
@@ -247,10 +430,10 @@ pub(crate) fn resolve_tree_dirty_incremental_with_focus_details(
             root_constraints,
             root_mode,
             &mut engine,
-            cache,
+            layout_cache,
         )?,
     };
-    emit_frame_tree(
+    emit_render_plan_tree(
         tree,
         &root_box,
         viewport,
@@ -258,6 +441,7 @@ pub(crate) fn resolve_tree_dirty_incremental_with_focus_details(
         scroll_inputs,
         focus_key,
         focus_appearance,
+        render_cache,
     )
 }
 
@@ -409,6 +593,7 @@ fn replace_layout_box_at_path(
 }
 
 /// 布局盒树 → 帧生成（emit 阶段，Full/Dirty 共用）。
+#[cfg(test)]
 fn emit_frame_tree<M: TextMeasurer + ?Sized>(
     tree: &UiTree,
     root_box: &LayoutBox,
@@ -451,11 +636,258 @@ fn emit_frame_tree<M: TextMeasurer + ?Sized>(
             hit_regions: ctx.hit_regions,
             scroll_bounds: ctx.scroll_bounds,
         },
+    })
+}
+
+/// Builds the tree-shaped drawing plan and the guest-local input projections in one candidate
+/// traversal. The plan carries local draw fragments; this traversal never builds a global
+/// `Vec<DrawCommand>` for fresh guest frames.
+#[allow(clippy::too_many_arguments)]
+fn emit_render_plan_tree<M: TextMeasurer + ?Sized>(
+    tree: &UiTree,
+    root_box: &LayoutBox,
+    viewport: Viewport,
+    text_measurer: &M,
+    scroll_inputs: &HashMap<SemanticKey, ScrollState>,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+    cache: &mut RenderPlanCache,
+) -> Result<ResolvedTreePlan, UiLayoutError> {
+    let (nodes, node_ids, keys) = tree.node_table();
+    let node_meta = nodes
+        .into_iter()
+        .zip(node_ids)
+        .zip(keys)
+        .map(|((node, node_id), key)| (node as *const UiNode as usize, (node_id, key)))
+        .collect();
+    let mut ctx = PlanEmitContext {
+        hit_regions: Vec::new(),
+        scroll_bounds: Vec::new(),
+        scroll_inputs,
+        node_meta,
+        pending_teleports: Vec::new(),
+        node_rects: HashMap::new(),
+        viewport,
+        focus_key,
+        focus_appearance,
+        text_measurer,
+        cache,
+    };
+    let root = emit_render_plan_node(
+        tree.root_shared(),
+        root_box,
+        &mut ctx,
+        Point { x: 0.0, y: 0.0 },
+        None,
+        false,
+    );
+    let teleports = std::mem::take(&mut ctx.pending_teleports);
+    let mut overlays = Vec::with_capacity(teleports.len());
+    for entry in teleports {
+        if let Some(overlay) = emit_render_plan_teleport(entry, &mut ctx) {
+            overlays.push(overlay);
+        }
+    }
+    let plan = RenderPlan::new(
+        viewport,
+        Point {
+            x: root_box.x,
+            y: root_box.y,
+        },
+        root,
+        overlays,
+        ctx.hit_regions,
+        ctx.scroll_bounds,
+    );
+    Ok(ResolvedTreePlan {
+        plan,
         node_rects: ctx.node_rects,
     })
 }
 
+/// Expands one node into a local plan fragment while maintaining the old absolute input
+/// projection. `origin` is the absolute parent-content origin, before this node's local box
+/// coordinate is added.
+fn emit_render_plan_node<M: TextMeasurer + ?Sized>(
+    node: &Rc<UiNode>,
+    box_: &LayoutBox,
+    ctx: &mut PlanEmitContext<'_, M>,
+    origin: Point,
+    inherited_clip: Option<ClipRect>,
+    expanding_teleport: bool,
+) -> Rc<RenderPlanNode> {
+    let (node_id, key) = ctx.node_meta(node);
+    let node_origin = Point {
+        x: origin.x + box_.x,
+        y: origin.y + box_.y,
+    };
+    if !expanding_teleport {
+        ctx.node_rects.insert(
+            key.clone(),
+            Rect {
+                x: node_origin.x,
+                y: node_origin.y,
+                w: box_.w,
+                h: box_.h,
+            },
+        );
+    }
+
+    if let NodeKind::Teleport(spec) = &node.kind
+        && !expanding_teleport
+    {
+        ctx.pending_teleports.push(PlanTeleportEntry {
+            node: Rc::clone(node),
+            box_: box_.clone(),
+            spec: spec.clone(),
+        });
+        return Rc::new(RenderPlanNode::new(Rc::from([]), Vec::new(), Rc::from([])));
+    }
+
+    let layout = node.layout.as_ref();
+    let is_scroll_container = matches!(
+        node.kind,
+        NodeKind::ScrollView | NodeKind::VirtualListView(_)
+    ) || layout.is_some_and(|layout| layout.overflow == Overflow::Scroll);
+    let is_clip_container = matches!(
+        node.kind,
+        NodeKind::ScrollView | NodeKind::VirtualListView(_)
+    ) || layout
+        .is_some_and(|layout| layout.clip || layout.overflow != Overflow::Visible);
+
+    if let Some(interact) = &node.interact {
+        ctx.hit_regions.push(HitRegion {
+            node_id,
+            rect: Rect {
+                x: node_origin.x,
+                y: node_origin.y,
+                w: box_.w,
+                h: box_.h,
+            },
+            clip: inherited_clip,
+            role: interact.hit_role,
+        });
+    }
+    if is_scroll_container {
+        ctx.scroll_bounds.push(scroll_bounds_for(
+            node,
+            box_,
+            node_id,
+            key.clone(),
+            (node_origin.x, node_origin.y),
+        ));
+    }
+
+    let fragment = ctx.cache.fragment_for(node, box_, ctx.text_measurer);
+    let scroll = if is_scroll_container {
+        ctx.scroll_inputs.get(&key).copied().unwrap_or_default()
+    } else {
+        ScrollState::default()
+    };
+    let child_origin = if is_scroll_container {
+        Point {
+            x: node_origin.x - scroll.offset_x,
+            y: node_origin.y - scroll.offset_y,
+        }
+    } else {
+        node_origin
+    };
+    let child_clip = if is_clip_container {
+        Some(intersect_clip(
+            inherited_clip,
+            ClipRect {
+                rect: content_rect(box_, (node_origin.x, node_origin.y), node),
+            },
+        ))
+    } else {
+        inherited_clip
+    };
+    let local_child_clip = is_clip_container.then(|| ClipRect {
+        rect: content_rect_local(box_, node),
+    });
+
+    let mut children = Vec::with_capacity(fragment.child_order.len());
+    for &index in fragment.child_order.iter() {
+        let child_node = &node.children[index];
+        let child_box = &box_.children[index];
+        let child = emit_render_plan_node(
+            child_node,
+            child_box,
+            ctx,
+            child_origin,
+            child_clip,
+            expanding_teleport,
+        );
+        children.push(RenderPlanChild::new(
+            Point {
+                x: child_box.x
+                    - if is_scroll_container {
+                        scroll.offset_x
+                    } else {
+                        0.0
+                    },
+                y: child_box.y
+                    - if is_scroll_container {
+                        scroll.offset_y
+                    } else {
+                        0.0
+                    },
+            },
+            local_child_clip,
+            child,
+        ));
+    }
+    let after_children: Rc<[DrawCommand]> =
+        local_focus_draw_command(node, box_, &key, ctx.focus_key, ctx.focus_appearance)
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into();
+    Rc::new(RenderPlanNode::new(
+        fragment.before_children,
+        children,
+        after_children,
+    ))
+}
+
+/// Expands a lifted Teleport after the ordinary tree has established its anchor rectangles.
+fn emit_render_plan_teleport<M: TextMeasurer + ?Sized>(
+    entry: PlanTeleportEntry,
+    ctx: &mut PlanEmitContext<'_, M>,
+) -> Option<RenderPlanOverlay> {
+    let anchor = match &entry.spec.source {
+        TeleportSource::Anchor(key) => ctx.node_rects.get(key).copied(),
+    }?;
+    let position = place_anchored_overlay(
+        anchor,
+        entry.box_.w,
+        entry.box_.h,
+        entry.spec.placement,
+        ctx.viewport,
+    );
+    let offset = Point {
+        x: position.0,
+        y: position.1,
+    };
+    let mut children = Vec::with_capacity(entry.node.children.len());
+    for (child_node, child_box) in entry.node.children.iter().zip(&entry.box_.children) {
+        let child = emit_render_plan_node(child_node, child_box, ctx, offset, None, true);
+        children.push(RenderPlanChild::new(
+            Point {
+                x: child_box.x,
+                y: child_box.y,
+            },
+            None,
+            child,
+        ));
+    }
+    Some(RenderPlanOverlay::new(
+        offset,
+        Rc::new(RenderPlanNode::new(Rc::from([]), children, Rc::from([]))),
+    ))
+}
+
 /// 渲染一个 Teleport 提升项（递归子树，clip 从顶层起算）。
+#[cfg(test)]
 fn emit_frame_teleport<M: TextMeasurer + ?Sized>(
     root: &UiNode,
     entry: TeleportEntry,
@@ -489,6 +921,7 @@ fn emit_frame_teleport<M: TextMeasurer + ?Sized>(
     }
 }
 
+#[cfg(test)]
 fn collect_refs<'a>(node: &'a UiNode, out: &mut Vec<&'a UiNode>) {
     out.push(node);
     for child in &node.children {
@@ -499,6 +932,7 @@ fn collect_refs<'a>(node: &'a UiNode, out: &mut Vec<&'a UiNode>) {
 /// 深度优先同步遍历：节点树 + 盒子树（DFS 序与构建期 id/key 对齐）。
 ///
 /// `offset` 为祖先滚动平移累计；`clip` 为祖先裁剪区域预合并结果。
+#[cfg(test)]
 fn emit_frame<M: TextMeasurer + ?Sized>(
     node: &UiNode,
     box_: &LayoutBox,
@@ -611,6 +1045,7 @@ fn emit_frame<M: TextMeasurer + ?Sized>(
 }
 
 /// 在焦点节点子树之后追加装饰，不进入命中区或布局。
+#[cfg(test)]
 fn emit_focus_ring<M: TextMeasurer + ?Sized>(
     node: &UiNode,
     box_: &LayoutBox,
@@ -619,36 +1054,81 @@ fn emit_focus_ring<M: TextMeasurer + ?Sized>(
     key: &SemanticKey,
     ctx: &mut EmitContext<'_, M>,
 ) {
-    let Some(focus_key) = ctx.focus_key else {
+    let Some(command) = focus_draw_command(
+        node,
+        box_,
+        key,
+        ctx.focus_key,
+        ctx.focus_appearance,
+        Rect {
+            x: box_.x + offset.0,
+            y: box_.y + offset.1,
+            w: box_.w,
+            h: box_.h,
+        },
+        clip,
+    ) else {
         return;
     };
-    let Some(appearance) = ctx.focus_appearance else {
-        return;
-    };
+    ctx.commands.push(command);
+}
+
+fn local_focus_draw_command(
+    node: &UiNode,
+    box_: &LayoutBox,
+    key: &SemanticKey,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+) -> Option<DrawCommand> {
+    focus_draw_command(
+        node,
+        box_,
+        key,
+        focus_key,
+        focus_appearance,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: box_.w,
+            h: box_.h,
+        },
+        None,
+    )
+}
+
+fn focus_draw_command(
+    node: &UiNode,
+    box_: &LayoutBox,
+    key: &SemanticKey,
+    focus_key: Option<&SemanticKey>,
+    focus_appearance: Option<FocusAppearance>,
+    mut geometry: Rect,
+    clip: Option<ClipRect>,
+) -> Option<DrawCommand> {
+    let focus_key = focus_key?;
+    let appearance = focus_appearance?;
     if focus_key != key
         || !node
             .interact
             .as_ref()
             .is_some_and(|interact| interact.focusable)
     {
-        return;
+        return None;
     }
     let inset = appearance.inset.max(0.0);
-    let geometry = Rect {
-        x: box_.x + offset.0 + inset,
-        y: box_.y + offset.1 + inset,
-        w: (box_.w - inset * 2.0).max(0.0),
-        h: (box_.h - inset * 2.0).max(0.0),
-    };
+    geometry.x += inset;
+    geometry.y += inset;
+    geometry.w = (box_.w - inset * 2.0).max(0.0);
+    geometry.h = (box_.h - inset * 2.0).max(0.0);
     if geometry.w <= 0.0 || geometry.h <= 0.0 || appearance.width <= 0.0 {
-        return;
+        return None;
     }
     let radius = node
         .visual
         .as_ref()
         .map(|visual| visual.border_radius)
         .unwrap_or_else(|| BorderRadius::all(0.0));
-    ctx.commands.push(DrawCommand {
+    Some(DrawCommand {
         geometry,
         clip,
         opacity: 1.0,
@@ -660,7 +1140,7 @@ fn emit_focus_ring<M: TextMeasurer + ?Sized>(
             }),
             radius,
         },
-    });
+    })
 }
 
 /// 从锚点、浮层尺寸与视口纯函数地计算 Teleport 的顶层偏移。
@@ -862,6 +1342,18 @@ fn content_rect(box_: &LayoutBox, offset: (f32, f32), node: &UiNode) -> Rect {
     Rect { x, y, w, h }
 }
 
+/// Content clip in the owning node's local plan coordinate system.
+fn content_rect_local(box_: &LayoutBox, node: &UiNode) -> Rect {
+    let layout = node.layout.as_ref().cloned().unwrap_or_default();
+    let x = layout.border_width + layout.padding.left;
+    let y = layout.border_width + layout.padding.top;
+    let w =
+        (box_.w - 2.0 * layout.border_width - layout.padding.left - layout.padding.right).max(0.0);
+    let h =
+        (box_.h - 2.0 * layout.border_width - layout.padding.top - layout.padding.bottom).max(0.0);
+    Rect { x, y, w, h }
+}
+
 /// 将布局结果投影为宿主可消费的滚动边界。这里不读取当前偏移，因而同一棵布局树下的
 /// 边界稳定；VirtualList 使用完整数据集高度，而不是本帧构建的可见窗口高度。
 fn scroll_bounds_for(
@@ -921,6 +1413,7 @@ fn intersect_clip(a: Option<ClipRect>, b: ClipRect) -> ClipRect {
 }
 
 /// 生成绘制命令（消费 `visual` + `content`，顺序即 z 序；逻辑容器透明无命令）。
+#[cfg(test)]
 fn emit_draw_command<M: TextMeasurer + ?Sized>(
     node: &UiNode,
     box_: &LayoutBox,
@@ -928,8 +1421,6 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
     clip: Option<ClipRect>,
     ctx: &mut EmitContext<'_, M>,
 ) {
-    // `visual_offset` is deliberately applied only when projecting a layout box to a draw
-    // command. Layout, hit regions, scroll bounds, and ancestor clips remain logical.
     let visual_offset = node
         .visual
         .as_ref()
@@ -941,6 +1432,48 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
         w: box_.w,
         h: box_.h,
     };
+    if let Some(command) = build_draw_command(node, box_, geometry, clip, ctx.text_measurer) {
+        ctx.commands.push(command);
+    }
+}
+
+/// Produces one local command fragment. It never incorporates a parent translation or clip, so
+/// an unchanged retained node can be reused under a new scroll offset or ancestor clip.
+fn local_draw_command<M: TextMeasurer + ?Sized>(
+    node: &UiNode,
+    box_: &LayoutBox,
+    text_measurer: &M,
+) -> Option<DrawCommand> {
+    let visual_offset = node
+        .visual
+        .as_ref()
+        .map(|visual| visual.visual_offset)
+        .unwrap_or_default();
+    build_draw_command(
+        node,
+        box_,
+        Rect {
+            x: visual_offset.x,
+            y: visual_offset.y,
+            w: box_.w,
+            h: box_.h,
+        },
+        None,
+        text_measurer,
+    )
+}
+
+/// Converts one node's own visual/content concerns into a command at the supplied coordinate.
+///
+/// `geometry` is either an absolute legacy-frame box or a plan-local box. The routine is agnostic
+/// to that choice, which keeps text clipping and baseline projection identical across both paths.
+fn build_draw_command<M: TextMeasurer + ?Sized>(
+    node: &UiNode,
+    box_: &LayoutBox,
+    geometry: Rect,
+    clip: Option<ClipRect>,
+    text_measurer: &M,
+) -> Option<DrawCommand> {
     let mut effective_clip = clip;
     let payload = match (&node.kind, &node.content, &node.visual) {
         (NodeKind::Text, Some(ContentConcern::Text(text)), _) => {
@@ -950,7 +1483,7 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
                     .as_ref()
                     .and_then(|layout| layout.text_constraint),
                 geometry,
-                ctx.text_measurer,
+                text_measurer,
             );
             if let Some(local_clip) = local_clip {
                 effective_clip = Some(intersect_clip(effective_clip, local_clip));
@@ -977,20 +1510,23 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
             DrawPayload::Polygon {
                 points: points
                     .iter()
-                    .map(|p| Point {
-                        x: geometry.x + p.x,
-                        y: geometry.y + p.y,
+                    .map(|point| Point {
+                        x: geometry.x + point.x,
+                        y: geometry.y + point.y,
                     })
                     .collect(),
-                fill: visual.as_ref().and_then(|v| v.fill.clone()),
+                fill: visual.as_ref().and_then(|visual| visual.fill.clone()),
                 border: None,
             }
         }
-        // 圆形 / 椭圆：外接矩形内切，fill → 填充，border → 描边。
         (NodeKind::Circle, _, Some(visual)) | (NodeKind::Ellipse, _, Some(visual)) => {
             let border = visual.border_color.map(|color| BorderStroke {
                 color,
-                width: node.layout.as_ref().map(|l| l.border_width).unwrap_or(0.0),
+                width: node
+                    .layout
+                    .as_ref()
+                    .map(|layout| layout.border_width)
+                    .unwrap_or(0.0),
             });
             match (&visual.fill, node.kind == NodeKind::Circle) {
                 (Some(fill), true) => DrawPayload::Circle {
@@ -1001,14 +1537,17 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
                     fill: Some(fill.clone()),
                     border,
                 },
-                (None, _) => return,
+                (None, _) => return None,
             }
         }
-        // 矩形原语与布局容器背景：fill → 纯色矩形/渐变命令，border → 描边。
         (_, _, Some(visual)) if node.kind == NodeKind::Rect || node.kind.is_layout_container() => {
             let border = visual.border_color.map(|color| BorderStroke {
                 color,
-                width: node.layout.as_ref().map(|l| l.border_width).unwrap_or(0.0),
+                width: node
+                    .layout
+                    .as_ref()
+                    .map(|layout| layout.border_width)
+                    .unwrap_or(0.0),
             });
             match &visual.fill {
                 Some(fill) if visual.border_radius != Default::default() => {
@@ -1028,24 +1567,20 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
                 Some(Fill::Radial(gradient)) => DrawPayload::RadialGradient {
                     gradient: gradient.clone(),
                 },
-                // 无填充但带描边：仅描边矩形。
                 None if border.is_some() => DrawPayload::Rect { fill: None, border },
-                // 无填充无描边：无可绘制内容。
-                None => return,
+                None => return None,
             }
         }
-        // 逻辑容器与无视觉内容：透明，无命令。
-        _ => return,
+        _ => return None,
     };
-    // 阴影：visual.shadow 存在时包装本体（raster 能力集不支持时降级为仅绘本体，见 007-3）。
-    let payload = match node.visual.as_ref().and_then(|v| v.shadow) {
+    let payload = match node.visual.as_ref().and_then(|visual| visual.shadow) {
         Some(spec) => DrawPayload::Shadow {
             spec,
             target: Box::new(payload),
         },
         None => payload,
     };
-    ctx.commands.push(DrawCommand {
+    Some(DrawCommand {
         geometry,
         clip: effective_clip,
         opacity: node
@@ -1054,7 +1589,7 @@ fn emit_draw_command<M: TextMeasurer + ?Sized>(
             .map(|visual| visual.opacity.clamp(0.0, 1.0))
             .unwrap_or(1.0),
         payload,
-    });
+    })
 }
 
 /// 将文本约束投影为 renderer 无关的最终文本与命令级裁剪区。

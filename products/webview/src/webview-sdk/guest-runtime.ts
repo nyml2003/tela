@@ -27,6 +27,8 @@ interface GuestExports {
   tela_app_transport_ptr: GuestFunction;
   tela_app_transport_len: GuestFunction;
   tela_app_presented: GuestFunction;
+  tela_app_presented_effects_ptr: GuestFunction;
+  tela_app_presented_effects_len: GuestFunction;
   tela_app_rejected: GuestFunction;
   tela_app_error_ptr: GuestFunction;
   tela_app_error_len: GuestFunction;
@@ -100,7 +102,13 @@ export class TelaGuestRuntime implements TelaApplicationRuntime {
       throw new Error(`应用呈现回执不是当前待确认发布: token=${token}`);
     }
     const outcome = this.requireTokenOutcome(this.exports.tela_app_presented, token, '呈现回执');
+    const effects = this.readGuestExport(
+      this.exports.tela_app_presented_effects_ptr,
+      this.exports.tela_app_presented_effects_len,
+      'committed effects',
+    );
     this.pendingToken = undefined;
+    this.bindings.validate_browser_presented_effects(effects);
     if (outcome.publishRequested) this.publish();
     return { handled: outcome.handled, published: outcome.publishRequested };
   }
@@ -305,6 +313,8 @@ function requireGuestExports(exports: WebAssembly.Exports): GuestExports {
     'tela_app_transport_ptr',
     'tela_app_transport_len',
     'tela_app_presented',
+    'tela_app_presented_effects_ptr',
+    'tela_app_presented_effects_len',
     'tela_app_rejected',
     'tela_app_error_ptr',
     'tela_app_error_len',

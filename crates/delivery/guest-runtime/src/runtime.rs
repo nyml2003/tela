@@ -6,11 +6,12 @@ use std::{
 };
 
 use tela_app_abi::{
-    ABI_VERSION, AppDispatchOutcome, AppEvent, AppFrameToken, AppPublication, AppStatus,
-    FrameCodecError, OUTCOME_OK, decode_outcome, decode_publication, encode_event,
+    ABI_VERSION, AppDispatchOutcome, AppEffect, AppEvent, AppFrameToken, AppPublication, AppStatus,
+    FrameCodecError, OUTCOME_OK, decode_outcome, decode_presented_effects, decode_publication,
+    encode_event,
 };
 use tela_bridge::{BridgeRequest, decode_request_stream};
-use tela_contract::UiFrame;
+use tela_contract::RenderPlan;
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store, TypedFunc};
 
 // Native development bundles are compiled with the optimized release profile. Keep both guest
@@ -47,6 +48,22 @@ pub struct GuestRuntimeMetrics {
     pub last_bridge_deliver_fuel_consumed: u64,
 }
 
+/// Result of acknowledging one successfully presented guest publication.
+///
+/// The `effects` batch is tied to `token`: it becomes available only after the guest accepted
+/// that exact presentation acknowledgement. A host must either execute every effect it supports
+/// or report an explicit unsupported-capability diagnostic; it must not silently carry the batch
+/// into a later frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestPresentationAck {
+    /// The candidate token the host has just presented.
+    pub token: AppFrameToken,
+    /// Whether committing this candidate requests a follow-up publication.
+    pub outcome: AppDispatchOutcome,
+    /// Effects released by this successful acknowledgement.
+    pub effects: Vec<AppEffect>,
+}
+
 /// A guest ABI or Wasmtime runtime failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestRuntimeError(String);
@@ -76,6 +93,8 @@ pub struct GuestRuntime {
     publication_ptr: TypedFunc<(), u32>,
     publication_len: TypedFunc<(), u32>,
     presented: TypedFunc<(u32, u32), u32>,
+    presented_effects_ptr: TypedFunc<(), u32>,
+    presented_effects_len: TypedFunc<(), u32>,
     rejected: TypedFunc<(u32, u32), u32>,
     error_ptr: TypedFunc<(), u32>,
     error_len: TypedFunc<(), u32>,
@@ -85,7 +104,7 @@ pub struct GuestRuntime {
     bridge_request_len: Option<TypedFunc<(), u32>>,
     bridge_dispatch_begin: Option<TypedFunc<u32, u32>>,
     bridge_dispatch: Option<TypedFunc<u32, ()>>,
-    // Keep only portable frame bytes here. `UiFrame` can contain a host-only CustomDraw trait
+    // Keep only portable frame bytes here. `RenderPlan` can contain a host-only CustomDraw trait
     // object and is intentionally not Send; the native UI thread decodes it after worker handoff.
     publication_packet: Vec<u8>,
     status: AppStatus,
@@ -128,6 +147,10 @@ impl GuestRuntime {
         let publication_ptr = export(&instance, &mut store, "tela_app_publication_ptr")?;
         let publication_len = export(&instance, &mut store, "tela_app_publication_len")?;
         let presented = export(&instance, &mut store, "tela_app_presented")?;
+        let presented_effects_ptr =
+            export(&instance, &mut store, "tela_app_presented_effects_ptr")?;
+        let presented_effects_len =
+            export(&instance, &mut store, "tela_app_presented_effects_len")?;
         let rejected = export(&instance, &mut store, "tela_app_rejected")?;
         let error_ptr = export(&instance, &mut store, "tela_app_error_ptr")?;
         let error_len = export(&instance, &mut store, "tela_app_error_len")?;
@@ -157,6 +180,8 @@ impl GuestRuntime {
             publication_ptr,
             publication_len,
             presented,
+            presented_effects_ptr,
+            presented_effects_len,
             rejected,
             error_ptr,
             error_len,
@@ -207,7 +232,7 @@ impl GuestRuntime {
     ///
     /// The cached packet was checked whenever the guest published it. Decoding again here keeps
     /// the Wasmtime runtime movable across the background startup worker and the native UI thread.
-    pub fn frame(&self) -> Result<UiFrame, GuestRuntimeError> {
+    pub fn frame(&self) -> Result<RenderPlan, GuestRuntimeError> {
         decode_publication(&self.publication_packet)
             .map(|publication| publication.frame)
             .map_err(codec_error)
@@ -298,7 +323,12 @@ impl GuestRuntime {
     pub fn presented(
         &mut self,
         token: AppFrameToken,
-    ) -> Result<AppDispatchOutcome, GuestRuntimeError> {
+    ) -> Result<GuestPresentationAck, GuestRuntimeError> {
+        if self.pending_publication_token != Some(token) {
+            return Err(GuestRuntimeError::message(
+                "presented token is not the pending guest publication",
+            ));
+        }
         let raw = token.get();
         let outcome = self
             .presented
@@ -308,14 +338,26 @@ impl GuestRuntime {
             })?;
         let outcome = decode_outcome(outcome)
             .ok_or_else(|| self.guest_failure("guest presentation acknowledgement failed"))?;
-        if self.pending_publication_token == Some(token) {
-            self.pending_publication_token = None;
-        }
-        Ok(outcome)
+        let effects = self.read_export(
+            self.presented_effects_ptr.clone(),
+            self.presented_effects_len.clone(),
+        )?;
+        let effects = decode_presented_effects(&effects).map_err(codec_error)?;
+        self.pending_publication_token = None;
+        Ok(GuestPresentationAck {
+            token,
+            outcome,
+            effects,
+        })
     }
 
     /// Rejects a publication that could not be presented.
     pub fn rejected(&mut self, token: AppFrameToken) -> Result<(), GuestRuntimeError> {
+        if self.pending_publication_token != Some(token) {
+            return Err(GuestRuntimeError::message(
+                "rejected token is not the pending guest publication",
+            ));
+        }
         let raw = token.get();
         let outcome = self
             .rejected
@@ -326,9 +368,7 @@ impl GuestRuntime {
         if outcome & OUTCOME_OK == 0 {
             return Err(self.guest_failure("guest publication rejection failed"));
         }
-        if self.pending_publication_token == Some(token) {
-            self.pending_publication_token = None;
-        }
+        self.pending_publication_token = None;
         Ok(())
     }
 

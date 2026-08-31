@@ -1,7 +1,7 @@
 //! desktop-kit 的 DSL 生命周期包装层。
 //!
 //! 低层视觉节点仍由 `tela-desktop-ui-kit` 手写实现；本 crate 只把公共交互组件接入
-//! `tela-ui-dsl` 的 setup/render/handler 和私有跨帧状态协议，保持依赖方向单向。
+//! `tela-ui-dsl` 的 setup/assemble/handler 和私有跨帧状态协议，保持依赖方向单向。
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -22,10 +22,10 @@ use tela_desktop_ui_kit::{
 };
 pub use tela_desktop_ui_kit::{DraftInputCommit, VirtualWindow};
 use tela_ui_dsl::{
-    Body, Children, ComponentActionSpec, ComponentIdentity, ComponentInput, ComponentOutcome,
-    ComponentRenderContext, ComponentSetupContext, DslComponent, ProvidedValue, ViewBuild,
-    ViewChild, ViewOutput, ViewResult, ViewSite, component_action_route,
-    render_component_with_output,
+    Body, Children, ComponentAssembleContext, ComponentHostInputSpec, ComponentIdentity,
+    ComponentInput, ComponentOutcome, ComponentSetupContext, DslComponent, OutputConnection,
+    ProvidedValue, UiSpec, ViewBuild, ViewChild, ViewOutput, ViewResult, ViewSite,
+    assemble_component_with_output, component_host_input_route,
 };
 use tela_ui_foundation::{
     Input as KitInput, InputNumber as KitInputNumber, Slider, SliderConfig, SliderEvent,
@@ -35,30 +35,31 @@ use tela_ui_foundation::{
 pub struct Transfer;
 
 impl Transfer {
-    /// 渲染 Transfer 并把最终受控结果静态映射为应用动作。
+    /// 装配 Transfer 并把最终受控结果静态映射为当前词法接收者。
     ///
     /// 搜索和临时勾选仍由组件 State 消费；只有 `output` 接受的结果能离开组件边界。
-    pub fn render_for<A: 'static>(
+    pub fn assemble_for<A: 'static, M: 'static>(
         build: &mut ViewBuild<A>,
         props: TransferProps,
-        output: fn(TransferOutcome) -> Option<A>,
+        output: fn(TransferOutcome) -> M,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
-        render_component_with_output::<Self, A>(
+        assemble_component_with_output::<Self, A, M>(
             build,
             props,
             Children::new(|_| Ok(Body::new(Vec::new(), Vec::new()))),
             output,
+            stringify!(output),
             site,
         )
     }
 }
 
-fn bind_transfer_output<A: 'static>(
+fn bind_transfer_output<A: 'static, M: 'static>(
     mut view: ViewOutput<A>,
     identity: ComponentIdentity,
     props: &TransferProps,
-    output: fn(TransferOutcome) -> Option<A>,
+    output: OutputConnection<TransferOutcome, A, M>,
     site: ViewSite,
 ) -> ViewOutput<A> {
     let mut events = vec![
@@ -75,15 +76,15 @@ fn bind_transfer_output<A: 'static>(
         events.push((format!("transfer.item.{}", item.key), event));
     }
     for (key, event) in events {
-        view = view.attach_component_action(component_action_route::<Transfer, A, _>(
-            ComponentActionSpec {
+        view = view.attach_host_input_route(component_host_input_route::<Transfer, A, _, M>(
+            ComponentHostInputSpec {
                 identity: identity.clone(),
                 site,
                 key: key.into(),
                 props: props.clone(),
                 event_context: event,
                 event: click_event,
-                output,
+                output: output.clone(),
             },
         ));
     }
@@ -91,15 +92,15 @@ fn bind_transfer_output<A: 'static>(
         ("transfer.left-search", true),
         ("transfer.right-search", false),
     ] {
-        view = view.attach_component_action(component_action_route::<Transfer, A, _>(
-            ComponentActionSpec {
+        view = view.attach_host_input_route(component_host_input_route::<Transfer, A, _, M>(
+            ComponentHostInputSpec {
                 identity: identity.clone(),
                 site,
                 key: key.into(),
                 props: props.clone(),
                 event_context: left,
                 event: search_event,
-                output,
+                output: output.clone(),
             },
         ));
     }
@@ -143,6 +144,10 @@ pub struct TransferProps {
 }
 
 impl DslComponent for Transfer {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A: 'static> UiSpec<A> for Transfer {
     type Props = TransferProps;
     type State = TransferState;
     type Event = TransferEvent;
@@ -152,12 +157,12 @@ impl DslComponent for Transfer {
         props.key.clone()
     }
 
-    fn setup(_context: &ComponentSetupContext, _props: &Self::Props) -> Self::State {
+    fn setup(_context: &ComponentSetupContext<Self::Event>, _props: &Self::Props) -> Self::State {
         TransferState::new()
     }
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         state: &Self::State,
         _children: Children<'a, A>,
@@ -183,14 +188,20 @@ impl DslComponent for Transfer {
     ) -> ComponentOutcome<Self::Output> {
         let items = props.items.clone().unwrap_or_default();
         let target_keys = props.target_keys.clone().unwrap_or_default();
-        ComponentOutcome::Output(state.handle(event, &items, &target_keys))
+        let outcome = state.handle(event, &items, &target_keys);
+        if outcome.target_keys.is_some() {
+            ComponentOutcome::Output(outcome)
+        } else {
+            // 搜索和临时勾选是组件私有候选 State，不是父级业务结果。
+            ComponentOutcome::Consumed
+        }
     }
 
-    fn bind_output<A: 'static>(
+    fn wire_output<M: 'static>(
         view: ViewOutput<A>,
         identity: ComponentIdentity,
         props: &Self::Props,
-        output: fn(Self::Output) -> Option<A>,
+        output: OutputConnection<Self::Output, A, M>,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
         Ok(bind_transfer_output(view, identity, props, output, site))
@@ -201,28 +212,29 @@ impl DslComponent for Transfer {
 pub struct WindowsTitleBar;
 
 impl WindowsTitleBar {
-    /// 渲染标题栏，并把窗口命令静态映射为应用动作。
-    pub fn render_for<A: 'static>(
+    /// 装配标题栏，并把窗口命令静态映射为当前词法接收者。
+    pub fn assemble_for<A: 'static, M: 'static>(
         build: &mut ViewBuild<A>,
         props: WindowsTitleBarProps,
-        output: fn(WindowCommand) -> Option<A>,
+        output: fn(WindowCommand) -> M,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
-        render_component_with_output::<Self, A>(
+        assemble_component_with_output::<Self, A, M>(
             build,
             props,
             Children::new(|_| Ok(Body::new(Vec::new(), Vec::new()))),
             output,
+            stringify!(output),
             site,
         )
     }
 }
 
-fn bind_window_output<A: 'static>(
+fn bind_window_output<A: 'static, M: 'static>(
     mut view: ViewOutput<A>,
     identity: ComponentIdentity,
     props: &WindowsTitleBarProps,
-    output: fn(WindowCommand) -> Option<A>,
+    output: OutputConnection<WindowCommand, A, M>,
     site: ViewSite,
 ) -> ViewOutput<A> {
     for (key, command) in [
@@ -230,17 +242,17 @@ fn bind_window_output<A: 'static>(
         ("window.maximize", WindowCommand::Maximize),
         ("window.close", WindowCommand::Close),
     ] {
-        view = view.attach_component_action(component_action_route::<WindowsTitleBar, A, _>(
-            ComponentActionSpec {
+        view = view.attach_host_input_route(
+            component_host_input_route::<WindowsTitleBar, A, _, M>(ComponentHostInputSpec {
                 identity: identity.clone(),
                 site,
                 key: key.into(),
                 props: props.clone(),
                 event_context: command,
                 event: window_event,
-                output,
-            },
-        ));
+                output: output.clone(),
+            }),
+        );
     }
     view
 }
@@ -268,6 +280,10 @@ pub struct WindowsTitleBarProps {
 }
 
 impl DslComponent for WindowsTitleBar {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A: 'static> UiSpec<A> for WindowsTitleBar {
     type Props = WindowsTitleBarProps;
     type State = ();
     type Event = WindowCommand;
@@ -277,10 +293,10 @@ impl DslComponent for WindowsTitleBar {
         props.key.clone()
     }
 
-    fn setup(_context: &ComponentSetupContext, _props: &Self::Props) -> Self::State {}
+    fn setup(_context: &ComponentSetupContext<Self::Event>, _props: &Self::Props) -> Self::State {}
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         _state: &Self::State,
         _children: Children<'a, A>,
@@ -306,11 +322,11 @@ impl DslComponent for WindowsTitleBar {
         ComponentOutcome::Output(event)
     }
 
-    fn bind_output<A: 'static>(
+    fn wire_output<M: 'static>(
         view: ViewOutput<A>,
         identity: ComponentIdentity,
         props: &Self::Props,
-        output: fn(Self::Output) -> Option<A>,
+        output: OutputConnection<Self::Output, A, M>,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
         Ok(bind_window_output(view, identity, props, output, site))
@@ -321,28 +337,29 @@ impl DslComponent for WindowsTitleBar {
 pub struct SliderView;
 
 impl SliderView {
-    /// 渲染 Slider 并把最终值静态映射为应用动作。
-    pub fn render_for<A: 'static>(
+    /// 装配 Slider 并把最终值静态映射为当前词法接收者。
+    pub fn assemble_for<A: 'static, M: 'static>(
         build: &mut ViewBuild<A>,
         props: SliderProps,
-        output: fn(f64) -> Option<A>,
+        output: fn(f64) -> M,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
-        render_component_with_output::<Self, A>(
+        assemble_component_with_output::<Self, A, M>(
             build,
             props,
             Children::new(|_| Ok(Body::new(Vec::new(), Vec::new()))),
             output,
+            stringify!(output),
             site,
         )
     }
 }
 
-fn bind_slider_output<A: 'static>(
+fn bind_slider_output<A: 'static, M: 'static>(
     view: ViewOutput<A>,
     identity: ComponentIdentity,
     props: &SliderProps,
-    output: fn(f64) -> Option<A>,
+    output: OutputConnection<f64, A, M>,
     site: ViewSite,
 ) -> ViewOutput<A> {
     let key = props
@@ -350,8 +367,8 @@ fn bind_slider_output<A: 'static>(
         .clone()
         .unwrap_or_else(|| "desktop.slider".to_owned());
     let event_config = props.config.clone().unwrap_or_default();
-    view.attach_component_action(component_action_route::<SliderView, A, _>(
-        ComponentActionSpec {
+    view.attach_host_input_route(component_host_input_route::<SliderView, A, _, M>(
+        ComponentHostInputSpec {
             identity,
             site,
             key: key.into(),
@@ -421,6 +438,10 @@ impl Default for SliderProps {
 }
 
 impl DslComponent for SliderView {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A: 'static> UiSpec<A> for SliderView {
     type Props = SliderProps;
     type State = SliderState;
     type Event = SliderEvent;
@@ -430,7 +451,7 @@ impl DslComponent for SliderView {
         props.key.clone()
     }
 
-    fn setup(_context: &ComponentSetupContext, props: &Self::Props) -> Self::State {
+    fn setup(_context: &ComponentSetupContext<Self::Event>, props: &Self::Props) -> Self::State {
         let value = props.config.clone().unwrap_or_default().value;
         SliderState {
             draft: value,
@@ -438,8 +459,8 @@ impl DslComponent for SliderView {
         }
     }
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         _state: &Self::State,
         _children: Children<'a, A>,
@@ -483,11 +504,11 @@ impl DslComponent for SliderView {
         }
     }
 
-    fn bind_output<A: 'static>(
+    fn wire_output<M: 'static>(
         view: ViewOutput<A>,
         identity: ComponentIdentity,
         props: &Self::Props,
-        output: fn(Self::Output) -> Option<A>,
+        output: OutputConnection<Self::Output, A, M>,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
         Ok(bind_slider_output(view, identity, props, output, site))
@@ -540,18 +561,19 @@ pub struct DraftInputState {
 pub struct DraftInputView;
 
 impl DraftInputView {
-    /// 渲染 DraftInput 并静态映射确认后的字段提交。
-    pub fn render_for<A: 'static>(
+    /// 装配 DraftInput 并静态映射确认后的字段提交。
+    pub fn assemble_for<A: 'static, M: 'static>(
         build: &mut ViewBuild<A>,
         props: DraftInputProps,
-        output: fn(DraftInputCommit) -> Option<A>,
+        output: fn(DraftInputCommit) -> M,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
-        render_component_with_output::<Self, A>(
+        assemble_component_with_output::<Self, A, M>(
             build,
             props,
             Children::new(|_| Ok(Body::new(Vec::new(), Vec::new()))),
             output,
+            stringify!(output),
             site,
         )
     }
@@ -566,6 +588,10 @@ fn draft_event(_context: (), input: ComponentInput<'_>) -> Option<TextInputEvent
 }
 
 impl DslComponent for DraftInputView {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A: 'static> UiSpec<A> for DraftInputView {
     type Props = DraftInputProps;
     type State = DraftInputState;
     type Event = TextInputEvent;
@@ -575,7 +601,7 @@ impl DslComponent for DraftInputView {
         props.key.clone()
     }
 
-    fn setup(_context: &ComponentSetupContext, props: &Self::Props) -> Self::State {
+    fn setup(_context: &ComponentSetupContext<Self::Event>, props: &Self::Props) -> Self::State {
         let external = props.value.clone().unwrap_or_default();
         DraftInputState {
             draft: external.clone(),
@@ -584,8 +610,8 @@ impl DslComponent for DraftInputView {
         }
     }
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         state: &Self::State,
         _children: Children<'a, A>,
@@ -693,11 +719,11 @@ impl DslComponent for DraftInputView {
         }
     }
 
-    fn bind_output<A: 'static>(
+    fn wire_output<M: 'static>(
         view: ViewOutput<A>,
         identity: ComponentIdentity,
         props: &Self::Props,
-        output: fn(Self::Output) -> Option<A>,
+        output: OutputConnection<Self::Output, A, M>,
         site: ViewSite,
     ) -> ViewResult<ViewOutput<A>> {
         let semantic_key = props
@@ -705,8 +731,8 @@ impl DslComponent for DraftInputView {
             .clone()
             .unwrap_or_else(|| "desktop.draft-input".to_owned());
         Ok(
-            view.attach_component_action(component_action_route::<Self, A, _>(
-                ComponentActionSpec {
+            view.attach_host_input_route(component_host_input_route::<Self, A, _, M>(
+                ComponentHostInputSpec {
                     identity,
                     site,
                     key: semantic_key.into(),
@@ -724,6 +750,7 @@ impl DslComponent for DraftInputView {
 ///
 /// 调用方复用低层专用配置器，但不调用 `into_node`；节点生成固定发生在包装器 render
 /// 内，任意预构造 `UiNode` 不能伪装成某个公共组件。
+#[derive(Clone)]
 pub struct DesktopBuilderProps<T> {
     /// 对应组件的 desktop-kit builder。
     pub builder: Option<T>,
@@ -746,6 +773,10 @@ macro_rules! desktop_builder_component {
         pub struct $name;
 
         impl DslComponent for $name {
+            type UiSpec<A: 'static> = Self;
+        }
+
+        impl<A> UiSpec<A> for $name {
             type Props = DesktopBuilderProps<$kit>;
             type State = ();
             type Event = ();
@@ -755,8 +786,8 @@ macro_rules! desktop_builder_component {
                 props.key.clone()
             }
 
-            fn render<'a, A>(
-                context: &mut ComponentRenderContext<'_, A>,
+            fn assemble<'a>(
+                context: &mut ComponentAssembleContext<'_, A>,
                 props: Self::Props,
                 _state: &Self::State,
                 _children: Children<'a, A>,
@@ -823,6 +854,10 @@ pub struct VirtualWindowProps {
 pub struct VirtualWindowView;
 
 impl DslComponent for VirtualWindowView {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A> UiSpec<A> for VirtualWindowView {
     type Props = VirtualWindowProps;
     type State = ();
     type Event = ();
@@ -832,8 +867,8 @@ impl DslComponent for VirtualWindowView {
         props.key.clone()
     }
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         _state: &Self::State,
         children: Children<'a, A>,
@@ -857,7 +892,7 @@ impl DslComponent for VirtualWindowView {
 }
 
 /// 需要产品图标资源的 IconButton Props。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct IconButtonProps {
     /// desktop-kit builder。
     pub builder: Option<KitIconButton>,
@@ -871,6 +906,10 @@ pub struct IconButtonProps {
 pub struct IconButtonView;
 
 impl DslComponent for IconButtonView {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A> UiSpec<A> for IconButtonView {
     type Props = IconButtonProps;
     type State = ();
     type Event = ();
@@ -880,8 +919,8 @@ impl DslComponent for IconButtonView {
         props.key.clone()
     }
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         _state: &Self::State,
         _children: Children<'a, A>,
@@ -907,7 +946,7 @@ impl DslComponent for IconButtonView {
 }
 
 /// 需要产品图标资源的 Toolbar Props。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolbarProps {
     /// desktop-kit builder。
     pub builder: Option<KitToolbar>,
@@ -921,6 +960,10 @@ pub struct ToolbarProps {
 pub struct ToolbarView;
 
 impl DslComponent for ToolbarView {
+    type UiSpec<A: 'static> = Self;
+}
+
+impl<A> UiSpec<A> for ToolbarView {
     type Props = ToolbarProps;
     type State = ();
     type Event = ();
@@ -930,8 +973,8 @@ impl DslComponent for ToolbarView {
         props.key.clone()
     }
 
-    fn render<'a, A>(
-        context: &mut ComponentRenderContext<'_, A>,
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
         props: Self::Props,
         _state: &Self::State,
         _children: Children<'a, A>,
@@ -962,7 +1005,8 @@ mod tests {
 
     use tela_contract::{
         FocusDirection, HitRegion, KernelInteraction, KeyboardIntent, KeyboardIntentEvent, Point,
-        PointerEvent, Rect, TextInputEvent, TextSelection, UiFrame, Viewport, WindowCommand,
+        PointerEvent, Rect, RenderPlan, TextInputEvent, TextSelection, UiFrame, Viewport,
+        WindowCommand,
     };
     use tela_ui_dsl::{
         ComponentDispatch, FrameCoordinator, FramedInteraction, ViewOutput, ViewSite,
@@ -988,7 +1032,7 @@ mod tests {
         let mut build = coordinator.begin_build();
         let site = ViewSite::new(file!(), line!(), column!());
         let mut observed = None;
-        let output = tela_ui_dsl::render_component::<VirtualWindowView, ()>(
+        let output = tela_ui_dsl::assemble_component::<VirtualWindowView, ()>(
             &mut build,
             VirtualWindowProps {
                 total_items: Some(100),
@@ -1021,20 +1065,24 @@ mod tests {
         assert_eq!(observed.expect("lazy child must run").range(), 9..15);
     }
 
-    fn output(outcome: TransferOutcome) -> Option<Action> {
-        outcome.target_keys.map(Action::Targets)
+    fn output(outcome: TransferOutcome) -> Action {
+        Action::Targets(
+            outcome
+                .target_keys
+                .expect("Transfer only outputs final targets"),
+        )
     }
 
-    fn rate_output(value: f64) -> Option<Action> {
-        Some(Action::Rate(value.to_bits()))
+    fn rate_output(value: f64) -> Action {
+        Action::Rate(value.to_bits())
     }
 
-    fn draft_output(commit: DraftInputCommit) -> Option<Action> {
-        Some(Action::Draft(commit.value))
+    fn draft_output(commit: DraftInputCommit) -> Action {
+        Action::Draft(commit.value)
     }
 
-    fn window_output(command: WindowCommand) -> Option<Action> {
-        Some(Action::Window(command))
+    fn window_output(command: WindowCommand) -> Action {
+        Action::Window(command)
     }
 
     fn props() -> TransferProps {
@@ -1047,9 +1095,18 @@ mod tests {
         }
     }
 
+    fn test_plan(viewport: Viewport, hit_regions: Vec<HitRegion>) -> RenderPlan {
+        RenderPlan::from_flat_frame(UiFrame {
+            viewport,
+            commands: Vec::new(),
+            hit_regions,
+            scroll_bounds: Vec::new(),
+        })
+    }
+
     fn commit(coordinator: &mut FrameCoordinator<Action>) {
         let mut build = coordinator.begin_build();
-        let root = Transfer::render_for(
+        let root = Transfer::assemble_for(
             &mut build,
             props(),
             output,
@@ -1059,18 +1116,18 @@ mod tests {
         let prepared = coordinator.prepare(root).expect("prepared transfer");
         let resolved = prepared
             .resolve(|_| {
-                Ok::<_, ()>(UiFrame {
-                    viewport: Viewport {
+                Ok::<_, ()>(test_plan(
+                    Viewport {
                         width: 640.0,
                         height: 480.0,
                     },
-                    commands: Vec::new(),
-                    hit_regions: Vec::new(),
-                    scroll_bounds: Vec::new(),
-                })
+                    Vec::new(),
+                ))
             })
             .expect("resolved transfer");
-        coordinator.commit(resolved);
+        coordinator
+            .commit(resolved)
+            .expect("current transfer frame");
     }
 
     fn click(coordinator: &FrameCoordinator<Action>, key: &str) -> FramedInteraction {
@@ -1092,7 +1149,7 @@ mod tests {
         let stale = toggle.clone();
         assert!(matches!(
             coordinator.dispatch_component_interaction(&toggle),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
 
         let search = FramedInteraction::new(
@@ -1115,7 +1172,7 @@ mod tests {
         );
         assert!(matches!(
             coordinator.dispatch_component_interaction(&search),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
         assert_eq!(
             coordinator.input_value(&tela_contract::SemanticKey(
@@ -1134,7 +1191,7 @@ mod tests {
         let move_right = click(&coordinator, "transfer.move-right");
         assert!(matches!(
             coordinator.dispatch_component_interaction(&move_right),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
         assert!(coordinator.take_component_outputs().is_empty());
         commit(&mut coordinator);
@@ -1143,14 +1200,17 @@ mod tests {
             vec![Action::Targets(BTreeSet::from(["a".to_owned()]))]
         );
 
-        assert!(coordinator.dispatch_component_interaction(&stale).is_none());
+        assert!(matches!(
+            coordinator.dispatch_component_interaction(&stale),
+            Ok(None)
+        ));
     }
 
     #[test]
     fn title_bar_delivers_window_commands_only_after_commit() {
         fn render(coordinator: &mut FrameCoordinator<Action>) -> ViewOutput<Action> {
             let mut build = coordinator.begin_build();
-            WindowsTitleBar::render_for(
+            WindowsTitleBar::assemble_for(
                 &mut build,
                 WindowsTitleBarProps {
                     title: Some("Title".to_owned()),
@@ -1168,23 +1228,21 @@ mod tests {
         let prepared = coordinator.prepare(root).expect("prepared title");
         let resolved = prepared
             .resolve(|_| {
-                Ok::<_, ()>(UiFrame {
-                    viewport: Viewport {
+                Ok::<_, ()>(test_plan(
+                    Viewport {
                         width: 640.0,
                         height: 40.0,
                     },
-                    commands: Vec::new(),
-                    hit_regions: Vec::new(),
-                    scroll_bounds: Vec::new(),
-                })
+                    Vec::new(),
+                ))
             })
             .expect("resolved title");
-        coordinator.commit(resolved);
+        coordinator.commit(resolved).expect("current title frame");
 
         let close = click(&coordinator, "window.close");
         assert!(matches!(
             coordinator.dispatch_component_interaction(&close),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
         assert!(coordinator.take_component_outputs().is_empty());
 
@@ -1192,18 +1250,16 @@ mod tests {
         let prepared = coordinator.prepare(root).expect("prepared update");
         let resolved = prepared
             .resolve(|_| {
-                Ok::<_, ()>(UiFrame {
-                    viewport: Viewport {
+                Ok::<_, ()>(test_plan(
+                    Viewport {
                         width: 640.0,
                         height: 40.0,
                     },
-                    commands: Vec::new(),
-                    hit_regions: Vec::new(),
-                    scroll_bounds: Vec::new(),
-                })
+                    Vec::new(),
+                ))
             })
             .expect("resolved update");
-        coordinator.commit(resolved);
+        coordinator.commit(resolved).expect("current update frame");
         assert_eq!(
             coordinator.take_component_outputs(),
             vec![Action::Window(WindowCommand::Close)]
@@ -1222,7 +1278,7 @@ mod tests {
 
         fn render(coordinator: &mut FrameCoordinator<Action>) -> ViewOutput<Action> {
             let mut build = coordinator.begin_build();
-            DraftInputView::render_for(
+            DraftInputView::assemble_for(
                 &mut build,
                 props(),
                 draft_output,
@@ -1233,23 +1289,19 @@ mod tests {
 
         fn publish(coordinator: &mut FrameCoordinator<Action>) {
             let root = render(coordinator);
-            let prepared = coordinator
-                .prepare(root)
-                .expect("prepared draft");
+            let prepared = coordinator.prepare(root).expect("prepared draft");
             let resolved = prepared
                 .resolve(|_| {
-                    Ok::<_, ()>(UiFrame {
-                        viewport: Viewport {
+                    Ok::<_, ()>(test_plan(
+                        Viewport {
                             width: 240.0,
                             height: 40.0,
                         },
-                        commands: Vec::new(),
-                        hit_regions: Vec::new(),
-                        scroll_bounds: Vec::new(),
-                    })
+                        Vec::new(),
+                    ))
                 })
                 .expect("resolved draft");
-            coordinator.commit(resolved);
+            coordinator.commit(resolved).expect("current draft frame");
         }
 
         let mut coordinator = FrameCoordinator::new();
@@ -1273,7 +1325,7 @@ mod tests {
         );
         assert!(matches!(
             coordinator.dispatch_component_interaction(&edit),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
         assert_eq!(
             coordinator.input_value(&tela_contract::SemanticKey("draft".to_owned())),
@@ -1291,7 +1343,7 @@ mod tests {
         );
         assert!(matches!(
             coordinator.dispatch_component_interaction(&commit),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
         coordinator.abort_component_transaction();
         publish(&mut coordinator);
@@ -1304,9 +1356,9 @@ mod tests {
 
     #[test]
     fn slider_handles_pointer_and_keyboard_inside_the_component_route() {
-        let mut coordinator = FrameCoordinator::new();
+        let mut coordinator: FrameCoordinator<Action> = FrameCoordinator::new();
         let mut build = coordinator.begin_build();
-        let root = SliderView::render_for(
+        let root = SliderView::assemble_for(
             &mut build,
             SliderProps {
                 config: Some(SliderConfig {
@@ -1331,13 +1383,12 @@ mod tests {
             .expect("slider node");
         let resolved = prepared
             .resolve(|_| {
-                Ok::<_, ()>(UiFrame {
-                    viewport: Viewport {
+                Ok::<_, ()>(test_plan(
+                    Viewport {
                         width: 240.0,
                         height: 80.0,
                     },
-                    commands: Vec::new(),
-                    hit_regions: vec![HitRegion {
+                    vec![HitRegion {
                         node_id,
                         rect: Rect {
                             x: 20.0,
@@ -1348,11 +1399,10 @@ mod tests {
                         clip: None,
                         role: tela_contract::HitRole::Client,
                     }],
-                    scroll_bounds: Vec::new(),
-                })
+                ))
             })
             .expect("resolved slider");
-        coordinator.commit(resolved);
+        coordinator.commit(resolved).expect("current slider frame");
         let token = coordinator.active().expect("active slider").token();
 
         let pointer = FramedInteraction::new(
@@ -1364,7 +1414,7 @@ mod tests {
         );
         assert!(matches!(
             coordinator.dispatch_component_interaction(&pointer),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
 
         let keyboard = FramedInteraction::new(
@@ -1379,11 +1429,11 @@ mod tests {
         );
         assert!(matches!(
             coordinator.dispatch_component_interaction(&keyboard),
-            Some(ComponentDispatch::Consumed)
+            Ok(Some(ComponentDispatch::Consumed))
         ));
 
         let mut build = coordinator.begin_build();
-        let root = SliderView::render_for(
+        let root = SliderView::assemble_for(
             &mut build,
             SliderProps {
                 config: Some(SliderConfig {
@@ -1404,18 +1454,18 @@ mod tests {
         let prepared = coordinator.prepare(root).expect("prepared candidate");
         let resolved = prepared
             .resolve(|_| {
-                Ok::<_, ()>(UiFrame {
-                    viewport: Viewport {
+                Ok::<_, ()>(test_plan(
+                    Viewport {
                         width: 240.0,
                         height: 80.0,
                     },
-                    commands: Vec::new(),
-                    hit_regions: Vec::new(),
-                    scroll_bounds: Vec::new(),
-                })
+                    Vec::new(),
+                ))
             })
             .expect("resolved candidate");
-        coordinator.commit(resolved);
+        coordinator
+            .commit(resolved)
+            .expect("current candidate frame");
         assert_eq!(
             coordinator.take_component_outputs(),
             vec![

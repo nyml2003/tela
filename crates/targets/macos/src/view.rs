@@ -23,14 +23,14 @@ use objc2_quartz_core::CADisplayLink;
 use std::rc::Rc;
 
 use tela_app_abi::{
-    AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind, AppPointerPhase,
-    CursorKind,
+    AppEffect, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
+    AppPointerPhase, CursorKind,
 };
 use tela_bridge::BridgeDispatcher;
 use tela_desktop_runtime::bridge::{common::BuildConstants, process_bridge_requests};
 
 use crate::providers::MacMetrics;
-use tela_contract::{FrameDamage, UiFrame};
+use tela_contract::{FrameDamage, RenderPlan, WindowCommand};
 use tela_desktop_runtime::{
     DeviceLossAction, GuestRuntime, PlatformLaunchOptions, ShellLifecycle, ShellPhase,
     TextChannelAction,
@@ -50,7 +50,7 @@ pub(crate) struct TelaViewIvars {
 struct ViewState {
     lifecycle: ShellLifecycle,
     runtime: Option<GuestRuntime>,
-    frame: Option<UiFrame>,
+    frame: Option<RenderPlan>,
     damage: FrameDamage,
     frame_token: Option<AppFrameToken>,
     presented_frame_token: Option<AppFrameToken>,
@@ -64,6 +64,10 @@ struct ViewState {
     terminal_error: Option<String>,
     bridge: Option<BridgeDispatcher>,
     bridge_metrics: Rc<RefCell<MacMetrics>>,
+    /// Effects released only after the currently painted guest candidate has committed. They are
+    /// executed after `drawRect:` releases this state borrow so a close command can safely reenter
+    /// the AppKit window delegate.
+    presented_effects: Vec<AppEffect>,
     animation_epoch: Instant,
 }
 
@@ -77,7 +81,7 @@ define_class!(
     impl TelaView {
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
-            // The shared `UiFrame` and browser host use upper-left logical coordinates.
+            // The shared render plan and browser host use upper-left logical coordinates.
             true
         }
 
@@ -98,11 +102,15 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
-            let mut state = self.ivars().state.borrow_mut();
-            state.lifecycle.begin_paint();
-            if let Err(error) = state.paint(self) {
-                state.fail_terminal(self, error);
-            }
+            let effects = {
+                let mut state = self.ivars().state.borrow_mut();
+                state.lifecycle.begin_paint();
+                if let Err(error) = state.paint(self) {
+                    state.fail_terminal(self, error);
+                }
+                std::mem::take(&mut state.presented_effects)
+            };
+            self.execute_presented_effects(effects);
         }
 
         #[unsafe(method(acceptsFirstResponder))]
@@ -206,6 +214,7 @@ impl TelaView {
                 terminal_error: None,
                 bridge_metrics: Rc::new(RefCell::new(MacMetrics::default())),
                 bridge: None,
+                presented_effects: Vec::new(),
                 animation_epoch: Instant::now(),
             }),
             tracking_rect: Cell::new(None),
@@ -272,6 +281,35 @@ impl TelaView {
         if let Some(display_link) = self.ivars().display_link.get() {
             display_link.setPaused(true);
             display_link.invalidate();
+        }
+    }
+
+    fn execute_presented_effects(&self, effects: Vec<AppEffect>) {
+        if effects.is_empty() {
+            return;
+        }
+        let Some(window) = self.window() else {
+            eprintln!("tela-macos-host: dropped committed effects because the view has no window");
+            return;
+        };
+        for effect in effects {
+            let AppEffect::Window(command) = effect;
+            match command {
+                WindowCommand::Minimize => {
+                    if !window.isMiniaturized() {
+                        window.miniaturize(None);
+                    }
+                }
+                WindowCommand::Maximize => {
+                    if window.isMiniaturized() {
+                        window.deminiaturize(None);
+                    }
+                    if !window.isZoomed() {
+                        window.zoom(None);
+                    }
+                }
+                WindowCommand::Close => window.performClose(None),
+            }
         }
     }
 
@@ -638,6 +676,43 @@ impl ViewState {
         Ok(outcome.handled)
     }
 
+    /// Commits the frame which Metal has already presented. If that commit releases an Effect or
+    /// requests a follow-up candidate, consume both before a later redraw can overwrite the guest
+    /// ABI buffers.
+    fn acknowledge_presented_frame(
+        &mut self,
+        view: &TelaView,
+        token: AppFrameToken,
+    ) -> Result<(), String> {
+        let outcome = {
+            let runtime = self
+                .runtime
+                .as_mut()
+                .ok_or_else(|| "acknowledge without a live guest runtime".to_owned())?;
+            let acknowledged = runtime
+                .presented(token)
+                .map_err(|error| error.to_string())?;
+            self.presented_effects.extend(acknowledged.effects);
+            acknowledged.outcome
+        };
+        if outcome.publish_requested {
+            let publication = self
+                .runtime
+                .as_mut()
+                .expect("guest runtime exists while acknowledging")
+                .publish_latest()
+                .map_err(|error| error.to_string())?;
+            self.frame_token = Some(publication.token);
+            self.frame = Some(publication.frame);
+            self.damage = publication.damage;
+            self.request_redraw(view);
+        }
+        if let (Some(runtime), Some(dispatcher)) = (self.runtime.as_mut(), self.bridge.as_mut()) {
+            process_bridge_requests(runtime, dispatcher)?;
+        }
+        Ok(())
+    }
+
     fn dispatch_presented_input(&mut self, input: AppFrameInput) -> Result<bool, String> {
         let Some(source_frame_token) = self.presented_frame_token else {
             return Ok(false);
@@ -819,11 +894,9 @@ impl ViewState {
         match gpu.render(&frame, &damage) {
             RenderOutcome::Presented { suboptimal } => {
                 if frame_token != self.presented_frame_token
-                    && let (Some(runtime), Some(token)) = (self.runtime.as_mut(), frame_token)
+                    && let Some(token) = frame_token
                 {
-                    let _ = runtime
-                        .presented(token)
-                        .map_err(|error| error.to_string())?;
+                    self.acknowledge_presented_frame(view, token)?;
                 }
                 self.presented_frame_token = frame_token;
                 self.lifecycle.surface_presented();

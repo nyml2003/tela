@@ -6,6 +6,7 @@ use tela_core::LayoutContainer;
 use crate::shared::{ERROR, TEXT, text};
 
 /// 表单项：标签（右上红星 + 文本）+ 控件 + 错误提示。
+#[derive(Clone)]
 pub struct FormItem {
     label: String,
     required: bool,
@@ -85,6 +86,7 @@ impl From<FormItem> for UiNode {
 }
 
 /// 表单容器：纵向排列表单项（子项校验状态由宿主提供）。
+#[derive(Clone)]
 pub struct Form {
     items: Vec<UiNode>,
     gap: f32,

@@ -1,4 +1,4 @@
-//! 共享 `UiFrame` 到 GPU 图元批次的 CPU 侧展开。
+//! 共享 `DrawCommandSource` 到 GPU 图元批次的 CPU 侧展开。
 
 use bytemuck::cast_slice;
 use tela_contract::{

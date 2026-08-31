@@ -8,7 +8,7 @@ use std::{num::NonZeroU64, rc::Rc};
 use serde::{Deserialize, Serialize};
 use tela_contract::{
     FrameDamage, Point, PointerButtons, PointerEvent, PointerId, PointerKind, PointerPhase,
-    SemanticKey, UiFrame, WindowCommand,
+    RenderPlan, SemanticKey, WindowCommand,
 };
 
 /// 原始指针设备类型在 Application ABI 中的稳定编码。
@@ -294,7 +294,7 @@ impl AppDispatchOutcome {
     }
 }
 
-/// A host effect staged with a publication and committed only after presentation.
+/// A host effect released only after a candidate publication is acknowledged as presented.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEffect {
     /// Execute a native window command.
@@ -317,7 +317,7 @@ pub struct AppPublication {
     /// Candidate frame identity.
     pub token: AppFrameToken,
     /// Resolved visual frame.
-    pub frame: UiFrame,
+    pub frame: RenderPlan,
     /// Paint damage relative to the last successfully presented frame.
     ///
     /// Initial frames and host-wide invalidations contain a full-viewport rectangle. Targets
@@ -335,8 +335,6 @@ pub struct AppPublication {
     pub retained_tree: Option<Rc<dyn RetainedTreeSnapshot>>,
     /// Native state projection associated with `frame`.
     pub status: AppStatus,
-    /// Effects that become eligible only after this publication is presented.
-    pub effects: Vec<AppEffect>,
 }
 
 impl std::fmt::Debug for AppPublication {
@@ -349,7 +347,6 @@ impl std::fmt::Debug for AppPublication {
             .field("spine", &self.spine)
             .field("retained_tree", &self.retained_tree.is_some())
             .field("status", &self.status)
-            .field("effects", &self.effects)
             .finish()
     }
 }
@@ -361,7 +358,6 @@ impl PartialEq for AppPublication {
             && self.damage == other.damage
             && self.spine == other.spine
             && self.status == other.status
-            && self.effects == other.effects
     }
 }
 
@@ -397,6 +393,19 @@ pub trait ApplicationSession {
 
     /// Commits a successfully presented candidate.
     fn presented(&mut self, token: AppFrameToken) -> Result<AppDispatchOutcome, SessionError>;
+
+    /// Drains effects released by successful [`Self::presented`] acknowledgements since the last
+    /// drain.
+    ///
+    /// A candidate publication deliberately carries no executable effects. This method is the
+    /// only session-level handoff point, so a host cannot obtain an effect before it has first
+    /// acknowledged the exact frame token that made its originating UI state active. Returning an
+    /// owned vector also makes the handoff one-shot: repeated calls return an empty vector. Hosts
+    /// should drain immediately after each acknowledgement; accumulation only prevents loss when
+    /// an unexpected follow-up acknowledgement arrives first.
+    fn take_presented_effects(&mut self) -> Vec<AppEffect> {
+        Vec::new()
+    }
 
     /// Rejects a candidate that could not be presented.
     fn rejected(&mut self, token: AppFrameToken);

@@ -580,6 +580,7 @@ impl IconOpticalMetrics {
 }
 
 /// 某个图标来源成功解析后的节点与光学数据。
+#[derive(Clone)]
 pub struct IconVisual {
     node: UiNode,
     metrics: IconOpticalMetrics,

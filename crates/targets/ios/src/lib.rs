@@ -6,7 +6,7 @@
 
 #![warn(missing_docs)]
 
-use tela_contract::{Insets, PointerEvent, UiFrame};
+use tela_contract::{Insets, PointerEvent, RenderPlan};
 
 #[cfg(any(test, target_os = "ios"))]
 mod input;
@@ -64,7 +64,7 @@ pub trait IosMobileSession {
     /// UIKit must retain the token only after the frame is actually presented, then pass it back
     /// with subsequent touch, keyboard, and IME input. This prevents a reused `NodeId` from an
     /// older Metal drawable being routed into a newer application frame.
-    fn frame(&mut self) -> (&UiFrame, u64);
+    fn frame(&mut self) -> (&RenderPlan, u64);
 
     /// Returns the state UIKit needs after an input or lifecycle transition.
     fn text_status(&self) -> MobileTextStatus;

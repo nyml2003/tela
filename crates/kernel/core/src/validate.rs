@@ -1,4 +1,4 @@
-//! 构建期校验与身份分配（见 003-场景树与节点模型 4/5、005-key身份策略 2.1）。
+//! 构建期校验与身份解析（见 003-场景树与节点模型 4/5、005-key身份策略 2.1）。
 //!
 //! `UiTree::new` 在布局前完成校验，失败返回结构化错误，不 panic：
 //! - 结构 id 与 key 唯一（auto-path 生成 + 业务 `semantic_key` 校验）；
@@ -16,37 +16,21 @@ use tela_contract::{
     MinMax, NodeId, NodeKind, SemanticKey, Size, TeleportSource, UiBuildError, UiNode,
 };
 
-use crate::identity::{IdentityAllocator, is_stable_scope};
-
 /// 构建结果：按深度优先前序遍历序与节点一一对应的 key 与结构 id。
 pub(crate) struct BuildResult {
     pub keys: Vec<SemanticKey>,
     pub ids: Vec<NodeId>,
 }
 
-/// 校验整棵树并生成 key（auto-path / semantic / auto-stable-identity）与结构 id。
-pub(crate) fn validate(
-    root: &UiNode,
-    allocator: &mut IdentityAllocator,
-) -> Result<BuildResult, UiBuildError> {
+/// 校验整棵树并生成 key（auto-path / semantic）与结构 id。
+pub(crate) fn validate(root: &UiNode) -> Result<BuildResult, UiBuildError> {
     let mut keys = BTreeSet::new();
     let mut result = BuildResult {
         keys: Vec::new(),
         ids: Vec::new(),
     };
-    validate_node(
-        root,
-        None,
-        None,
-        None,
-        "/",
-        "/",
-        &mut keys,
-        &mut result,
-        allocator,
-    )?;
+    validate_node(root, None, None, "/", &mut keys, &mut result)?;
     validate_focus_scope_references(root, &result.keys)?;
-    allocator.end_frame();
     Ok(result)
 }
 
@@ -122,13 +106,10 @@ fn collect_nodes_with_parents<'a>(
 fn validate_node(
     node: &UiNode,
     parent_kind: Option<&NodeKind>,
-    stable_scope: Option<&SemanticKey>,
     parent_key: Option<&SemanticKey>,
     path: &str,
-    relative_path: &str,
     seen_keys: &mut BTreeSet<SemanticKey>,
     result: &mut BuildResult,
-    allocator: &mut IdentityAllocator,
 ) -> Result<(), UiBuildError> {
     // 结构 id 分配（本帧内唯一，深度优先前序）。
     let node_id = NodeId(result.ids.len() as u32);
@@ -256,9 +237,7 @@ fn validate_node(
         return Err(UiBuildError::InvalidStackContent);
     }
 
-    // 显式 semantic_key 总是优先，即使节点位于 AutoStableIdentity 作用域内。
-    // 这样 Application 可以为可交互 Part 声明跨帧稳定路由；自动分配只服务未命名的
-    // 动态子项，不能吞掉组件自身的语义身份。
+    // 复用只依赖显式业务 key、DSL collection key 或结构路径，绝不检查节点内容。
     let key_segment = node
         .identity
         .as_ref()
@@ -274,11 +253,7 @@ fn validate_node(
         };
         compose_key_segment(parent, segment)?
     } else {
-        explicit_key.unwrap_or_else(|| {
-            stable_scope
-                .map(|scope| allocator.assign(scope, relative_path, node))
-                .unwrap_or_else(|| SemanticKey(path.to_string()))
-        })
+        explicit_key.unwrap_or_else(|| SemanticKey(path.to_string()))
     };
     if !key.0.is_empty() {
         if !seen_keys.insert(key.clone()) {
@@ -287,27 +262,15 @@ fn validate_node(
         result.keys.push(key.clone());
     }
 
-    // 子作用域：节点自身声明 AutoStableIdentity → 后代进入以自身 key 索引的新分配表；
-    // 同时标记该作用域本帧存在（空容器也保活，防止被整体回收）。
-    let (next_scope, next_relative) = if is_stable_scope(node) {
-        allocator.touch(&key);
-        (Some(key.clone()), "/")
-    } else {
-        (stable_scope.cloned(), relative_path)
-    };
-
     // 递归子节点：路径 = 父路径 + 子索引。
     for (index, child) in node.children.iter().enumerate() {
         validate_node(
             child,
             Some(&node.kind),
-            next_scope.as_ref(),
             Some(&key),
             &format!("{path}{index}/"),
-            &format!("{next_relative}{index}/"),
             seen_keys,
             result,
-            allocator,
         )?;
     }
     Ok(())
@@ -345,8 +308,8 @@ fn compose_key_segment(
 /// （父图仅允许连接子 scope 的方向化 entry/exit 端口，见 008-2.9）。
 ///
 /// `FocusRef` 指向的是最终 `SemanticKey`，因此不能在第一阶段读取
-/// `UiNode.identity.semantic_key`。AutoPath、AutoStableIdentity 与 DSL `KeySegment` 都只在
-/// identity 分配之后才有正确答案。
+/// `UiNode.identity.semantic_key`。AutoPath 与 DSL `KeySegment` 都只在
+/// identity 解析之后才有正确答案。
 fn validate_focus_scope_references(
     root: &UiNode,
     keys: &[SemanticKey],

@@ -5,7 +5,8 @@
 //! macOS/Android 等宿主可直接复用。
 
 use tela_app_abi::{
-    AppDispatchOutcome, AppEvent, AppFrameToken, AppPublication, ApplicationSession, SessionError,
+    AppDispatchOutcome, AppEffect, AppEvent, AppFrameToken, AppPublication, ApplicationSession,
+    SessionError,
 };
 use tela_bridge::{BridgeDispatcher, BridgeEvent};
 
@@ -18,6 +19,10 @@ use crate::runtime::GuestRuntime;
 pub struct GuestSession {
     runtime: GuestRuntime,
     initial: Option<AppPublication>,
+    /// Effects returned by acknowledged guest publications since the last session-level drain.
+    /// Keeping them here preserves the same lossless one-shot drain contract as an in-process
+    /// application even when a host delays its drain across a follow-up publication.
+    presented_effects: Vec<AppEffect>,
     /// 宿主桥：每帧派发后排空 guest 请求并投递响应（等价 desktop-runtime 的
     /// `process_bridge_requests`；本 crate 不能依赖 desktop-runtime，故在此复刻）。
     bridge: Option<BridgeDispatcher>,
@@ -32,6 +37,7 @@ impl GuestSession {
         Ok(Self {
             runtime,
             initial: Some(initial),
+            presented_effects: Vec::new(),
             bridge,
         })
     }
@@ -106,9 +112,16 @@ impl ApplicationSession for GuestSession {
     }
 
     fn presented(&mut self, token: AppFrameToken) -> Result<AppDispatchOutcome, SessionError> {
-        self.runtime
+        let acknowledged = self
+            .runtime
             .presented(token)
-            .map_err(|error| SessionError::new(error.to_string()))
+            .map_err(|error| SessionError::new(error.to_string()))?;
+        self.presented_effects.extend(acknowledged.effects);
+        Ok(acknowledged.outcome)
+    }
+
+    fn take_presented_effects(&mut self) -> Vec<AppEffect> {
+        std::mem::take(&mut self.presented_effects)
     }
 
     fn rejected(&mut self, token: AppFrameToken) {

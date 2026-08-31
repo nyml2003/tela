@@ -1,10 +1,10 @@
-//! 绘制结果：`UiFrame`、`DrawCommand`、`HitRegion`、`ClipRect` 与后端能力集（见 007-绘制与渲染后端）。
+//! 绘制结果：`RenderPlan`、`UiFrame`、`DrawCommand`、`HitRegion`、`ClipRect` 与后端能力集（见 007-绘制与渲染后端）。
 
 use crate::{
-    BorderRadius, Color, Fill, Gradient, Insets, NodeId, Rect, SemanticKey, TextContent,
+    BorderRadius, Color, Fill, Gradient, Insets, NodeId, Point, Rect, SemanticKey, TextContent,
     TextureRef, Viewport,
 };
-use std::fmt::Debug;
+use std::{fmt::Debug, rc::Rc};
 
 /// 绘制结果帧，自包含逻辑画布尺寸（见 003-场景树与节点模型 7）。
 #[derive(Clone, Debug, PartialEq)]
@@ -536,6 +536,439 @@ pub struct ClipRect {
     pub rect: Rect,
 }
 
+/// A retained, tree-shaped draw plan.
+///
+/// Unlike [`UiFrame`], a `RenderPlan` does not materialize one global command vector on the
+/// guest. Each node keeps commands in its own local coordinate system, while the edges carry the
+/// translation and clip inherited by a child. Renderers and transports consume the plan through
+/// [`DrawCommandSource`], which projects commands one at a time in their established paint order.
+///
+/// `hit_regions` and `scroll_bounds` remain guest-local input projections. They share a candidate
+/// transaction with the draw plan, but render-only transports must explicitly omit them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderPlan {
+    /// Logical viewport resolved for this candidate.
+    pub viewport: Viewport,
+    /// Guest-local hit-test projection for this candidate.
+    pub hit_regions: Vec<HitRegion>,
+    /// Guest-local scroll-clamping projection for this candidate.
+    pub scroll_bounds: Vec<ScrollBounds>,
+    root: Rc<RenderPlanNode>,
+    root_offset: Point,
+    overlays: Vec<RenderPlanOverlay>,
+    command_count: usize,
+}
+
+impl RenderPlan {
+    /// Creates a plan from a local-coordinate root and its top-level overlays.
+    ///
+    /// The root and overlay nodes are deliberately separate: overlays represent a `Teleport`
+    /// lift and must paint after the ordinary root traversal with no inherited ancestor clip.
+    pub fn new(
+        viewport: Viewport,
+        root_offset: Point,
+        root: Rc<RenderPlanNode>,
+        overlays: Vec<RenderPlanOverlay>,
+        hit_regions: Vec<HitRegion>,
+        scroll_bounds: Vec<ScrollBounds>,
+    ) -> Self {
+        let command_count = root
+            .command_count()
+            .saturating_add(overlays.iter().map(RenderPlanOverlay::command_count).sum());
+        Self {
+            viewport,
+            hit_regions,
+            scroll_bounds,
+            root,
+            root_offset,
+            overlays,
+            command_count,
+        }
+    }
+
+    /// Builds a plan containing one already-flat, absolute-coordinate command fragment.
+    ///
+    /// This is only for compatibility and wire-decoding boundaries. Fresh guest resolve should
+    /// use [`Self::new`] with local fragments so retained nodes can be reused below a different
+    /// parent translation or clip.
+    pub fn from_flat_frame(frame: UiFrame) -> Self {
+        let root = Rc::new(RenderPlanNode::new(
+            frame.commands.into(),
+            Vec::new(),
+            Rc::from([]),
+        ));
+        Self::new(
+            frame.viewport,
+            Point { x: 0.0, y: 0.0 },
+            root,
+            Vec::new(),
+            frame.hit_regions,
+            frame.scroll_bounds,
+        )
+    }
+
+    /// Returns the number of commands the plan will emit without flattening it.
+    pub const fn command_count(&self) -> usize {
+        self.command_count
+    }
+
+    /// Visits commands in paint order, projecting local geometry and clip state lazily.
+    ///
+    /// The callback must not retain its argument. The passed command is a stack-local projection
+    /// whose lifetime ends when the callback returns.
+    pub fn visit_commands(&self, mut visitor: impl FnMut(&DrawCommand)) {
+        let root_context = RenderPlanContext {
+            offset: self.root_offset,
+            clip: None,
+        };
+        visit_plan_node(&self.root, root_context, &mut visitor);
+        for overlay in &self.overlays {
+            visit_plan_node(
+                &overlay.node,
+                RenderPlanContext {
+                    offset: overlay.offset,
+                    clip: None,
+                },
+                &mut visitor,
+            );
+        }
+    }
+
+    /// Materializes this plan into the legacy flat value type.
+    ///
+    /// This is an explicit compatibility/export operation, never a required step of native
+    /// retained rendering.
+    pub fn to_ui_frame(&self) -> UiFrame {
+        let mut commands = Vec::with_capacity(self.command_count);
+        self.visit_commands(|command| commands.push(command.clone()));
+        UiFrame {
+            viewport: self.viewport,
+            commands,
+            hit_regions: self.hit_regions.clone(),
+            scroll_bounds: self.scroll_bounds.clone(),
+        }
+    }
+
+    /// Consumes this plan and materializes the legacy flat value type.
+    pub fn into_ui_frame(self) -> UiFrame {
+        self.to_ui_frame()
+    }
+
+    /// Returns the local root fragment.
+    pub fn root(&self) -> &Rc<RenderPlanNode> {
+        &self.root
+    }
+
+    /// Returns top-level lifted overlay fragments in their paint order.
+    pub fn overlays(&self) -> &[RenderPlanOverlay] {
+        &self.overlays
+    }
+}
+
+/// One retained plan fragment in its own local coordinate system.
+///
+/// `before_children` paint before every child, and `after_children` paint afterwards. The latter
+/// exists for decorations such as focus rings, whose ordering is part of the rendering contract.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderPlanNode {
+    before_children: Rc<[DrawCommand]>,
+    children: Vec<RenderPlanChild>,
+    after_children: Rc<[DrawCommand]>,
+    command_count: usize,
+}
+
+impl RenderPlanNode {
+    /// Creates a local plan fragment.
+    pub fn new(
+        before_children: Rc<[DrawCommand]>,
+        children: Vec<RenderPlanChild>,
+        after_children: Rc<[DrawCommand]>,
+    ) -> Self {
+        let command_count = before_children
+            .len()
+            .saturating_add(after_children.len())
+            .saturating_add(children.iter().map(RenderPlanChild::command_count).sum());
+        Self {
+            before_children,
+            children,
+            after_children,
+            command_count,
+        }
+    }
+
+    /// Returns the commands painted before child fragments.
+    pub fn before_children(&self) -> &[DrawCommand] {
+        &self.before_children
+    }
+
+    /// Returns child edges in established paint order.
+    pub fn children(&self) -> &[RenderPlanChild] {
+        &self.children
+    }
+
+    /// Returns the commands painted after child fragments.
+    pub fn after_children(&self) -> &[DrawCommand] {
+        &self.after_children
+    }
+
+    /// Returns this subtree's command count without projection.
+    pub const fn command_count(&self) -> usize {
+        self.command_count
+    }
+}
+
+/// A child edge in a [`RenderPlanNode`].
+///
+/// `offset` is relative to the parent local origin. `clip`, when present, is also expressed in
+/// the parent local origin and is intersected with every inherited clip before the child paints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderPlanChild {
+    offset: Point,
+    clip: Option<ClipRect>,
+    node: Rc<RenderPlanNode>,
+}
+
+impl RenderPlanChild {
+    /// Creates a child edge.
+    pub fn new(offset: Point, clip: Option<ClipRect>, node: Rc<RenderPlanNode>) -> Self {
+        Self { offset, clip, node }
+    }
+
+    /// Returns the child translation relative to its parent fragment.
+    pub const fn offset(&self) -> Point {
+        self.offset
+    }
+
+    /// Returns the optional parent-local clip applied to this child subtree.
+    pub const fn clip(&self) -> Option<ClipRect> {
+        self.clip
+    }
+
+    /// Returns the retained child fragment.
+    pub fn node(&self) -> &Rc<RenderPlanNode> {
+        &self.node
+    }
+
+    fn command_count(&self) -> usize {
+        self.node.command_count()
+    }
+}
+
+/// A top-level lifted overlay in a [`RenderPlan`].
+///
+/// It deliberately starts with no inherited clip, matching `Teleport`'s visual lift semantics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderPlanOverlay {
+    offset: Point,
+    node: Rc<RenderPlanNode>,
+}
+
+impl RenderPlanOverlay {
+    /// Creates an overlay at an absolute plan-space offset.
+    pub fn new(offset: Point, node: Rc<RenderPlanNode>) -> Self {
+        Self { offset, node }
+    }
+
+    /// Returns the overlay origin in plan space.
+    pub const fn offset(&self) -> Point {
+        self.offset
+    }
+
+    /// Returns the lifted fragment.
+    pub fn node(&self) -> &Rc<RenderPlanNode> {
+        &self.node
+    }
+
+    fn command_count(&self) -> usize {
+        self.node.command_count()
+    }
+}
+
+/// A source of ordered, renderer-ready drawing commands.
+///
+/// A renderer should consume this trait rather than requiring a caller to allocate a full
+/// `Vec<DrawCommand>`. [`UiFrame`] implements it for wire and diagnostic flat sources; [`RenderPlan`] performs the
+/// local-to-screen projection while visiting its retained fragments.
+pub trait DrawCommandSource {
+    /// Returns the logical viewport for the drawing source.
+    fn viewport(&self) -> Viewport;
+
+    /// Returns the number of commands without forcing a plan flatten.
+    fn command_count(&self) -> usize;
+
+    /// Visits commands in exact paint order.
+    ///
+    /// Implementations may pass a stack-local projected command. Consumers must not retain the
+    /// reference after this callback returns.
+    fn visit_commands(&self, visitor: &mut dyn FnMut(&DrawCommand));
+}
+
+/// Guest-local input projection paired with a drawing source.
+///
+/// Render-only transports intentionally do not need this trait: hit testing and scroll clamping
+/// stay in the guest that owns the presented interaction tree.
+pub trait FrameInputSource {
+    /// Returns resolved hit regions in draw order.
+    fn hit_regions(&self) -> &[HitRegion];
+
+    /// Returns resolved scroll-clamping bounds.
+    fn scroll_bounds(&self) -> &[ScrollBounds];
+}
+
+impl DrawCommandSource for UiFrame {
+    fn viewport(&self) -> Viewport {
+        self.viewport
+    }
+
+    fn command_count(&self) -> usize {
+        self.commands.len()
+    }
+
+    fn visit_commands(&self, visitor: &mut dyn FnMut(&DrawCommand)) {
+        for command in &self.commands {
+            visitor(command);
+        }
+    }
+}
+
+impl DrawCommandSource for RenderPlan {
+    fn viewport(&self) -> Viewport {
+        self.viewport
+    }
+
+    fn command_count(&self) -> usize {
+        self.command_count()
+    }
+
+    fn visit_commands(&self, visitor: &mut dyn FnMut(&DrawCommand)) {
+        RenderPlan::visit_commands(self, visitor);
+    }
+}
+
+impl FrameInputSource for UiFrame {
+    fn hit_regions(&self) -> &[HitRegion] {
+        &self.hit_regions
+    }
+
+    fn scroll_bounds(&self) -> &[ScrollBounds] {
+        &self.scroll_bounds
+    }
+}
+
+impl FrameInputSource for RenderPlan {
+    fn hit_regions(&self) -> &[HitRegion] {
+        &self.hit_regions
+    }
+
+    fn scroll_bounds(&self) -> &[ScrollBounds] {
+        &self.scroll_bounds
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RenderPlanContext {
+    offset: Point,
+    clip: Option<ClipRect>,
+}
+
+fn visit_plan_node(
+    node: &RenderPlanNode,
+    context: RenderPlanContext,
+    visitor: &mut dyn FnMut(&DrawCommand),
+) {
+    for command in node.before_children() {
+        let projected = project_plan_command(command, context);
+        visitor(&projected);
+    }
+    for child in node.children() {
+        let child_context = RenderPlanContext {
+            offset: Point {
+                x: context.offset.x + child.offset.x,
+                y: context.offset.y + child.offset.y,
+            },
+            clip: merge_clips(
+                context.clip,
+                child.clip.map(|clip| translate_clip(clip, context.offset)),
+            ),
+        };
+        visit_plan_node(&child.node, child_context, visitor);
+    }
+    for command in node.after_children() {
+        let projected = project_plan_command(command, context);
+        visitor(&projected);
+    }
+}
+
+fn project_plan_command(command: &DrawCommand, context: RenderPlanContext) -> DrawCommand {
+    let mut projected = command.clone();
+    projected.geometry.x += context.offset.x;
+    projected.geometry.y += context.offset.y;
+    projected.clip = merge_clips(
+        context.clip,
+        command
+            .clip
+            .map(|clip| translate_clip(clip, context.offset)),
+    );
+    translate_payload(&mut projected.payload, context.offset);
+    projected
+}
+
+fn translate_clip(clip: ClipRect, offset: Point) -> ClipRect {
+    ClipRect {
+        rect: Rect {
+            x: clip.rect.x + offset.x,
+            y: clip.rect.y + offset.y,
+            w: clip.rect.w,
+            h: clip.rect.h,
+        },
+    }
+}
+
+fn merge_clips(a: Option<ClipRect>, b: Option<ClipRect>) -> Option<ClipRect> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(clip), None) | (None, Some(clip)) => Some(clip),
+        (Some(a), Some(b)) => {
+            let x0 = a.rect.x.max(b.rect.x);
+            let y0 = a.rect.y.max(b.rect.y);
+            let x1 = (a.rect.x + a.rect.w).min(b.rect.x + b.rect.w);
+            let y1 = (a.rect.y + a.rect.h).min(b.rect.y + b.rect.h);
+            Some(ClipRect {
+                rect: Rect {
+                    x: x0,
+                    y: y0,
+                    w: (x1 - x0).max(0.0),
+                    h: (y1 - y0).max(0.0),
+                },
+            })
+        }
+    }
+}
+
+fn translate_payload(payload: &mut DrawPayload, offset: Point) {
+    match payload {
+        DrawPayload::Polygon { points, .. } => {
+            for point in points {
+                point.x += offset.x;
+                point.y += offset.y;
+            }
+        }
+        DrawPayload::Text { baseline_y, .. } => {
+            *baseline_y += offset.y;
+        }
+        DrawPayload::Shadow { target, .. } => translate_payload(target, offset),
+        DrawPayload::Rect { .. }
+        | DrawPayload::RoundedRect { .. }
+        | DrawPayload::Circle { .. }
+        | DrawPayload::Ellipse { .. }
+        | DrawPayload::Image { .. }
+        | DrawPayload::NinePatch { .. }
+        | DrawPayload::LinearGradient { .. }
+        | DrawPayload::RadialGradient { .. }
+        | DrawPayload::Custom(_) => {}
+    }
+}
+
 /// 自定义绘制命令（见 007-绘制与渲染后端 5）。
 ///
 /// 支持该效果的后端完整绘制；不支持的后端按能力集降级为兜底绘制（可配置"跳过"或"绘制占位"）。
@@ -553,12 +986,13 @@ impl Clone for Box<dyn CustomDraw> {
     }
 }
 
-/// 帧提交接口：渲染后端消费 `UiFrame`（见 007-绘制与渲染后端 2）。
+/// 帧提交接口：渲染后端消费 [`RenderPlan`]（见 007-绘制与渲染后端 2）。
 ///
-/// 后端只消费命令与命中区域，不依赖布局与树逻辑；命令顺序即 z 序，后端不得重排。
+/// 后端只消费计划的有序命令与命中区域，不依赖布局与树逻辑；命令顺序即 z 序，后端不得
+/// 重排。实现需要通过 [`DrawCommandSource`] 迭代命令，而不是要求调用方先扁平化。
 pub trait FrameSink {
     /// 提交一帧。
-    fn submit(&mut self, frame: &UiFrame);
+    fn submit(&mut self, frame: &RenderPlan);
 }
 
 /// 后端能力集：各后端自报，降级逻辑位于后端本地预处理，**不改动 UiFrame**（见 007-3）。

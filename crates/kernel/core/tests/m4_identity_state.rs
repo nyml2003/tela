@@ -1,4 +1,4 @@
-//! M4 验收测试：auto-stable-identity 稳定身份、ViewStateStore 状态保持、虚拟列表
+//! M4 验收测试：显式 key 身份、ViewStateStore 状态保持、虚拟列表
 //! （见 010-落地路线 M4、005-key身份策略、004-更新策略与状态保持 3、006-布局引擎 6）。
 
 use std::{collections::HashMap, rc::Rc};
@@ -8,7 +8,7 @@ use tela_contract::{
     Viewport, VirtualListSpec, VisualConcern,
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
-use tela_core::{IdentityAllocator, UiTree, ViewStateStore};
+use tela_core::{UiTree, ViewStateStore};
 
 const VIEWPORT: Viewport = Viewport {
     width: 200.0,
@@ -53,17 +53,6 @@ fn rect(width: f32, height: f32) -> UiNode {
         .into()
 }
 
-/// 在 auto-stable 作用域下构建列表容器。
-fn stable_scope(children: Vec<UiNode>) -> UiNode {
-    LogicalContainer::identity_scope()
-        .identity(IdentityConcern {
-            key_strategy: KeyStrategy::AutoStableIdentity,
-            ..IdentityConcern::default()
-        })
-        .children(children)
-        .into_node()
-}
-
 trait NodeExt: Into<UiNode> {
     fn into_node(self) -> UiNode {
         self.into()
@@ -71,73 +60,72 @@ trait NodeExt: Into<UiNode> {
 }
 impl<T: Into<UiNode>> NodeExt for T {}
 
-// ---------- 稳定身份：插入 / 删除 / 重排 / 类型切换 / 销毁回收 ----------
+// ---------- 显式身份：重排与内容变化不依赖内容比较 ----------
 
-#[test]
-fn stable_identity_keeps_key_on_insert_and_delete() {
-    let mut allocator = IdentityAllocator::new();
-    let mut build = |names: &[&str]| -> UiTree {
-        let children: Vec<UiNode> = names.iter().map(|n| text(n)).collect();
-        UiTree::new_with_allocator(stable_scope(children), &mut allocator).unwrap()
-    };
-    // 帧 1：A, B, C（keys = [scope, A, B, C]）。
-    let tree1 = build(&["A", "B", "C"]);
-    let keys1 = tree1.keys().to_vec();
-    // 帧 2：插入 X 于首位 → 原 B/C 身份不变（指纹匹配）。
-    let tree2 = build(&["X", "B", "C"]);
-    let keys2 = tree2.keys().to_vec();
-    assert_eq!(keys1[2], keys2[2], "B 身份不变");
-    assert_eq!(keys1[3], keys2[3], "C 身份不变");
-    assert_ne!(keys1[1], keys2[1], "A → X 类型相同但内容不同：新身份");
-    // 帧 3：删除 B → C 身份仍不变。
-    let tree3 = build(&["X", "C"]);
-    let keys3 = tree3.keys().to_vec();
-    assert_eq!(keys2[3], keys3[2], "C 身份不变");
+fn keyed_text(key: &str, value: &str) -> UiNode {
+    LayoutContainer::frame(text(value))
+        .identity(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            semantic_key: Some(SemanticKey(key.to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into_node()
+}
+
+fn keyed_list(items: &[(&str, &str)]) -> UiTree {
+    let children = items
+        .iter()
+        .map(|(key, value)| keyed_text(key, value))
+        .collect::<Vec<_>>();
+    let root = LogicalContainer::group()
+        .identity(IdentityConcern {
+            key_strategy: KeyStrategy::SemanticId,
+            semantic_key: Some(SemanticKey("items".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .children(children)
+        .into_node();
+    UiTree::new(root).expect("a keyed list must validate")
+}
+
+fn key_for(tree: &UiTree, value: &str) -> SemanticKey {
+    tree.keys()
+        .iter()
+        .find(|key| key.0 == value)
+        .cloned()
+        .expect("explicit key must occur in the tree")
 }
 
 #[test]
-fn stable_identity_type_change_gets_new_identity() {
-    let mut allocator = IdentityAllocator::new();
-    let mut tree =
-        UiTree::new_with_allocator(stable_scope(vec![text("A")]), &mut allocator).unwrap();
-    let old = tree.keys().to_vec();
-    // 类型切换：Text → Rect（类型是身份的一部分）。
-    tree =
-        UiTree::new_with_allocator(stable_scope(vec![rect(10.0, 10.0)]), &mut allocator).unwrap();
-    let new = tree.keys().to_vec();
-    assert_ne!(old[1], new[1], "类型变化 → 全新身份");
+fn explicit_keys_survive_insert_delete_and_reorder() {
+    let first = keyed_list(&[("a", "A"), ("b", "B"), ("c", "C")]);
+    let b = key_for(&first, "b");
+    let c = key_for(&first, "c");
+
+    let inserted = keyed_list(&[("x", "X"), ("a", "A"), ("b", "B"), ("c", "C")]);
+    assert_eq!(key_for(&inserted, "b"), b);
+    assert_eq!(key_for(&inserted, "c"), c);
+
+    let reordered = keyed_list(&[("c", "C"), ("b", "B")]);
+    assert_eq!(key_for(&reordered, "b"), b);
+    assert_eq!(key_for(&reordered, "c"), c);
 }
 
 #[test]
-fn stable_identity_recycles_after_unused_frames() {
-    let mut allocator = IdentityAllocator::new();
-    allocator.set_max_unused_frames(2);
-    let mut build = |names: &[&str]| -> UiTree {
-        let children: Vec<UiNode> = names.iter().map(|n| text(n)).collect();
-        UiTree::new_with_allocator(stable_scope(children), &mut allocator).unwrap()
-    };
-    let tree1 = build(&["A", "B"]);
-    let key_a = tree1.keys()[1].clone();
-    // 帧 2-4：A 消失 → 帧 2/3 未回收（延迟），帧 4（超过 2 帧）回收。
-    let _ = build(&["B"]);
-    let _ = build(&["B"]);
-    let tree4 = build(&["A"]);
-    assert_ne!(tree4.keys()[0], key_a, "超过延迟帧数后回收，重新分配新身份");
+fn explicit_key_survives_content_change_without_content_comparison() {
+    let first = keyed_list(&[("item-a", "old text")]);
+    let second = keyed_list(&[("item-a", "new text")]);
+
+    assert_eq!(key_for(&first, "item-a"), key_for(&second, "item-a"));
 }
 
-// ---------- ViewStateStore：状态随 key 保持 ----------
+// ---------- ViewStateStore：状态随显式 key 保持 ----------
 
 #[test]
-fn state_follows_content_across_reorder() {
-    let mut allocator = IdentityAllocator::new();
-    let mut build = |names: &[&str]| -> UiTree {
-        let children: Vec<UiNode> = names.iter().map(|n| text(n)).collect();
-        UiTree::new_with_allocator(stable_scope(children), &mut allocator).unwrap()
-    };
+fn state_follows_explicit_key_across_reorder() {
     let mut store = ViewStateStore::new();
-    // 帧 1：给 B 写入滚动状态。
-    let tree1 = build(&["A", "B"]);
-    let key_b = tree1.keys()[2].clone();
+    let tree1 = keyed_list(&[("a", "A"), ("b", "B")]);
+    let key_b = key_for(&tree1, "b");
     store.set_scroll(
         key_b.clone(),
         ScrollState {
@@ -145,14 +133,12 @@ fn state_follows_content_across_reorder() {
             offset_y: 42.0,
         },
     );
-    // 帧 2：重排 → B 身份不变 → 状态保持。
-    let tree2 = build(&["B", "A"]);
-    let key_b2 = tree2.keys()[1].clone();
+    let tree2 = keyed_list(&[("b", "B"), ("a", "A")]);
+    let key_b2 = key_for(&tree2, "b");
     assert_eq!(key_b, key_b2, "B 身份稳定");
     assert_eq!(store.scroll(&key_b2).offset_y, 42.0, "状态随 key 保持");
 
-    // 帧 3：key 消失后 retain 延迟回收。
-    let tree3 = build(&["A"]);
+    let tree3 = keyed_list(&[("a", "A")]);
     store.retain(tree3.keys(), 2);
     assert_eq!(store.scroll(&key_b).offset_y, 42.0, "未超龄不回收");
     store.retain(tree3.keys(), 2);
@@ -214,7 +200,7 @@ fn keyed_item(key: &str, width: f32, height: f32) -> UiNode {
         .into_node()
 }
 
-fn segment_key_tree(parent: &str, scope: u32, segment: &str) -> UiTree {
+fn segment_key_tree(parent: &str, scope: u64, segment: &str) -> UiTree {
     let item = LogicalContainer::group()
         .identity(IdentityConcern {
             key_strategy: KeyStrategy::SemanticId,
@@ -291,7 +277,10 @@ fn virtual_list_positions_items_and_scrolls() {
             offset_y: 70.0,
         },
     )]);
-    let frame = tree.resolve(VIEWPORT, &MockMeasurer, &scrolls).unwrap();
+    let frame = tree
+        .resolve(VIEWPORT, &MockMeasurer, &scrolls)
+        .unwrap()
+        .to_ui_frame();
     // item 定高摆位：y = (first_item_index + i) × (30+4)；滚动平移 -70。
     assert_eq!(frame.commands[0].geometry.y, -2.0);
     assert_eq!(frame.commands[1].geometry.y, 32.0);
@@ -300,30 +289,6 @@ fn virtual_list_positions_items_and_scrolls() {
     assert_eq!((clip.rect.w, clip.rect.h), (140.0, 70.0));
     // 第 3 个 item（y = 68-70 = -2 不可见）不应渲染：只渲染可视项。
     assert_eq!(frame.commands.len(), 2);
-}
-
-#[test]
-fn stable_identity_same_fingerprint_nodes_do_not_collide() {
-    // 同内容节点（相同指纹）并存时不互相覆盖身份（回归：指纹→id 一对一曾导致覆盖）。
-    let mut allocator = IdentityAllocator::new();
-    let mut build = |names: &[&str]| -> UiTree {
-        let children: Vec<UiNode> = names.iter().map(|n| text(n)).collect();
-        UiTree::new_with_allocator(stable_scope(children), &mut allocator).unwrap()
-    };
-    let tree1 = build(&["A", "A"]);
-    let keys1 = tree1.keys().to_vec();
-    // 帧 2 重排 + 同指纹：两个 "A" 分别命中各自旧身份（位置优先）。
-    let tree2 = build(&["A", "A"]);
-    let keys2 = tree2.keys().to_vec();
-    assert_eq!(keys1[1], keys2[1], "位置 1 的 A 身份保持");
-    assert_eq!(keys1[2], keys2[2], "位置 2 的 A 身份保持");
-    // 帧 3 删除一个：剩余 "A" 复用任一旧身份（指纹候选）。
-    let tree3 = build(&["A"]);
-    let keys3 = tree3.keys().to_vec();
-    assert!(
-        keys1[1] == keys3[1] || keys1[2] == keys3[1],
-        "删除后剩余 A 复用旧身份"
-    );
 }
 
 #[test]
@@ -368,96 +333,4 @@ fn splice_shared_copies_only_the_dirty_spine() {
         !Rc::ptr_eq(&spliced, &shared_root),
         "only the root-to-target spine is copied"
     );
-}
-
-// ---------- 路线 A 重构边界测试（见 identity.rs 不变量清单） ----------
-
-#[test]
-fn idle_reuse_before_recycle_and_fresh_after() {
-    // 节点 A 删除 N 帧以内再回来：拿到旧 id；超过 max_unused 帧分配新 id。
-    let mut allocator = IdentityAllocator::new();
-    allocator.set_max_unused_frames(3);
-    let mut build = |names: &[&str]| -> UiTree {
-        let children: Vec<UiNode> = names.iter().map(|n| text(n)).collect();
-        UiTree::new_with_allocator(stable_scope(children), &mut allocator).unwrap()
-    };
-    let tree1 = build(&["A"]);
-    let key_a = tree1.keys()[1].clone();
-    // 删除 A 1 帧后再回来 → 复用旧 id（未超龄）。
-    let _ = build(&[]);
-    let tree3 = build(&["A"]);
-    assert_eq!(tree3.keys()[1], key_a, "未超龄：复用旧 id");
-    // 删除 A 超过 3 帧后再回来 → 新 id。
-    let _ = build(&[]);
-    let _ = build(&[]);
-    let _ = build(&[]);
-    let tree7 = build(&["A"]);
-    assert_ne!(tree7.keys()[1], key_a, "超龄回收后分配新 id");
-}
-
-#[test]
-fn scope_entirely_removed_is_recycled() {
-    // scope 容器整个消失足够多帧 → table 被彻底清除（防 tables 内存泄漏）。
-    let mut allocator = IdentityAllocator::new();
-    allocator.set_max_unused_frames(2);
-    let mut build = |names: &[&str]| -> UiTree {
-        let children: Vec<UiNode> = names.iter().map(|n| text(n)).collect();
-        UiTree::new_with_allocator(stable_scope(children), &mut allocator).unwrap()
-    };
-    let _ = build(&["A"]);
-    assert_eq!(allocator.table_count(), 1);
-    // 帧 2-5：scope 消失 → 超过 2 帧后 table 回收（每帧经 UiTree 构建推进 end_frame）。
-    for _ in 0..3 {
-        let _ = UiTree::new_with_allocator(text("X"), &mut allocator).unwrap();
-    }
-    assert_eq!(
-        allocator.table_count(),
-        0,
-        "scope 整体消失超龄后 table 应被清除"
-    );
-}
-
-#[test]
-fn same_frame_same_fingerprint_different_paths_no_conflict() {
-    // 同帧两个不同路径但指纹相同的节点：分配不同 id，不会冲突。
-    let mut allocator = IdentityAllocator::new();
-    let tree = UiTree::new_with_allocator(stable_scope(vec![text("A"), text("A")]), &mut allocator)
-        .unwrap();
-    let keys = tree.keys().to_vec();
-    assert_ne!(keys[1], keys[2], "同指纹不同路径分配不同 id");
-}
-
-#[test]
-fn position_unchanged_content_changed_gets_new_id() {
-    // 位置不变但内容变化（指纹变化）：分配新 id。
-    let mut allocator = IdentityAllocator::new();
-    let mut tree =
-        UiTree::new_with_allocator(stable_scope(vec![text("A")]), &mut allocator).unwrap();
-    let old = tree.keys()[1].clone();
-    tree = UiTree::new_with_allocator(stable_scope(vec![text("B")]), &mut allocator).unwrap();
-    assert_ne!(tree.keys()[1], old, "内容变化 → 新 id");
-}
-
-#[test]
-fn failed_tree_build_does_not_pollute_the_identity_allocator() {
-    let mut allocator = IdentityAllocator::new();
-    let first = UiTree::new_with_allocator(stable_scope(vec![text("A")]), &mut allocator).unwrap();
-    let expected_key = first.keys()[1].clone();
-
-    // 第一个子节点已经触发 stable-id 分配，第二个节点才因策略非法失败。失败构建不得
-    // 让这个中间分配占用下一次成功构建的身份。
-    let invalid_child = LogicalContainer::group()
-        .identity(IdentityConcern {
-            key_strategy: KeyStrategy::SemanticId,
-            ..IdentityConcern::default()
-        })
-        .into_node();
-    assert!(matches!(
-        UiTree::new_with_allocator(stable_scope(vec![text("A"), invalid_child]), &mut allocator),
-        Err(UiBuildError::InvalidStrategy)
-    ));
-
-    let recovered = UiTree::new_with_allocator(stable_scope(vec![text("A")]), &mut allocator)
-        .expect("failed tree must not alter the caller allocator");
-    assert_eq!(recovered.keys()[1], expected_key);
 }

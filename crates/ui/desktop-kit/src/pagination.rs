@@ -12,6 +12,7 @@ use tela_core::LayoutContainer;
 use crate::shared::text;
 
 /// 分页条的受控输入。
+#[derive(Clone)]
 pub struct Pagination {
     current: u32,
     total_pages: u32,

@@ -7,13 +7,13 @@
 
 use std::cell::{Cell, RefCell};
 
-use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppStatus, CursorKind};
+use tela_app_abi::{AppEvent, AppFrameInput, AppFrameToken, AppPublication, AppStatus, CursorKind};
 use tela_bridge::{BridgeResult, CapabilityId, GuestBridge, VersionPolicy};
 use tela_cc_protocol::{
     NetHttpRequest, NetHttpResponse, decode_net_http_response, encode_net_http_request,
 };
 use tela_cc_remote::App;
-use tela_contract::UiResourceSet;
+use tela_contract::{DirtyFlags, FrameDamage, UiResourceSet};
 use tela_icon_resources::MaterialIconFontProvider;
 use tela_text_resources::ControlledTextMeasurer;
 
@@ -143,19 +143,28 @@ fn queue_net_job(bridge: &mut GuestBridge, job: NetHttpRequest) {
     );
 }
 
-fn publish_app(app: &mut App) -> Result<(&tela_contract::UiFrame, AppStatus), String> {
+fn publish_app(app: &mut App) -> Result<AppPublication, String> {
     ensure_frame(app);
-    Ok((
-        app.frame(),
-        AppStatus {
-            frame_token: active_frame_token(),
-            cursor: CursorKind::Default,
-            input_focused: app.input_focused(),
-            input_value: app.input_value(),
-            animation_active: app.animation_schedule().active,
-            next_deadline_ms: app.animation_schedule().next_deadline_ms,
-        },
-    ))
+    let status = AppStatus {
+        frame_token: active_frame_token(),
+        cursor: CursorKind::Default,
+        input_focused: app.input_focused(),
+        input_value: app.input_value(),
+        animation_active: app.animation_schedule().active,
+        next_deadline_ms: app.animation_schedule().next_deadline_ms,
+    };
+    let token = status
+        .frame_token
+        .ok_or_else(|| "cc guest has no active frame token".to_owned())?;
+    let frame = app.frame().clone();
+    Ok(AppPublication {
+        token,
+        damage: FrameDamage::full(frame.viewport, DirtyFlags::ALL),
+        frame,
+        spine: Vec::new(),
+        retained_tree: None,
+        status,
+    })
 }
 
 fn ensure_frame(app: &mut App) {

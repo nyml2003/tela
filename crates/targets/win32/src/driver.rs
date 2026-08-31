@@ -10,7 +10,10 @@ use tela_app_session::{
     AppDispatchOutcome, AppEffect, AppEvent, AppFrameInput, AppPublication, AppStatus,
     ApplicationSession, CursorKind,
 };
-use tela_contract::{FrameDamage, HitRole, Point, UiFrame, WindowCommand};
+use tela_contract::{FrameDamage, HitRole, Point, RenderPlan, WindowCommand};
+
+#[cfg(test)]
+use tela_contract::UiFrame;
 
 /// 一个会话的壳侧驱动状态：候选帧 → 呈现帧的握手与窗口命令队列。
 pub(crate) struct SessionDriver {
@@ -92,9 +95,9 @@ impl SessionDriver {
             return false;
         };
         let token = publication.token;
-        let effects = publication.effects.clone();
         match self.app.presented(token) {
             Ok(outcome) => {
+                let effects = self.app.take_presented_effects();
                 self.presented = Some(publication);
                 self.publish_pending |= outcome.publish_requested;
                 for effect in effects {
@@ -126,7 +129,7 @@ impl SessionDriver {
     }
 
     /// 当前应渲染的帧：候选（优先）或已呈现帧。
-    pub(crate) fn frame(&self) -> &UiFrame {
+    pub(crate) fn frame(&self) -> &RenderPlan {
         &self
             .candidate
             .as_ref()
@@ -220,6 +223,7 @@ mod tests {
         log: Rc<RefCell<Vec<String>>>,
         fail_publish: Cell<bool>,
         window_effects: Cell<bool>,
+        presented_effects: RefCell<Vec<AppEffect>>,
     }
 
     impl MockSession {
@@ -230,12 +234,13 @@ mod tests {
                     log: Rc::clone(&log),
                     fail_publish: Cell::new(false),
                     window_effects: Cell::new(false),
+                    presented_effects: RefCell::new(Vec::new()),
                 },
                 log,
             )
         }
 
-        fn publication(token: u64, with_window_effect: bool) -> AppPublication {
+        fn publication(token: u64) -> AppPublication {
             let token = AppFrameToken::new(token).expect("non-zero");
             AppPublication {
                 token,
@@ -251,17 +256,12 @@ mod tests {
                     animation_active: false,
                     next_deadline_ms: None,
                 },
-                effects: if with_window_effect {
-                    vec![AppEffect::Window(WindowCommand::Minimize)]
-                } else {
-                    Vec::new()
-                },
             }
         }
     }
 
-    fn empty_frame() -> UiFrame {
-        UiFrame {
+    fn empty_frame() -> RenderPlan {
+        RenderPlan::from_flat_frame(UiFrame {
             viewport: Viewport {
                 width: 16.0,
                 height: 8.0,
@@ -269,7 +269,7 @@ mod tests {
             commands: Vec::new(),
             hit_regions: Vec::new(),
             scroll_bounds: Vec::new(),
-        }
+        })
     }
 
     impl ApplicationSession for MockSession {
@@ -299,14 +299,23 @@ mod tests {
             if self.fail_publish.replace(false) {
                 return Err(SessionError::new("mock publish failure"));
             }
-            Ok(Self::publication(7, self.window_effects.get()))
+            Ok(Self::publication(7))
         }
 
         fn presented(&mut self, token: AppFrameToken) -> Result<AppDispatchOutcome, SessionError> {
             self.log
                 .borrow_mut()
                 .push(format!("presented:{}", token.get()));
+            if self.window_effects.get() {
+                self.presented_effects
+                    .borrow_mut()
+                    .push(AppEffect::Window(WindowCommand::Minimize));
+            }
             Ok(AppDispatchOutcome::IDLE)
+        }
+
+        fn take_presented_effects(&mut self) -> Vec<AppEffect> {
+            std::mem::take(self.presented_effects.get_mut())
         }
 
         fn rejected(&mut self, token: AppFrameToken) {

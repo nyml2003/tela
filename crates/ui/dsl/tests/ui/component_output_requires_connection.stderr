@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `u8: tela_ui_dsl::component::NoOutput` is not satisfied
+  --> tests/ui/component_output_requires_connection.rs:36:10
+   |
+36 |         <Emits />
+   |          ^^^^^ the trait `tela_ui_dsl::component::NoOutput` is not implemented for `u8`
+   |
+help: the following other types implement trait `tela_ui_dsl::component::NoOutput`
+  --> src/component.rs
+   |
+   | impl NoOutput for () {}
+   | ^^^^^^^^^^^^^^^^^^^^ `()`
+   | impl NoOutput for core::convert::Infallible {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Infallible`
+note: required by a bound in `assemble_component`
+  --> src/lifecycle.rs
+   |
+   | pub fn assemble_component<'a, C, A>(
+   |        ------------------ required by a bound in this function
+...
+   |     <C::UiSpec<A> as UiSpec<A>>::Output: NoOutput,
+   |                                          ^^^^^^^^ required by this bound in `assemble_component`

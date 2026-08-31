@@ -5,7 +5,7 @@
 //! 候选帧使用隔离副本；只有候选帧提交后，owner 状态才会成为 active。
 
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     cell::{Ref, RefCell},
     collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
@@ -13,7 +13,18 @@ use std::{
 
 use tela_contract::{KernelInteraction, Rect, SemanticKey};
 
-use crate::{ComponentOutcome, DslComponent, ViewSite};
+use crate::{
+    ComponentOutcome, DslComponent, UiSpec, ViewSite,
+    candidate::{
+        CandidateOutputError, ComponentLease, OutputConnection, OutputRouteDiagnostic, RoutedOutput,
+    },
+};
+
+type ComponentInputMapper<C, A, E> =
+    for<'a> fn(
+        E,
+        ComponentInput<'a>,
+    ) -> Option<<<C as DslComponent>::UiSpec<A> as UiSpec<A>>::Event>;
 
 trait StateCell {
     fn as_any(&self) -> &dyn Any;
@@ -62,14 +73,22 @@ impl ScopeId {
     /// 根 scope（顶层组件的父）。
     pub const ROOT: ScopeId = ScopeId(0);
 
+    /// 返回框架内部驻留身份的稳定数值。
+    ///
+    /// 这不是业务 API。结构组件用它作为自己的透明 collection namespace，避免依赖
+    /// 一帧内的 child 序号或截断哈希。
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+
     #[cfg(test)]
     pub(crate) fn test_id(value: u64) -> Self {
         ScopeId(value)
     }
 }
 
-/// interner 查找键。`kind`/`site` 是静态数据；`key` 是节点业务 key
-/// （`For` 行身份），是热路径上唯一允许的字符串（按内容哈希/相等）。
+/// interner 查找键。`kind`/`site` 是静态数据；`key` 是显式声明的业务身份
+/// （`For` 行 key）。这里比较的是 key 本身，不是节点文本、样式或结构内容。
 #[derive(Eq, Hash, PartialEq)]
 enum ScopeKey {
     Component {
@@ -81,7 +100,7 @@ enum ScopeKey {
     /// `<For>` item 的集合身份段（替代旧的 `format!("collection:{n}:{key}")`）。
     Collection {
         parent: ScopeId,
-        collection: u32,
+        collection: u64,
         key: Rc<str>,
     },
 }
@@ -105,7 +124,7 @@ fn intern_scope(key: ScopeKey) -> ScopeId {
 }
 
 /// 驻留一个 `<For>` item 身份段。
-pub(crate) fn intern_collection_scope(parent: ScopeId, collection: u32, key: &str) -> ScopeId {
+pub(crate) fn intern_collection_scope(parent: ScopeId, collection: u64, key: &str) -> ScopeId {
     intern_scope(ScopeKey::Collection {
         parent,
         collection,
@@ -113,24 +132,65 @@ pub(crate) fn intern_collection_scope(parent: ScopeId, collection: u32, key: &st
     })
 }
 
-/// 类型擦除的组件本地事件路由。
-pub(crate) trait ComponentActionRoute<A> {
+/// 类型擦除的组件 HostInput 路由。
+pub(crate) trait ComponentHostInputRoute<A> {
+    /// Creates an immutable candidate copy of this route. Route snapshots are part of a frame
+    /// transaction: a retained re-entry may replace only one subtree while the active frame must
+    /// continue serving input until the replacement is presented.
+    fn clone_box(&self) -> Box<dyn ComponentHostInputRoute<A>>;
+    /// Component instance that owns this input route.
+    fn identity(&self) -> &ComponentIdentity;
     /// 路由锚定的语义节点。
     fn key(&self) -> &SemanticKey;
     /// 路由声明位置。
     fn site(&self) -> ViewSite;
-    /// 使用 active owner 状态处理输入并返回应用动作。
+    /// 将 HostInput 映射为组件私有 Event，在候选 owner State 上处理并返回候选结果。
     fn dispatch(
         &self,
         owners: &ComponentOwnerRuntime,
         token: OwnerFrameToken,
         input: ComponentInput<'_>,
-    ) -> Option<ComponentRouteOutcome<A>>;
+    ) -> Result<Option<HostInputRouteOutcome<A>>, CandidateOutputError>;
 }
 
-/// 由包装器创建、只能附着到候选视图的静态组件路由。
-pub struct ComponentRoute<A> {
-    pub(crate) inner: Box<dyn ComponentActionRoute<A>>,
+/// 类型擦除的父级 Event 接收路由。
+///
+/// 它不经由 `NodeId`，只能被已验证的 `CandidateOutputQueue` 以完整 receiver lease 调用。
+/// 这让 HostInput 路由和 child Output 上报保持两条独立的、不可混淆的通道。
+pub(crate) trait ComponentEventRoute<A> {
+    /// Creates an immutable candidate copy of this route.
+    fn clone_box(&self) -> Box<dyn ComponentEventRoute<A>>;
+    /// 此 handler 所属的完整候选实例 lease。
+    fn lease(&self) -> &ComponentLease;
+    /// 该组件公开接收的私有 Event 类型。
+    ///
+    /// 只用于验证一个已经由 `Mounted` capability 限定的 sender 请求，不能据此枚举、
+    /// 发现或路由任意组件。
+    fn event_type_id(&self) -> TypeId;
+    /// 组件调用点，供生命周期 sender 的诊断使用。
+    fn site(&self) -> ViewSite;
+
+    /// 在 receiver 自己的候选 State 上处理已经映射完成的 Parent Event。
+    fn dispatch(
+        &self,
+        owners: &ComponentOwnerRuntime,
+        token: OwnerFrameToken,
+        event: Box<dyn Any>,
+        route: OutputRouteDiagnostic,
+    ) -> Result<Option<RoutedOutput<A>>, CandidateOutputError>;
+}
+
+/// 由组件自身 `UiSpec` 声明、只能附着到该组件候选视图的静态 HostInput 路由蓝图。
+pub struct ComponentHostInputRoutePlan<A> {
+    pub(crate) inner: Box<dyn ComponentHostInputRoute<A>>,
+}
+
+impl<A> Clone for ComponentHostInputRoutePlan<A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone_box(),
+        }
+    }
 }
 
 /// 组件 handler 可接收的规范化宿主输入。
@@ -151,30 +211,51 @@ pub enum ComponentDispatch {
     Consumed,
 }
 
-pub(crate) enum ComponentRouteOutcome<A> {
+pub(crate) enum HostInputRouteOutcome<A> {
     Consumed,
-    Output(A),
+    Output(RoutedOutput<A>),
 }
 
-struct TypedComponentActionRoute<C, A, E>
+struct TypedComponentHostInputRoute<C, A, E, M>
 where
     C: DslComponent,
+    A: 'static,
+    C::UiSpec<A>: UiSpec<A>,
 {
     identity: ComponentIdentity,
     site: ViewSite,
     key: SemanticKey,
-    props: C::Props,
+    props: <C::UiSpec<A> as UiSpec<A>>::Props,
     event_context: E,
-    event: for<'a> fn(E, ComponentInput<'a>) -> Option<C::Event>,
-    output: fn(C::Output) -> Option<A>,
+    event: ComponentInputMapper<C, A, E>,
+    output: OutputConnection<<C::UiSpec<A> as UiSpec<A>>::Output, A, M>,
 }
 
-impl<C, A: 'static, E> ComponentActionRoute<A> for TypedComponentActionRoute<C, A, E>
+impl<C, A: 'static, E, M: 'static> ComponentHostInputRoute<A>
+    for TypedComponentHostInputRoute<C, A, E, M>
 where
     C: DslComponent + 'static,
-    C::Props: Clone + 'static,
+    A: 'static,
+    C::UiSpec<A>: UiSpec<A>,
+    <C::UiSpec<A> as UiSpec<A>>::Props: Clone + 'static,
     E: Clone + 'static,
 {
+    fn clone_box(&self) -> Box<dyn ComponentHostInputRoute<A>> {
+        Box::new(Self {
+            identity: self.identity.clone(),
+            site: self.site,
+            key: self.key.clone(),
+            props: self.props.clone(),
+            event_context: self.event_context.clone(),
+            event: self.event,
+            output: self.output.clone(),
+        })
+    }
+
+    fn identity(&self) -> &ComponentIdentity {
+        &self.identity
+    }
+
     fn key(&self) -> &SemanticKey {
         &self.key
     }
@@ -188,28 +269,103 @@ where
         owners: &ComponentOwnerRuntime,
         token: OwnerFrameToken,
         input: ComponentInput<'_>,
-    ) -> Option<ComponentRouteOutcome<A>> {
-        let event = (self.event)(self.event_context.clone(), input)?;
-        owners
-            .dispatch::<C::State, _>(token, &self.identity, |state| {
-                C::handle(state, &self.props, event)
+    ) -> Result<Option<HostInputRouteOutcome<A>>, CandidateOutputError> {
+        let Some(event) = (self.event)(self.event_context.clone(), input) else {
+            return Ok(None);
+        };
+        let Some(outcome) = owners.dispatch::<<C::UiSpec<A> as UiSpec<A>>::State, _>(
+            token,
+            &self.identity,
+            |state| <C::UiSpec<A> as UiSpec<A>>::handle(state, &self.props, event),
+        ) else {
+            return Ok(None);
+        };
+        match outcome {
+            ComponentOutcome::Ignored => Ok(None),
+            ComponentOutcome::Consumed => Ok(Some(HostInputRouteOutcome::Consumed)),
+            ComponentOutcome::Output(output) => self
+                .output
+                .route(output)
+                .map(|output| Some(HostInputRouteOutcome::Output(output))),
+        }
+    }
+}
+
+struct TypedComponentEventRoute<C, A, M>
+where
+    C: DslComponent,
+    A: 'static,
+    C::UiSpec<A>: UiSpec<A>,
+{
+    identity: ComponentIdentity,
+    lease: ComponentLease,
+    site: ViewSite,
+    props: <C::UiSpec<A> as UiSpec<A>>::Props,
+    output: OutputConnection<<C::UiSpec<A> as UiSpec<A>>::Output, A, M>,
+}
+
+impl<C, A: 'static, M: 'static> ComponentEventRoute<A> for TypedComponentEventRoute<C, A, M>
+where
+    C: DslComponent + 'static,
+    C::UiSpec<A>: UiSpec<A>,
+    <C::UiSpec<A> as UiSpec<A>>::Props: Clone + 'static,
+{
+    fn clone_box(&self) -> Box<dyn ComponentEventRoute<A>> {
+        Box::new(Self {
+            identity: self.identity.clone(),
+            lease: self.lease.clone(),
+            site: self.site,
+            props: self.props.clone(),
+            output: self.output.clone(),
+        })
+    }
+
+    fn lease(&self) -> &ComponentLease {
+        &self.lease
+    }
+
+    fn event_type_id(&self) -> TypeId {
+        TypeId::of::<<C::UiSpec<A> as UiSpec<A>>::Event>()
+    }
+
+    fn site(&self) -> ViewSite {
+        self.site
+    }
+
+    fn dispatch(
+        &self,
+        owners: &ComponentOwnerRuntime,
+        token: OwnerFrameToken,
+        event: Box<dyn Any>,
+        route: OutputRouteDiagnostic,
+    ) -> Result<Option<RoutedOutput<A>>, CandidateOutputError> {
+        let event = event
+            .downcast::<<C::UiSpec<A> as UiSpec<A>>::Event>()
+            .map_err(|_| CandidateOutputError::ReceiverEventTypeMismatch {
+                receiver: self.lease.clone(),
+                route: Box::new(route),
+            })?;
+        let outcome = owners
+            .dispatch::<<C::UiSpec<A> as UiSpec<A>>::State, _>(token, &self.identity, |state| {
+                <C::UiSpec<A> as UiSpec<A>>::handle(state, &self.props, *event)
             })
-            .and_then(|outcome| match outcome {
-                ComponentOutcome::Ignored => None,
-                ComponentOutcome::Consumed => Some(ComponentRouteOutcome::Consumed),
-                ComponentOutcome::Output(output) => Some(
-                    (self.output)(output)
-                        .map(ComponentRouteOutcome::Output)
-                        .unwrap_or(ComponentRouteOutcome::Consumed),
-                ),
-            })
+            .ok_or_else(|| CandidateOutputError::MissingReceiverHandler {
+                receiver: self.lease.clone(),
+                route: Box::new(route),
+            })?;
+        match outcome {
+            ComponentOutcome::Ignored | ComponentOutcome::Consumed => Ok(None),
+            ComponentOutcome::Output(output) => self.output.route(output).map(Some),
+        }
     }
 }
 
 /// 创建组件本地事件路由所需的静态数据和函数项。
-pub struct ComponentActionSpec<C, A, E>
+pub struct ComponentHostInputSpec<C, A, E, M>
 where
     C: DslComponent,
+    A: 'static,
+    C::UiSpec<A>: UiSpec<A>,
 {
     /// 由当前 `ViewBuild` 生成的组件实例身份。
     pub identity: ComponentIdentity,
@@ -218,25 +374,30 @@ where
     /// 事件锚定的语义 key。
     pub key: SemanticKey,
     /// 当前 Props 快照。
-    pub props: C::Props,
+    pub props: <C::UiSpec<A> as UiSpec<A>>::Props,
     /// 事件映射需要的纯值上下文。
     pub event_context: E,
     /// 输入到组件 Event 的静态映射。
-    pub event: for<'a> fn(E, ComponentInput<'a>) -> Option<C::Event>,
+    pub event: ComponentInputMapper<C, A, E>,
     /// 组件 Output 到应用动作的静态映射。
-    pub output: fn(C::Output) -> Option<A>,
+    pub output: OutputConnection<<C::UiSpec<A> as UiSpec<A>>::Output, A, M>,
 }
 
 /// 创建一个不捕获闭包的类型化组件事件路由。
-pub fn component_action_route<C, A, E>(spec: ComponentActionSpec<C, A, E>) -> ComponentRoute<A>
+pub fn component_host_input_route<C, A, E, M>(
+    spec: ComponentHostInputSpec<C, A, E, M>,
+) -> ComponentHostInputRoutePlan<A>
 where
     C: DslComponent + 'static,
-    C::Props: Clone + 'static,
+    A: 'static,
+    C::UiSpec<A>: UiSpec<A>,
+    <C::UiSpec<A> as UiSpec<A>>::Props: Clone + 'static,
     E: Clone + 'static,
+    M: 'static,
     A: 'static,
 {
-    ComponentRoute {
-        inner: Box::new(TypedComponentActionRoute::<C, A, E> {
+    ComponentHostInputRoutePlan {
+        inner: Box::new(TypedComponentHostInputRoute::<C, A, E, M> {
             identity: spec.identity,
             site: spec.site,
             key: spec.key,
@@ -246,6 +407,30 @@ where
             output: spec.output,
         }),
     }
+}
+
+/// 为一个显式 Output 作用域创建其私有 Parent Event handler。
+pub(crate) fn component_event_route<C, A, M>(
+    identity: ComponentIdentity,
+    lease: ComponentLease,
+    site: ViewSite,
+    props: <C::UiSpec<A> as UiSpec<A>>::Props,
+    output: OutputConnection<<C::UiSpec<A> as UiSpec<A>>::Output, A, M>,
+) -> Box<dyn ComponentEventRoute<A>>
+where
+    C: DslComponent + 'static,
+    A: 'static,
+    C::UiSpec<A>: UiSpec<A> + 'static,
+    <C::UiSpec<A> as UiSpec<A>>::Props: Clone + 'static,
+    M: 'static,
+{
+    Box::new(TypedComponentEventRoute::<C, A, M> {
+        identity,
+        lease,
+        site,
+        props,
+        output,
+    })
 }
 
 /// 声明式组件实例的稳定身份。
@@ -488,7 +673,7 @@ impl ComponentOwnerFrame {
 
     /// 把一个被记忆化跳过的子树身份补进本帧 `seen`。
     ///
-    /// `#[memo]` 命中时组件子树不会重新走 `state()`，没有该补登记，`commit` 的
+    /// retained 命中时组件子树不会重新走 `state()`，没有该补登记，`commit` 的
     /// 存在性回收会把它们误判为 Unmounted 并丢掉 State。states map 在候选开始时
     /// 已从 active 浅复制，这里只需补 `seen`。
     pub(crate) fn retain_subtree(&mut self, subtree: &BTreeSet<ComponentIdentity>) {
@@ -505,6 +690,15 @@ impl ComponentOwnerFrame {
                 .filter(|identity| !reentered.contains(*identity))
                 .cloned(),
         );
+    }
+
+    /// Retains every active owner for a candidate that changes only node presentation.
+    ///
+    /// A binding-level update does not re-enter any component assembly, so no component calls
+    /// [`Self::state`] to mark itself seen. Keeping the full owner set is the only valid
+    /// lifecycle result: signal-to-presentation writes cannot mount, unmount or mutate State.
+    pub(crate) fn retain_all(&mut self) {
+        self.seen.extend(self.states.keys().cloned());
     }
 }
 

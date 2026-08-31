@@ -62,8 +62,7 @@ pub fn verify_bundle(path: &Path) -> Result<BundleVerification, String> {
     let initial_commands = runtime
         .frame()
         .map_err(|error| format!("decode verification frame: {error}"))?
-        .commands
-        .len();
+        .command_count();
     let input_focused = runtime.status().input_focused;
     let viewport_outcome = runtime
         .dispatch(&AppEvent::Viewport {
@@ -79,8 +78,7 @@ pub fn verify_bundle(path: &Path) -> Result<BundleVerification, String> {
     let viewport_commands = runtime
         .frame()
         .map_err(|error| format!("decode verification frame: {error}"))?
-        .commands
-        .len();
+        .command_count();
     let metrics = runtime.metrics();
     Ok(BundleVerification {
         archive_bytes: bytes.len(),

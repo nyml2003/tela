@@ -1,6 +1,6 @@
 //! 图片与字体资源的跨宿主协议。
 //!
-//! `tela-core` 只在 `UiFrame` 中保留 [`TextureRef`] / [`TextStyleRef`]；URL、base64、
+//! `tela-core` 只在 `DrawCommand` 中保留 [`TextureRef`] / [`TextStyleRef`]；URL、base64、
 //! Blob、Android asset 等平台来源由宿主实现 [`ResourceAdapter`] 后转换为这里的
 //! 规范化事件。渲染后端自行决定如何上传这些数据，故本 crate 不依赖任何 renderer。
 

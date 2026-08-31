@@ -91,6 +91,7 @@ fn full_scope(children: Vec<UiNode>) -> UiNode {
 fn resolve_dirty(tree: &UiTree, cache: &mut LayoutCache) -> tela_contract::UiFrame {
     tree.resolve_dirty(VIEWPORT, &MockMeasurer, &HashMap::new(), cache)
         .unwrap()
+        .to_ui_frame()
 }
 
 // ---------- 验收 1：Dirty 子树下仅脏节点重算（可测布局调用次数） ----------
@@ -162,7 +163,8 @@ fn full_and_dirty_produce_same_frame() {
     .unwrap();
     let full = tree
         .resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
-        .unwrap();
+        .unwrap()
+        .to_ui_frame();
     let mut cache = LayoutCache::new();
     let dirty = resolve_dirty(&tree, &mut cache);
     assert_eq!(full, dirty, "Full 与 Dirty 渲染结果一致（组件无感知）");

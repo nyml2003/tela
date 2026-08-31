@@ -7,10 +7,12 @@ use tela_core::{LayoutContainer, Primitive};
 ///
 /// slot 不引入交互、身份或布局策略；它只是让 `Text` 把现有节点放入同一条视觉居中的行。
 /// 图标和 `UiNode` 可以直接作为 slot 传入；其他 core 构建器可通过 [`InlineSlot::new`] 包装。
+#[derive(Clone)]
 pub struct InlineSlot {
     content: InlineSlotContent,
 }
 
+#[derive(Clone)]
 enum InlineSlotContent {
     Node(UiNode),
     Icon(IconVisual),
@@ -65,6 +67,7 @@ impl From<IconVisual> for InlineSlot {
 ///
 /// 无前后缀时直接降级为一个 core Text primitive；有 slot 时才构造 `Row`，并以视觉中心
 /// 对齐。多行、富文本或需要独立折行策略的场景应继续直接使用 core 文本原语和普通布局。
+#[derive(Clone)]
 pub struct Text {
     value: String,
     text_style: TextStyleRef,

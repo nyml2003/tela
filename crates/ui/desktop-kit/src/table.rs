@@ -57,6 +57,7 @@ impl Default for TableStyle {
 }
 
 /// 表格单元格：内容（文本或任意节点）+ 宽度 + 对齐 + 内边距。
+#[derive(Clone)]
 pub struct Td {
     children: Vec<UiNode>,
     width: Option<Size>,
@@ -139,6 +140,7 @@ impl From<Td> for UiNode {
 }
 
 /// 表格行：横向排布单元格 + 行背景（斑马纹/选中高亮）。
+#[derive(Clone)]
 pub struct Tr {
     row_id: Option<String>,
     cells: Vec<UiNode>,
@@ -273,6 +275,7 @@ impl From<Tr> for UiNode {
 }
 
 /// 固定表头与虚拟表体的组合组件。
+#[derive(Clone)]
 pub struct Table {
     header: UiNode,
     rows: Vec<UiNode>,

@@ -1,0 +1,5 @@
+error: #[bind(...)] field must have type Signal<T>
+  --> tests/ui/derive_rejects_non_signal_bind.rs:10:12
+   |
+10 |     value: u32,
+   |            ^^^

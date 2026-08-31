@@ -1,6 +1,6 @@
 //! Vant 风格的移动信息单元和分组。
 //!
-//! `MobileCell` 只把调用方给出的文字、可选视觉节点和稳定 action target 投影成触控行；
+//! `MobileCell` 只把调用方给出的文字、可选视觉节点和稳定交互 identity 投影成触控行；
 //! 领域对象、导航和手势策略由 Application / Target 分别拥有。
 
 use tela_contract::{
@@ -122,8 +122,8 @@ impl MobileCell {
 
     /// 使单元可点击但不声明自身的 `SemanticKey`。
     ///
-    /// 这条路径供 Composition DSL 的 `<ActionTarget>` 或 `<For>` 使用：外层节点拥有
-    /// 动作锚点和跨帧身份，Kit 只提供稳定的触控/焦点语义与视觉结构。
+    /// 这条路径供 `<For>` 或组件自己创建的根节点使用：组件仍必须在候选计划中证明
+    /// 该交互 key 属于自己的装配范围；Kit 只提供稳定的触控/焦点语义与视觉结构。
     pub fn interactive(mut self) -> Self {
         self.interactive = true;
         self

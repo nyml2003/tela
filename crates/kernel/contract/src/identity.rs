@@ -16,15 +16,15 @@ impl From<&str> for SemanticKey {
     }
 }
 
-/// DSL lowering 使用的父范围局部 key 片段。
+/// DSL assemble 使用的父范围局部 key 片段。
 ///
-/// 此类型只连接 Composition DSL 与 Kernel 的身份分配器。应用代码应使用 `<For
+/// 此类型只连接 Composition DSL 与 Kernel 的身份解析。应用代码应使用 `<For
 /// key={...}>`，而不是直接构造它；因此它不属于稳定的业务 API。
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeySegment {
     value: String,
-    collection_scope: Option<u32>,
+    collection_scope: Option<u64>,
 }
 
 impl KeySegment {
@@ -46,14 +46,14 @@ impl KeySegment {
     /// 这不是业务 API。Composition lowering 必须为每一个 `<For>` 调用它，即使当前父节点
     /// 下只有一个 collection；Kernel 将 scope 与局部业务标识一起合成为最终 `SemanticKey`。
     #[doc(hidden)]
-    pub fn with_collection_scope(mut self, scope: u32) -> Self {
+    pub fn with_collection_scope(mut self, scope: u64) -> Self {
         self.collection_scope = Some(scope);
         self
     }
 
     /// 返回 DSL lowering 指定的内部 collection namespace。
     #[doc(hidden)]
-    pub fn collection_scope(&self) -> Option<u32> {
+    pub fn collection_scope(&self) -> Option<u64> {
         self.collection_scope
     }
 }
@@ -72,13 +72,11 @@ impl From<&str> for KeySegment {
 
 /// key 身份策略（见 005-key身份策略）。
 ///
-/// 配置在容器节点的 `IdentityConcern` 上，向下生效，子容器可覆盖。
+/// 配置在容器节点的 `IdentityConcern` 上，描述该节点自己的 key 来源。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyStrategy {
     /// 按节点树位置路径自动生成 key。全局默认。
     AutoPath,
-    /// 首次出现自动分配内部稳定身份，增删/重排保持。
-    AutoStableIdentity,
     /// 复用业务已有实体主键。
     SemanticId,
     /// 业务完全自行提供 key，高级兜底。
@@ -94,7 +92,7 @@ pub enum UpdateMode {
     Dirty,
 }
 
-/// `IdentityConcern` 槽位：key 策略 / 更新模式 / 语义 id（向下生效，见 003-场景树与节点模型 1.1）。
+/// `IdentityConcern` 槽位：key 策略 / 更新模式 / 语义 id（见 003-场景树与节点模型 1.1）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdentityConcern {
     /// key 身份策略，默认 `AutoPath`。

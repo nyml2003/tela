@@ -39,13 +39,16 @@ impl TextMeasurer for MockMeasurer {
 fn resolve(tree: &UiTree) -> tela_contract::UiFrame {
     tree.resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
         .unwrap()
+        .to_ui_frame()
 }
 
 fn resolve_with_scrolls(
     tree: &UiTree,
     scrolls: HashMap<SemanticKey, ScrollState>,
 ) -> tela_contract::UiFrame {
-    tree.resolve(VIEWPORT, &MockMeasurer, &scrolls).unwrap()
+    tree.resolve(VIEWPORT, &MockMeasurer, &scrolls)
+        .unwrap()
+        .to_ui_frame()
 }
 
 /// 引擎级测量（viewport 约束）。
@@ -183,14 +186,16 @@ fn resolve_does_not_read_external_state() {
     let tree = sample_tree();
     let a = tree
         .resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
-        .unwrap();
+        .unwrap()
+        .to_ui_frame();
     let b = tree
         .resolve(
             VIEWPORT,
             &MockMeasurer,
             &HashMap::from([(SemanticKey("whatever".to_string()), Default::default())]),
         )
-        .unwrap();
+        .unwrap()
+        .to_ui_frame();
     assert_eq!(a, b);
 }
 
@@ -312,7 +317,8 @@ fn focus_ring_is_a_visual_decoration_without_new_hit_region() {
                 inset: 2.0,
             }),
         )
-        .unwrap();
+        .unwrap()
+        .to_ui_frame();
     assert_eq!(plain.hit_regions, focused.hit_regions);
     assert_eq!(focused.commands.len(), plain.commands.len() + 1);
     let ring = focused.commands.last().expect("焦点环命令");
@@ -541,6 +547,57 @@ fn anchored_teleport_recomputes_from_the_scrolled_anchor_box() {
     let overlay = &frame.commands[1].geometry;
     // 锚点原始 y=40，滚动后为 y=30；Bottom placement 因而重算为 y=40。
     assert_eq!((overlay.x, overlay.y), (0.0, 40.0));
+}
+
+#[test]
+fn retained_render_plan_matches_legacy_frame_for_scroll_text_and_teleport() {
+    let anchor: UiNode = LayoutContainer::frame(text_node("anchored text"))
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(80.0)),
+            height: Some(Size::fixed(24.0)),
+            margin: Insets {
+                top: 32.0,
+                ..Insets::default()
+            },
+            ..LayoutConcern::default()
+        })
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("anchor".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into();
+    let scroll: UiNode = LayoutContainer::scroll_view([anchor])
+        .layout(LayoutConcern {
+            width: Some(Size::fixed(100.0)),
+            height: Some(Size::fixed(80.0)),
+            ..LayoutConcern::default()
+        })
+        .identity(IdentityConcern {
+            semantic_key: Some(SemanticKey("scroll".to_owned())),
+            ..IdentityConcern::default()
+        })
+        .into();
+    let portal: UiNode = LogicalContainer::teleport(tela_contract::TeleportSpec {
+        source: tela_contract::TeleportSource::Anchor(SemanticKey("anchor".to_owned())),
+        placement: tela_contract::AnchoredPlacement::default(),
+    })
+    .children([rect(20.0, 10.0)])
+    .into();
+    let tree = UiTree::new(LogicalContainer::group().children([scroll, portal])).unwrap();
+    let scrolls = HashMap::from([(
+        SemanticKey("scroll".to_owned()),
+        ScrollState {
+            offset_x: 0.0,
+            offset_y: 8.0,
+        },
+    )]);
+
+    let legacy = crate::resolve::resolve_tree(&tree, VIEWPORT, &MockMeasurer, &scrolls).unwrap();
+    let retained = tree
+        .resolve(VIEWPORT, &MockMeasurer, &scrolls)
+        .unwrap()
+        .to_ui_frame();
+    assert_eq!(retained, legacy);
 }
 
 #[test]
@@ -2107,7 +2164,8 @@ fn view_accepts_zero_or_one_child() {
     let tree = UiTree::new(empty.clone()).expect("empty view must be valid");
     let frame = tree
         .resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
-        .expect("empty view resolves");
+        .expect("empty view resolves")
+        .to_ui_frame();
     assert!(!frame.commands.is_empty(), "empty view draws its fill");
 
     // 单子 View = 通用盒子。

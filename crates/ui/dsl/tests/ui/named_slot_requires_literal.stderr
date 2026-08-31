@@ -1,0 +1,5 @@
+error: a named Fragment slot must be a string literal, for example slot={"header"}
+  --> tests/ui/named_slot_requires_literal.rs:10:29
+   |
+10 |             <Fragment slot={slot}>
+   |                             ^^^^

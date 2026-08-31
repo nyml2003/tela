@@ -9,7 +9,142 @@ use std::{
 
 use tela_contract::SemanticKey;
 
-use crate::{Signal, SignalId};
+use crate::{Signal, SignalId, candidate::ComponentLease};
+
+/// 一个没有物理节点的结构组件在当前实例存续期内拥有的失效坐标。
+///
+/// `Show` / `For` 可以直接观察集合或条件 source，但不能把订阅锚定到第一行、隐形
+/// wrapper 或某个 descendant node。这个 target 只存在于 DSL runtime：它由完整 lease
+/// （identity + generation）定义，不能作为业务 key、NodeId 或跨组件路由能力使用。
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct StructuralDirtyTarget {
+    lease: ComponentLease,
+}
+
+impl StructuralDirtyTarget {
+    pub(crate) fn new(lease: ComponentLease) -> Self {
+        Self { lease }
+    }
+}
+
+/// 一个已提交订阅的内部失效目标。
+///
+/// 普通组件 watch 仍以真实树的 `SemanticKey` 作为坐标；透明结构使用独立 lease target。
+/// 两者绝不互相伪装，避免空 collection、分支切换或 key 重排时把旧订阅挂到新节点上。
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum WatchTarget {
+    Node(SemanticKey),
+    Structure(StructuralDirtyTarget),
+}
+
+/// 一次 Host 帧从 Signal runtime 取出的显式失效集合。
+///
+/// 普通节点坐标与透明结构坐标都在同一个候选事务中消费和回滚，但只有前者可以作为
+/// Kernel 树的 `SemanticKey`。应用代码不能构造结构坐标；它只能把本值原样传给
+/// [`crate::FrameCoordinator`]，或在候选失败时交回 [`ComponentRuntime::restore_dirty`]。
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct DirtySet {
+    targets: BTreeSet<WatchTarget>,
+}
+
+impl DirtySet {
+    /// 是否没有任何尚未消费的显式失效。
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    /// 当前批次中去重后的失效目标数量。
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    /// 合并另一个尚未消费的失效集合。
+    ///
+    /// 这只合并同一 Host 的候选重试批次；它不建立新的订阅，也不暴露结构 target。
+    pub fn merge(&mut self, other: Self) {
+        self.targets.extend(other.targets);
+    }
+
+    /// Returns the physical tree coordinates contained in this batch.
+    ///
+    /// Lease-owned transparent structure targets intentionally do not appear here. Hosts may
+    /// use these keys for layout invalidation or diagnostic spine snapshots, but they cannot
+    /// derive an address for an empty `For` or a `Show` branch from a `DirtySet`.
+    pub fn semantic_keys(&self) -> BTreeSet<SemanticKey> {
+        self.node_targets()
+    }
+
+    pub(crate) fn has_structural_targets(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| matches!(target, WatchTarget::Structure(_)))
+    }
+
+    pub(crate) fn node_targets(&self) -> BTreeSet<SemanticKey> {
+        self.targets
+            .iter()
+            .filter_map(|target| match target {
+                WatchTarget::Node(key) => Some(key.clone()),
+                WatchTarget::Structure(_) => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn from_targets(targets: BTreeSet<WatchTarget>) -> Self {
+        Self { targets }
+    }
+
+    pub(crate) fn from_watches(watches: &[ResolvedWatch]) -> Self {
+        Self {
+            targets: watches.iter().map(|watch| watch.target.clone()).collect(),
+        }
+    }
+}
+
+impl std::fmt::Debug for DirtySet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let node_targets = self
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                WatchTarget::Node(key) => Some(key),
+                WatchTarget::Structure(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let structural_targets = self
+            .targets
+            .iter()
+            .filter(|target| matches!(target, WatchTarget::Structure(_)))
+            .count();
+        formatter
+            .debug_struct("DirtySet")
+            .field("node_targets", &node_targets)
+            .field("structural_target_count", &structural_targets)
+            .finish()
+    }
+}
+
+impl From<BTreeSet<SemanticKey>> for DirtySet {
+    fn from(keys: BTreeSet<SemanticKey>) -> Self {
+        Self {
+            targets: keys.into_iter().map(WatchTarget::Node).collect(),
+        }
+    }
+}
+
+impl<const N: usize> From<[SemanticKey; N]> for DirtySet {
+    fn from(keys: [SemanticKey; N]) -> Self {
+        keys.into_iter().collect()
+    }
+}
+
+impl FromIterator<SemanticKey> for DirtySet {
+    fn from_iter<T: IntoIterator<Item = SemanticKey>>(keys: T) -> Self {
+        Self {
+            targets: keys.into_iter().map(WatchTarget::Node).collect(),
+        }
+    }
+}
 
 /// Target Host 用来请求下一 GUI 帧的窄端口。
 ///
@@ -21,15 +156,15 @@ pub trait FrameInvalidator {
 }
 
 struct RuntimeInner {
-    dirty: RefCell<BTreeSet<SemanticKey>>,
+    dirty: RefCell<BTreeSet<WatchTarget>>,
     batch_depth: Cell<usize>,
     frame_requested: Cell<bool>,
     invalidator: RefCell<Option<Weak<dyn FrameInvalidator>>>,
 }
 
 impl RuntimeInner {
-    fn mark_dirty(&self, key: SemanticKey) {
-        self.dirty.borrow_mut().insert(key);
+    fn mark_dirty(&self, target: WatchTarget) {
+        self.dirty.borrow_mut().insert(target);
         if self.batch_depth.get() == 0 {
             self.request_frame_if_needed();
         }
@@ -61,11 +196,11 @@ impl RuntimeInner {
 
 /// 单线程 Application 的显式观察运行时。
 ///
-/// 所有订阅使用已经解析的 [`SemanticKey`]。组件实例路径只属于 Composition
-/// 语义，不再作为 Signal 观察主键。
+/// 普通订阅使用已经解析的 [`SemanticKey`]；透明结构则使用内部 lease 坐标。两者都由
+/// 同一个候选提交/回滚边界安装和移除，组件实例路径不会被公开成业务路由主键。
 pub struct ComponentRuntime {
     inner: Rc<RuntimeInner>,
-    subscriptions: BTreeMap<SemanticKey, BTreeMap<SignalId, Box<dyn Any>>>,
+    subscriptions: BTreeMap<WatchTarget, BTreeMap<SignalId, Box<dyn Any>>>,
 }
 
 impl ComponentRuntime {
@@ -88,40 +223,57 @@ impl ComponentRuntime {
     /// 初始 dirty；每帧 DSL 视图应改用内部 reconcile 路径，以便卸载不存在的节点订阅。
     /// 源与派生节点（`Signal`/`Computed`）均可订阅。
     pub fn watch<S: WatchSignal>(&mut self, key: SemanticKey, signal: &S) {
+        self.watch_target(WatchTarget::Node(key), signal);
+    }
+
+    fn watch_target<S: WatchSignal>(&mut self, target: WatchTarget, signal: &S) {
         let signal_id = WatchSignal::signal_id(signal);
         if self
             .subscriptions
-            .get(&key)
+            .get(&target)
             .is_some_and(|watched| watched.contains_key(&signal_id))
         {
             return;
         }
         let runtime = Rc::clone(&self.inner);
-        let watched_key = key.clone();
-        let callback: Rc<dyn Fn()> = Rc::new(move || runtime.mark_dirty(watched_key.clone()));
+        let watched_target = target.clone();
+        let callback: Rc<dyn Fn()> = Rc::new(move || runtime.mark_dirty(watched_target.clone()));
         self.subscriptions
-            .entry(key)
+            .entry(target)
             .or_default()
             .insert(signal_id, WatchSignal::subscribe_erased(signal, callback));
     }
 
     /// 显式标记一个已解析节点为脏，而不建立 Signal 订阅。
     pub fn mark_dirty(&self, key: SemanticKey) {
-        self.inner.mark_dirty(key);
+        self.inner.mark_dirty(WatchTarget::Node(key));
+    }
+
+    /// Creates the internal invalidation callback used by a committed presentation binding.
+    ///
+    /// Presentation bindings are not normal component watches: they own no component State and
+    /// are reconciled by the frame coordinator as candidate-local node presentation copies.
+    /// They still enter the same resolved-key dirty set so Host scheduling has one source of
+    /// truth. This stays crate-private to prevent applications from smuggling arbitrary runtime
+    /// callbacks through component Props.
+    pub(crate) fn dirty_callback(&self, key: SemanticKey) -> Rc<dyn Fn()> {
+        let runtime = Rc::clone(&self.inner);
+        Rc::new(move || runtime.mark_dirty(WatchTarget::Node(key.clone())))
     }
 
     /// 释放某个语义节点的全部 Signal 订阅并清除其尚未消费的脏标记。
     pub fn clear_watches(&mut self, key: &SemanticKey) {
-        self.subscriptions.remove(key);
-        self.inner.dirty.borrow_mut().remove(key);
+        let target = WatchTarget::Node(key.clone());
+        self.subscriptions.remove(&target);
+        self.inner.dirty.borrow_mut().remove(&target);
     }
 
     /// 取走当前批次的脏节点集合。
     ///
     /// Host 应在真正开始消费一帧时先调用 [`Self::begin_frame`]，而不是把本方法当作
     /// `frame_requested` 的清除点。
-    pub fn take_dirty(&self) -> BTreeSet<SemanticKey> {
-        std::mem::take(&mut *self.inner.dirty.borrow_mut())
+    pub fn take_dirty(&self) -> DirtySet {
+        DirtySet::from_targets(std::mem::take(&mut *self.inner.dirty.borrow_mut()))
     }
 
     /// 将已由 Host 消费、但因候选帧失败而未能提交的 dirty key 放回运行时。
@@ -130,8 +282,8 @@ impl ComponentRuntime {
     /// 若随后 DSL 构建、树校验或 Host resolve 失败，旧 active frame 仍有效，已消费的
     /// key 也必须保留，以免下一次有效唤醒把这次状态变更永久遗忘。这个操作不主动请求
     /// 新帧：持续失败的候选不能忙等；下一次状态写入或 Host 调度会再次消费它们。
-    pub fn restore_dirty(&self, dirty: BTreeSet<SemanticKey>) {
-        self.inner.dirty.borrow_mut().extend(dirty);
+    pub fn restore_dirty(&self, dirty: DirtySet) {
+        self.inner.dirty.borrow_mut().extend(dirty.targets);
     }
 
     /// 是否存在尚未由 Host 消费的 dirty 节点。
@@ -176,28 +328,29 @@ impl ComponentRuntime {
     pub(crate) fn reconcile(&mut self, watches: Vec<ResolvedWatch>) {
         let previously_watched = self.subscriptions.keys().cloned().collect::<BTreeSet<_>>();
         let mut previous = std::mem::take(&mut self.subscriptions);
-        let mut next = BTreeMap::<SemanticKey, BTreeMap<SignalId, Box<dyn Any>>>::new();
+        let mut next = BTreeMap::<WatchTarget, BTreeMap<SignalId, Box<dyn Any>>>::new();
         for watch in watches {
             let signal_id = watch.source.signal_id();
             if next
-                .get(&watch.key)
+                .get(&watch.target)
                 .is_some_and(|watched| watched.contains_key(&signal_id))
             {
                 continue;
             }
 
             let existing = previous
-                .get_mut(&watch.key)
+                .get_mut(&watch.target)
                 .and_then(|watched| watched.remove(&signal_id));
-            let entry = next.entry(watch.key.clone()).or_default();
+            let entry = next.entry(watch.target.clone()).or_default();
             if let Some(subscription) = existing {
                 entry.insert(signal_id, subscription);
                 continue;
             }
 
             let runtime = Rc::clone(&self.inner);
-            let watched_key = watch.key;
-            let callback: Rc<dyn Fn()> = Rc::new(move || runtime.mark_dirty(watched_key.clone()));
+            let watched_target = watch.target;
+            let callback: Rc<dyn Fn()> =
+                Rc::new(move || runtime.mark_dirty(watched_target.clone()));
             entry.insert(signal_id, watch.source.subscribe(callback));
         }
         let next_keys = next.keys().cloned().collect::<BTreeSet<_>>();
@@ -235,7 +388,7 @@ impl Drop for BatchGuard {
 }
 
 pub(crate) struct ResolvedWatch {
-    pub(crate) key: SemanticKey,
+    pub(crate) target: WatchTarget,
     pub(crate) scope: crate::owner::ScopeId,
     pub(crate) source: Box<dyn WatchSource>,
 }
@@ -243,7 +396,7 @@ pub(crate) struct ResolvedWatch {
 impl Clone for ResolvedWatch {
     fn clone(&self) -> Self {
         Self {
-            key: self.key.clone(),
+            target: self.target.clone(),
             scope: self.scope,
             source: self.source.clone_box(),
         }
@@ -252,9 +405,37 @@ impl Clone for ResolvedWatch {
 
 pub(crate) trait WatchSource {
     fn signal_id(&self) -> SignalId;
+    /// 当前 source 的单调版本。候选帧在提交屏障复核它，避免把基于旧显式输入边
+    /// 构建的结果提升为 active。
+    fn version(&self) -> u64;
     fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any>;
     /// 克隆来源，供 retained 组件的 render 输出缓存重新声明订阅。
     fn clone_box(&self) -> Box<dyn WatchSource>;
+}
+
+struct TypedWatchSource<S>(S);
+
+impl<S: WatchSignal> WatchSource for TypedWatchSource<S> {
+    fn signal_id(&self) -> SignalId {
+        WatchSignal::signal_id(&self.0)
+    }
+
+    fn version(&self) -> u64 {
+        WatchSignal::version(&self.0)
+    }
+
+    fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any> {
+        WatchSignal::subscribe_erased(&self.0, callback)
+    }
+
+    fn clone_box(&self) -> Box<dyn WatchSource> {
+        Box::new(Self(self.0.clone()))
+    }
+}
+
+/// Erases one explicitly declared Signal/Computed edge for candidate-owned plan storage.
+pub(crate) fn erase_watch_source<S: WatchSignal>(source: &S) -> Box<dyn WatchSource> {
+    Box::new(TypedWatchSource(source.clone()))
 }
 
 /// 可被 `#[watch]` 订阅的信号句柄。
@@ -265,6 +446,8 @@ pub(crate) trait WatchSource {
 pub trait WatchSignal: Clone + 'static {
     /// 内部订阅身份；clone 共享同一 id。
     fn signal_id(&self) -> SignalId;
+    /// 当前 source 的单调版本。
+    fn version(&self) -> u64;
     /// 类型擦除订阅；返回的令牌 drop 即退订。
     fn subscribe_erased(&self, listener: Rc<dyn Fn()>) -> Box<dyn Any>;
 }
@@ -272,6 +455,10 @@ pub trait WatchSignal: Clone + 'static {
 impl<T: 'static> WatchSignal for Signal<T> {
     fn signal_id(&self) -> SignalId {
         self.id()
+    }
+
+    fn version(&self) -> u64 {
+        Signal::version(self)
     }
 
     fn subscribe_erased(&self, listener: Rc<dyn Fn()>) -> Box<dyn Any> {
@@ -300,6 +487,10 @@ impl<T: 'static> WatchSource for SignalWatch<T> {
         self.signal.id()
     }
 
+    fn version(&self) -> u64 {
+        self.signal.version()
+    }
+
     fn subscribe(&self, callback: Rc<dyn Fn()>) -> Box<dyn Any> {
         self.signal.subscribe_erased(callback)
     }
@@ -322,8 +513,8 @@ mod tests {
 
     use tela_contract::SemanticKey;
 
-    use super::{ComponentRuntime, FrameInvalidator, ResolvedWatch, SignalWatch};
-    use crate::Signal;
+    use super::{ComponentRuntime, FrameInvalidator, ResolvedWatch, SignalWatch, WatchTarget};
+    use crate::signal;
 
     fn key(value: &str) -> SemanticKey {
         SemanticKey(value.to_owned())
@@ -331,7 +522,7 @@ mod tests {
 
     #[test]
     fn semantic_key_watches_deduplicate_without_initial_invalidation() {
-        let first = Signal::new(0_u32);
+        let (first_writer, first) = signal(0_u32);
         let second = first.clone();
         let mut runtime = ComponentRuntime::new();
         let watched_key = key("app.detail");
@@ -340,10 +531,14 @@ mod tests {
         runtime.watch(watched_key.clone(), &second);
         assert!(runtime.take_dirty().is_empty());
 
-        first.set(1);
-        second.set(2);
+        first_writer.set(1);
+        first_writer.set(2);
         assert_eq!(
-            runtime.take_dirty().into_iter().collect::<Vec<_>>(),
+            runtime
+                .take_dirty()
+                .semantic_keys()
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![watched_key]
         );
     }
@@ -356,92 +551,106 @@ mod tests {
 
         runtime.begin_frame();
         let consumed = runtime.take_dirty();
-        assert_eq!(consumed, BTreeSet::from([watched_key.clone()]));
+        assert_eq!(
+            consumed.semantic_keys(),
+            BTreeSet::from([watched_key.clone()])
+        );
         assert!(!runtime.has_dirty());
 
         runtime.restore_dirty(consumed);
-        assert_eq!(runtime.take_dirty(), BTreeSet::from([watched_key]));
+        assert_eq!(
+            runtime.take_dirty().semantic_keys(),
+            BTreeSet::from([watched_key])
+        );
     }
 
     #[test]
     fn clearing_a_key_releases_its_subscription() {
-        let signal = Signal::new(0_u32);
+        let (writer, signal) = signal(0_u32);
         let watched_key = key("app.removed");
         let mut runtime = ComponentRuntime::new();
         runtime.watch(watched_key.clone(), &signal);
 
         runtime.clear_watches(&watched_key);
-        signal.set(1);
+        writer.set(1);
         assert!(runtime.take_dirty().is_empty());
     }
 
     #[test]
     fn reconcile_releases_removed_watches_and_their_stale_dirty_marks() {
-        let signal = Signal::new(0_u32);
+        let (writer, signal) = signal(0_u32);
         let watched_key = key("app.virtual.item");
         let mut runtime = ComponentRuntime::new();
         runtime.watch(watched_key, &signal);
 
-        signal.set(1);
+        writer.set(1);
         runtime.reconcile(Vec::new());
         assert!(runtime.take_dirty().is_empty());
 
-        signal.set(2);
+        writer.set(2);
         assert!(runtime.take_dirty().is_empty());
     }
 
     #[test]
     fn reconcile_reuses_an_unchanged_subscription() {
-        let signal = Signal::new(0_u32);
+        let (writer, signal) = signal(0_u32);
         let watched_key = key("app.reused");
         let mut runtime = ComponentRuntime::new();
 
         runtime.reconcile(vec![ResolvedWatch {
-            key: watched_key.clone(),
+            target: WatchTarget::Node(watched_key.clone()),
             scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&signal)),
         }]);
         assert_eq!(signal.listener_count(), 1);
 
         runtime.reconcile(vec![ResolvedWatch {
-            key: watched_key.clone(),
+            target: WatchTarget::Node(watched_key.clone()),
             scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&signal)),
         }]);
         assert_eq!(signal.listener_count(), 1);
 
-        signal.set(1);
+        writer.set(1);
         assert_eq!(
-            runtime.take_dirty().into_iter().collect::<Vec<_>>(),
+            runtime
+                .take_dirty()
+                .semantic_keys()
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![watched_key]
         );
     }
 
     #[test]
     fn reconcile_replaces_a_changed_signal_for_the_same_key() {
-        let first = Signal::new(0_u32);
-        let second = Signal::new(0_u32);
+        let (first_writer, first) = signal(0_u32);
+        let (second_writer, second) = signal(0_u32);
         let watched_key = key("app.replaced");
         let mut runtime = ComponentRuntime::new();
 
         runtime.reconcile(vec![ResolvedWatch {
-            key: watched_key.clone(),
+            target: WatchTarget::Node(watched_key.clone()),
             scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&first)),
         }]);
         runtime.reconcile(vec![ResolvedWatch {
-            key: watched_key.clone(),
+            target: WatchTarget::Node(watched_key.clone()),
             scope: crate::owner::ScopeId::ROOT,
             source: Box::new(SignalWatch::new(&second)),
         }]);
         assert_eq!(first.listener_count(), 0);
         assert_eq!(second.listener_count(), 1);
 
-        first.set(1);
+        first_writer.set(1);
         assert!(runtime.take_dirty().is_empty());
-        second.set(1);
+        second_writer.set(1);
         assert_eq!(
-            runtime.take_dirty().into_iter().collect::<Vec<_>>(),
+            runtime
+                .take_dirty()
+                .semantic_keys()
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![watched_key]
         );
     }
@@ -456,7 +665,7 @@ mod tests {
             }
         }
 
-        let signal = Signal::new(0_u32);
+        let (writer, signal) = signal(0_u32);
         let watched_key = key("app.shell");
         let mut runtime = ComponentRuntime::new();
         runtime.watch(watched_key, &signal);
@@ -465,15 +674,15 @@ mod tests {
         runtime.set_invalidator(Rc::clone(&invalidator));
 
         runtime.batch(|| {
-            signal.set(1);
-            runtime.batch(|| signal.set(2));
+            writer.set(1);
+            runtime.batch(|| writer.set(2));
             assert_eq!(calls.get(), 0);
         });
         assert_eq!(calls.get(), 1);
         assert!(runtime.frame_requested());
 
         runtime.begin_frame();
-        signal.set(3);
+        writer.set(3);
         assert_eq!(calls.get(), 2);
     }
 
@@ -487,20 +696,20 @@ mod tests {
             }
         }
 
-        let signal = Signal::new(0_u32);
+        let (writer, signal) = signal(0_u32);
         let mut runtime = ComponentRuntime::new();
         runtime.watch(key("app.host"), &signal);
         let calls = Rc::new(Cell::new(0));
         let invalidator: Rc<dyn FrameInvalidator> = Rc::new(Counter(Rc::clone(&calls)));
         runtime.set_invalidator(Rc::clone(&invalidator));
 
-        signal.set(1);
+        writer.set(1);
         assert_eq!(calls.get(), 1);
         runtime.clear_invalidator();
         runtime.begin_frame();
         assert!(!runtime.take_dirty().is_empty());
 
-        signal.set(2);
+        writer.set(2);
         assert_eq!(calls.get(), 1);
         assert!(runtime.has_dirty());
 
@@ -521,7 +730,7 @@ mod tests {
             }
         }
 
-        let signal = Signal::new(0_u32);
+        let (writer, signal) = signal(0_u32);
         let mut runtime = ComponentRuntime::new();
         runtime.watch(key("app.panic"), &signal);
         let calls = Rc::new(Cell::new(0));
@@ -530,7 +739,7 @@ mod tests {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             runtime.batch(|| {
-                signal.set(1);
+                writer.set(1);
                 panic!("intentional batch unwind");
             });
         }));
@@ -540,7 +749,7 @@ mod tests {
 
         runtime.begin_frame();
         runtime.take_dirty();
-        signal.set(2);
+        writer.set(2);
         assert_eq!(calls.get(), 2);
     }
 }

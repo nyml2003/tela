@@ -38,6 +38,7 @@ impl StatusTone {
 }
 
 /// 带文字说明的状态点，适合列表、表格与详情摘要。
+#[derive(Clone)]
 pub struct StatusBadge {
     label: String,
     tone: StatusTone,
@@ -91,6 +92,7 @@ impl From<StatusBadge> for UiNode {
 }
 
 /// 空态中的可选主动作。
+#[derive(Clone)]
 pub struct EmptyAction {
     label: String,
     action_key: SemanticKey,
@@ -115,6 +117,7 @@ impl EmptyAction {
 }
 
 /// 无数据、首次使用或筛选无结果时的桌面空态。
+#[derive(Clone)]
 pub struct EmptyState {
     title: String,
     description: Option<String>,

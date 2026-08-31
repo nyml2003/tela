@@ -3,11 +3,11 @@
 //! 定位：仅面向测试/CI/离线导出/服务端，不做线上高性能渲染。
 //! 优先保证：像素确定性、无平台差异、无 GPU 依赖、纯 CPU 无头运行，作为 wgpu/canvas 的对齐基准。
 //!
-//! 依赖边界：仅依赖 `tela-contract`（`UiFrame`/`DrawCommand`/`ClipRect`）与共享字形/数学库，
-//! **禁止反向依赖 `tela-core`**；输入只接收 `UiFrame`，不参与布局计算。
+//! 依赖边界：仅依赖 `tela-contract`（有序绘制源/`DrawCommand`/`ClipRect`）与共享字形/数学库，
+//! **禁止反向依赖 `tela-core`**；输入不参与布局计算。
 //!
 //! 唯一入口：`render_frame(frame, RasterConfig) -> BitmapRGBA8`，逻辑画布尺寸取自
-//! `UiFrame.viewport`；软件光栅，仅测试/CI/离线/服务端。
+//! 绘制源的 viewport；软件光栅，仅测试/CI/离线/服务端。
 //!
 //! feature：
 //! - `std`（默认）：受控共享字形栅格 + PNG 导出；

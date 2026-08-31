@@ -1,7 +1,7 @@
 //! Browser WebView development SDK host.
 //!
 //! This crate owns the Rust half of the browser shell: development-bundle validation, Tela ABI
-//! packet codecs, `UiFrame` decoding, and WGPU presentation. The DOM event loop, browser fetches
+//! packet codecs, `RenderPlan` decoding, and WGPU presentation. The DOM event loop, browser fetches
 //! and ordinary `WebAssembly` guest instantiation stay in `products/webview/src/webview-sdk`, where browser
 //! lifetime and IME APIs can remain explicit.
 
@@ -12,11 +12,11 @@
 use std::cell::RefCell;
 
 #[cfg(target_arch = "wasm32")]
-use tela_app_abi::decode_frame;
+use tela_app_abi::decode_render_plan;
 use tela_app_abi::{
     ABI_VERSION, AppEvent, AppFrameInput, AppFrameToken, AppPointerEvent, AppPointerKind,
-    AppPointerPhase, AppStatus, FrameTransportPacket, decode_publication, decode_status,
-    decode_transport_publication, encode_event, encode_frame,
+    AppPointerPhase, AppStatus, FrameTransportPacket, decode_presented_effects, decode_publication,
+    decode_status, decode_transport_publication, encode_event, encode_frame,
 };
 use tela_bundle::{BundleArchive, DevelopmentManifest, read_archive, sha256_hex};
 #[cfg(target_arch = "wasm32")]
@@ -232,7 +232,7 @@ impl WebAppPublication {
     }
 }
 
-/// Decodes one atomic frame/status/effect publication after it crossed WebAssembly memory.
+/// Decodes one atomic candidate frame/status publication after it crossed WebAssembly memory.
 #[wasm_bindgen]
 pub fn decode_app_publication(bytes: &[u8]) -> Result<WebAppPublication, JsValue> {
     let publication = decode_publication(bytes)
@@ -250,6 +250,22 @@ pub fn decode_app_publication(bytes: &[u8]) -> Result<WebAppPublication, JsValue
             spine: Vec::new(),
         },
     })
+}
+
+/// Validates the post-present effect batch for the browser host.
+///
+/// Browser pages cannot reliably execute Tela's native window effects. A non-empty committed batch
+/// is therefore a visible host-capability failure, never an instruction the browser silently drops.
+#[wasm_bindgen]
+pub fn validate_browser_presented_effects(bytes: &[u8]) -> Result<(), JsValue> {
+    let effects = decode_presented_effects(bytes)
+        .map_err(|error| js_error(format!("invalid guest presented-effects packet: {error}")))?;
+    if effects.is_empty() {
+        return Ok(());
+    }
+    Err(js_error(format!(
+        "browser host does not support committed native effects: {effects:?}"
+    )))
 }
 
 /// Decodes the incremental transport packet exported by a modern dynamic guest.
@@ -534,7 +550,7 @@ pub fn render_gpu_damage(
     damage_flags: u8,
     damage_rects: &[f32],
 ) -> Result<bool, JsValue> {
-    let frame = decode_frame(frame_packet)
+    let frame = decode_render_plan(frame_packet)
         .map_err(|error| js_error(format!("invalid guest frame packet: {error}")))?;
     let flags = DirtyFlags::from_bits(damage_flags)
         .ok_or_else(|| js_error(format!("invalid frame damage flags: {damage_flags}")))?;
@@ -795,6 +811,22 @@ mod tests {
         let mut corrupt = archive;
         corrupt.push(0);
         assert!(validate_development_bundle_impl(&index, &corrupt).is_err());
+    }
+
+    #[test]
+    fn rejects_a_development_index_from_the_previous_abi() {
+        let previous_abi = ABI_VERSION.checked_sub(1).expect("current ABI is non-zero");
+        let archive = build_archive(&BundleInput {
+            app_abi: previous_abi,
+            app_wasm: b"old guest".to_vec(),
+            assets: BTreeMap::new(),
+        })
+        .expect("archive");
+        let mut index = index_for(&archive);
+        index.app_abi = previous_abi;
+
+        let error = validate_development_index(&index).expect_err("old ABI must be rejected");
+        assert!(error.contains("app ABI mismatch"));
     }
 
     #[test]

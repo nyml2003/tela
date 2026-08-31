@@ -1,10 +1,10 @@
 //! `Select` / `Cascader` 组件（AntD 简化）：下拉选择与级联选择。
 
+use std::rc::Rc;
 use tela_contract::{
     Color, IdentityConcern, InteractConcern, KeyStrategy, LayoutConcern, OverlaySpec, SemanticKey,
     UiNode, UpdateMode,
 };
-use std::rc::Rc;
 
 use tela_core::LayoutContainer;
 
@@ -20,6 +20,7 @@ pub struct OptionItem {
 }
 
 /// 下拉选择：触发框（当前值/占位符 + ▾）+ 展开时的选项列表。
+#[derive(Clone)]
 pub struct Select {
     options: Vec<OptionItem>,
     value: Option<String>,
@@ -228,6 +229,7 @@ pub struct CascadeOption {
 }
 
 /// 级联选择：触发框 + 展开时按路径逐级展示选项列（简化 AntD Cascader 面板）。
+#[derive(Clone)]
 pub struct Cascader {
     options: Vec<CascadeOption>,
     path: Vec<String>,

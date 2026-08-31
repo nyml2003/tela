@@ -1,10 +1,10 @@
-//! Versioned, portable projection of [`tela_contract::UiFrame`].
+//! Versioned, portable projection of Tela draw commands.
 
 use serde::{Deserialize, Serialize};
 use tela_contract::{
-    BorderRadius, BorderStroke, ClipRect, Color, ColorStop, DrawCommand, DrawPayload, Fill,
-    Gradient, GradientKind, Insets, Point, Rect, ShadowSpec, TextContent, TextureRef, UiFrame,
-    Viewport,
+    BorderRadius, BorderStroke, ClipRect, Color, ColorStop, DrawCommand, DrawCommandSource,
+    DrawPayload, Fill, Gradient, GradientKind, Insets, Point, Rect, RenderPlan, ShadowSpec,
+    TextContent, TextureRef, UiFrame, Viewport,
 };
 
 use crate::FrameCodecError;
@@ -24,20 +24,36 @@ pub struct WireFrame {
 }
 
 impl WireFrame {
-    /// Converts a resolved Tela frame into its portable projection.
-    pub fn from_ui_frame(frame: &UiFrame) -> Result<Self, FrameCodecError> {
+    /// Converts any ordered drawing source into the portable projection without requiring a
+    /// guest-side `UiFrame` flatten first.
+    pub fn from_draw_source<S: DrawCommandSource + ?Sized>(
+        source: &S,
+    ) -> Result<Self, FrameCodecError> {
+        let mut commands = Vec::with_capacity(source.command_count());
+        let mut failure = None;
+        source.visit_commands(&mut |command| {
+            if failure.is_none() {
+                match WireDrawCommand::from_command(command) {
+                    Ok(command) => commands.push(command),
+                    Err(error) => failure = Some(error),
+                }
+            }
+        });
+        if let Some(error) = failure {
+            return Err(error);
+        }
         Ok(Self {
-            viewport: frame.viewport.into(),
-            commands: frame
-                .commands
-                .iter()
-                .map(WireDrawCommand::from_command)
-                .collect::<Result<_, _>>()?,
+            viewport: source.viewport().into(),
+            commands,
         })
     }
 
-    /// Rebuilds a renderer-ready frame. Interaction-only fields intentionally remain empty.
-    pub fn into_ui_frame(self) -> UiFrame {
+    /// Rebuilds a renderer-ready plan. Interaction-only fields intentionally remain empty.
+    pub fn into_render_plan(self) -> RenderPlan {
+        RenderPlan::from_flat_frame(self.into_flat_frame())
+    }
+
+    fn into_flat_frame(self) -> UiFrame {
         UiFrame {
             viewport: self.viewport.into(),
             commands: self
@@ -58,8 +74,8 @@ impl WireFrame {
 }
 
 /// Encodes a resolved frame with a short magic/version header.
-pub fn encode_frame(frame: &UiFrame) -> Result<Vec<u8>, FrameCodecError> {
-    let wire = WireFrame::from_ui_frame(frame)?;
+pub fn encode_frame<S: DrawCommandSource + ?Sized>(frame: &S) -> Result<Vec<u8>, FrameCodecError> {
+    let wire = WireFrame::from_draw_source(frame)?;
     let payload =
         postcard::to_allocvec(&wire).map_err(|error| FrameCodecError::Encode(error.to_string()))?;
     let mut bytes = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
@@ -69,8 +85,11 @@ pub fn encode_frame(frame: &UiFrame) -> Result<Vec<u8>, FrameCodecError> {
     Ok(bytes)
 }
 
-/// Decodes a renderer-ready frame after validating the portable packet header.
-pub fn decode_frame(bytes: &[u8]) -> Result<UiFrame, FrameCodecError> {
+/// Decodes a portable renderer stream after validating its packet header.
+///
+/// A wire stream is necessarily flat at the process boundary, so the resulting plan has one
+/// transport fragment. In-process guest resolve remains tree-shaped.
+pub fn decode_render_plan(bytes: &[u8]) -> Result<RenderPlan, FrameCodecError> {
     if bytes.len() < FRAME_HEADER_LEN || bytes[..FRAME_MAGIC.len()] != FRAME_MAGIC {
         return Err(FrameCodecError::InvalidMagic);
     }
@@ -84,7 +103,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<UiFrame, FrameCodecError> {
     if !remaining.is_empty() {
         return Err(FrameCodecError::TrailingBytes);
     }
-    Ok(wire.into_ui_frame())
+    Ok(wire.into_render_plan())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -740,21 +759,21 @@ mod tests {
     #[test]
     fn round_trips_all_standard_payload_shapes_used_by_the_wire() {
         let frame = full_frame();
-        let decoded = decode_frame(&encode_frame(&frame).expect("encode")).expect("decode");
-        assert_eq!(decoded, frame);
+        let decoded = decode_render_plan(&encode_frame(&frame).expect("encode")).expect("decode");
+        assert_eq!(decoded.to_ui_frame(), frame);
     }
 
     #[test]
     fn rejects_invalid_or_newer_packets() {
         assert_eq!(
-            decode_frame(b"bad").unwrap_err(),
+            decode_render_plan(b"bad").unwrap_err(),
             FrameCodecError::InvalidMagic
         );
         let mut bytes = encode_frame(&full_frame()).expect("encode");
         let future_version = FRAME_VERSION + 1;
         bytes[4..6].copy_from_slice(&future_version.to_le_bytes());
         assert_eq!(
-            decode_frame(&bytes).unwrap_err(),
+            decode_render_plan(&bytes).unwrap_err(),
             FrameCodecError::UnsupportedVersion(future_version)
         );
     }

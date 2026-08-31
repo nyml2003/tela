@@ -1,14 +1,14 @@
 //! 渲染主流程：`render_frame`（见 007-绘制与渲染后端 7.3）。
 //!
-//! 1. 创建空白画布（尺寸 = `UiFrame.viewport` × dpi 取整）；
+//! 1. 创建空白画布（尺寸 = 绘制源的 viewport × dpi 取整）；
 //! 2. 遍历有序 `DrawCommand`（树序 = z 序，后画覆盖前）；
 //! 3. 单条指令按 `BackendCapabilities` 降级绘制；
 //! 4. 返回 RGBA8 一维像素缓冲。
 //!
-//! 渲染全程无随机/时钟/系统状态，同一 `UiFrame` 每次输出像素完全一致。
+//! 渲染全程无随机/时钟/系统状态，同一有序绘制源每次输出像素完全一致。
 
 use alloc::vec::Vec;
-use tela_contract::{DrawCommand, DrawPayload, Rect, UiFrame, snap};
+use tela_contract::{DrawCommand, DrawCommandSource, DrawPayload, Rect, snap};
 
 use crate::bitmap::BitmapRGBA8;
 use crate::config::RasterConfig;
@@ -17,15 +17,16 @@ use crate::image;
 use crate::shapes;
 use crate::text;
 
-/// 软件光栅唯一入口：`UiFrame` → RGBA8 位图。
-pub fn render_frame(frame: &UiFrame, cfg: &RasterConfig) -> BitmapRGBA8 {
+/// 软件光栅唯一入口：有序绘制源 → RGBA8 位图。
+pub fn render_frame<S: DrawCommandSource + ?Sized>(frame: &S, cfg: &RasterConfig) -> BitmapRGBA8 {
     let scale = if cfg.dpi_scale > 0.0 {
         cfg.dpi_scale
     } else {
         1.0
     };
-    let width = (frame.viewport.width * scale).round().max(0.0) as u32;
-    let height = (frame.viewport.height * scale).round().max(0.0) as u32;
+    let viewport = frame.viewport();
+    let width = (viewport.width * scale).round().max(0.0) as u32;
+    let height = (viewport.height * scale).round().max(0.0) as u32;
     let mut bitmap = BitmapRGBA8::new(width, height);
     fill_bitmap(&mut bitmap, cfg.background);
     let mut canvas = Canvas {
@@ -33,7 +34,7 @@ pub fn render_frame(frame: &UiFrame, cfg: &RasterConfig) -> BitmapRGBA8 {
         height,
         pixels: &mut bitmap.pixels,
     };
-    for command in &frame.commands {
+    frame.visit_commands(&mut |command| {
         let opacity = command.opacity.clamp(0.0, 1.0);
         if opacity >= 1.0 {
             render_command(&mut canvas, command, cfg, scale);
@@ -70,7 +71,7 @@ pub fn render_frame(frame: &UiFrame, cfg: &RasterConfig) -> BitmapRGBA8 {
                 destination.copy_from_slice(&blended);
             }
         }
-    }
+    });
     bitmap
 }
 

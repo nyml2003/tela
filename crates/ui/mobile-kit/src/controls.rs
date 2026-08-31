@@ -158,7 +158,7 @@ impl MobileIconButton {
     /// 创建由外层 Composition DSL 分配身份与动作的最小触控按钮。
     ///
     /// 与 [`Self::new`] 一样保留点击和焦点交互，但不预先占用一个全树 `SemanticKey`。
-    /// 适用于 `<ActionTarget>` 或 `<For>` 已经拥有该根节点身份的场景。
+    /// 适用于 `<For>` 或当前组件已经拥有该根节点身份的场景。
     pub fn unbound(content: UiNode) -> Self {
         Self {
             content,

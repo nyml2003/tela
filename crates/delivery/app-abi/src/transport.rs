@@ -3,9 +3,9 @@
 use std::{collections::VecDeque, rc::Rc};
 
 use tela_app_session::{AppFrameToken, RetainedTreeSnapshot};
-use tela_contract::{FrameDamage, SemanticKey, UiFrame};
+use tela_contract::{DrawCommandSource, FrameDamage, RenderPlan, SemanticKey, UiFrame};
 
-use crate::{FrameCodecError, decode_frame, decode_status, encode_frame, encode_status};
+use crate::{FrameCodecError, decode_render_plan, decode_status, encode_frame, encode_status};
 
 const TRANSPORT_MAGIC: [u8; 4] = *b"TLPT";
 const TRANSPORT_VERSION: u16 = 1;
@@ -21,7 +21,7 @@ pub enum FrameTransportPacket {
         /// Application provenance token carried with the frame.
         token: AppFrameToken,
         /// Complete renderer input.
-        frame: UiFrame,
+        frame: RenderPlan,
         /// Repaint region relative to an empty/new backing target.
         damage: FrameDamage,
         /// Empty by definition: a snapshot replaces the entire retained tree.
@@ -36,7 +36,7 @@ pub enum FrameTransportPacket {
         /// Application provenance token carried with the frame.
         token: AppFrameToken,
         /// Commands intersecting the supplied repaint region.
-        frame: UiFrame,
+        frame: RenderPlan,
         /// Repaint region to clear before drawing `frame`.
         damage: FrameDamage,
         /// Outermost retained tree coordinates replaced by this patch.
@@ -184,7 +184,7 @@ pub fn decode_transport_publication(bytes: &[u8]) -> Result<TransportPublication
         );
     }
     damage.flags |= flags;
-    let frame = decode_frame(&wire.frame)?;
+    let frame = decode_render_plan(&wire.frame)?;
     let packet = if wire.snapshot {
         if wire.base_seq.is_some() {
             return Err(FrameCodecError::Decode(
@@ -306,10 +306,10 @@ impl FrameTransportSender {
     }
 
     /// Produces the newest frame; intermediate unacknowledged states are never queued.
-    pub fn publish(
+    pub fn publish<S: DrawCommandSource + ?Sized>(
         &mut self,
         token: AppFrameToken,
-        frame: &UiFrame,
+        frame: &S,
         damage: &FrameDamage,
         spine: &[SemanticKey],
         retained_tree: Option<Rc<dyn RetainedTreeSnapshot>>,
@@ -340,13 +340,7 @@ impl FrameTransportSender {
                         spine_patch_is_compatible(base, candidate, spine)
                     })
         }) {
-            let mut patch = frame.clone();
-            patch.commands.retain(|command| {
-                damage
-                    .rects
-                    .iter()
-                    .any(|rect| intersects(command.paint_bounds(), *rect))
-            });
+            let patch = renderer_patch_plan(frame, damage);
             return FrameTransportPacket::Patch {
                 base_seq,
                 seq,
@@ -359,11 +353,56 @@ impl FrameTransportSender {
         FrameTransportPacket::Snapshot {
             seq,
             token,
-            frame: frame.clone(),
+            frame: renderer_plan(frame),
             damage: damage.clone(),
             spine: Vec::new(),
         }
     }
+}
+
+/// Removes guest-owned input metadata before a frame crosses the renderer transport boundary.
+///
+/// A guest-resolved plan includes drawing, hit testing and scroll-clamping projections because
+/// the kernel uses one candidate for all local work. The retained renderer transport is narrower:
+/// it owns only pixels and has no authority to interpret input. Keeping this explicit in the
+/// in-memory packet as well as `WireFrame` prevents a local receiver from accidentally treating
+/// a partial draw patch as a complete input table.
+fn renderer_plan<S: DrawCommandSource + ?Sized>(frame: &S) -> RenderPlan {
+    let mut commands = Vec::with_capacity(frame.command_count());
+    frame.visit_commands(&mut |command| commands.push(command.clone()));
+    RenderPlan::from_flat_frame(UiFrame {
+        viewport: frame.viewport(),
+        commands,
+        hit_regions: Vec::new(),
+        scroll_bounds: Vec::new(),
+    })
+}
+
+/// Produces a renderer-only draw list for an acknowledged-base damage patch.
+///
+/// A patch must retain the original command order, but it must not first clone every command and
+/// then discard most of them. The full guest resolve still owns hit testing and scroll metadata;
+/// the transport only copies commands which can repaint at least one declared damage rectangle.
+fn renderer_patch_plan<S: DrawCommandSource + ?Sized>(
+    frame: &S,
+    damage: &FrameDamage,
+) -> RenderPlan {
+    let mut commands = Vec::new();
+    frame.visit_commands(&mut |command| {
+        if damage
+            .rects
+            .iter()
+            .any(|rect| intersects(command.paint_bounds(), *rect))
+        {
+            commands.push(command.clone());
+        }
+    });
+    RenderPlan::from_flat_frame(UiFrame {
+        viewport: frame.viewport(),
+        commands,
+        hit_regions: Vec::new(),
+        scroll_bounds: Vec::new(),
+    })
 }
 
 /// A structural patch is valid only when every declared dirty coordinate is present in the
@@ -398,7 +437,7 @@ pub struct AppliedFrameTransport {
     /// Application provenance token carried by the packet.
     pub token: AppFrameToken,
     /// Full frame for snapshots, or commands limited to the retained patch damage.
-    pub frame: UiFrame,
+    pub frame: RenderPlan,
     /// Repaint region associated with `frame`.
     pub damage: FrameDamage,
     /// Replaced retained coordinates. Empty only for a complete snapshot.
@@ -457,7 +496,10 @@ mod tests {
     use std::{collections::BTreeMap, rc::Rc};
 
     use super::*;
-    use tela_contract::{Color, DrawCommand, DrawPayload, Rect, UiFrame, Viewport};
+    use tela_contract::{
+        Color, DrawCommand, DrawPayload, HitRegion, HitRole, NodeId, Rect, ScrollBounds, UiFrame,
+        Viewport,
+    };
 
     #[derive(Default)]
     struct TestTreeSnapshot(BTreeMap<SemanticKey, usize>);
@@ -523,11 +565,41 @@ mod tests {
     fn patch_uses_ack_base_and_sends_only_damage_commands() {
         let mut sender = FrameTransportSender::new(2);
         let token = AppFrameToken::new(1).unwrap();
-        let full = frame();
+        let mut full = frame();
+        full.hit_regions.push(HitRegion {
+            node_id: NodeId(7),
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 20.0,
+                h: 20.0,
+            },
+            clip: None,
+            role: HitRole::Client,
+        });
+        full.scroll_bounds.push(ScrollBounds {
+            node_id: NodeId(8),
+            key: SemanticKey::from("root/scroll"),
+            viewport: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 40.0,
+            },
+            content_width: 100.0,
+            content_height: 80.0,
+            max_offset_x: 0.0,
+            max_offset_y: 40.0,
+        });
         let damage = FrameDamage::full(full.viewport, tela_contract::DirtyFlags::ALL);
         let first = sender.publish(token, &full, &damage, &[], Some(tree([("root", 1)])));
         let seq = match first {
-            FrameTransportPacket::Snapshot { seq, .. } => seq,
+            FrameTransportPacket::Snapshot { seq, frame, .. } => {
+                let flat = frame.to_ui_frame();
+                assert!(flat.hit_regions.is_empty());
+                assert!(flat.scroll_bounds.is_empty());
+                seq
+            }
             _ => panic!(),
         };
         sender.acknowledge(seq);
@@ -552,7 +624,10 @@ mod tests {
                 base_seq, frame, ..
             } => {
                 assert_eq!(base_seq, seq);
-                assert_eq!(frame.commands.len(), 1);
+                assert_eq!(frame.command_count(), 1);
+                let flat = frame.to_ui_frame();
+                assert!(flat.hit_regions.is_empty());
+                assert!(flat.scroll_bounds.is_empty());
             }
             _ => panic!(),
         }
@@ -640,7 +715,7 @@ mod tests {
             base_seq: 9,
             seq: 10,
             token: AppFrameToken::new(10).expect("non-zero token"),
-            frame: frame(),
+            frame: RenderPlan::from_flat_frame(frame()),
             damage: FrameDamage::full(
                 Viewport {
                     width: 100.0,
@@ -664,7 +739,7 @@ mod tests {
                 base_seq: 2,
                 seq: 3,
                 token,
-                frame: frame(),
+                frame: RenderPlan::from_flat_frame(frame()),
                 damage: FrameDamage::full(
                     Viewport {
                         width: 100.0,

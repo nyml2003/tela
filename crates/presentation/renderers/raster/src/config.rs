@@ -7,7 +7,7 @@ use crate::bitmap::BitmapRGBA8;
 
 /// 光栅配置。
 ///
-/// 逻辑画布尺寸取自 `UiFrame.viewport`，不再由配置重复传入（消除人为配错）。
+/// 逻辑画布尺寸取自 `DrawCommandSource::viewport`，不再由配置重复传入（消除人为配错）。
 #[derive(Clone)]
 pub struct RasterConfig {
     /// 统一缩放系数（dpi 换算，对齐 wgpu/canvas）。

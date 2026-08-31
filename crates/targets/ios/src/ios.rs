@@ -5,7 +5,7 @@ use std::{cell::OnceCell, sync::Arc};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, sel};
 use objc2_foundation::{MainThreadMarker, NSObject, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CACurrentMediaTime, CADisplayLink};
-use tela_contract::{Color, UiFrame};
+use tela_contract::{Color, RenderPlan};
 use tela_render_wgpu::WgpuRenderer;
 use winit::{
     application::ApplicationHandler,
@@ -482,7 +482,7 @@ impl GpuSession {
         self.surface.configure(self.renderer.device(), &self.config);
     }
 
-    fn render(&mut self, frame: &UiFrame) -> RenderOutcome {
+    fn render(&mut self, frame: &RenderPlan) -> RenderOutcome {
         let (texture, suboptimal) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),

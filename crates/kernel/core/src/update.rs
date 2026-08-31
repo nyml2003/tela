@@ -16,8 +16,8 @@ use crate::layout::{ChildMeasurer, DefaultLayoutEngine};
 /// Dirty 布局缓存（宿主跨帧持有，见 004-7 布局缓存）。
 #[derive(Clone, Default)]
 pub struct LayoutCache {
-    /// Layout memory is indexed by the immutable node allocation, never by a reconstructed
-    /// content fingerprint. The weak reference prevents old candidate trees from being retained
+    /// Layout memory is indexed by the immutable node allocation, never by reconstructed node
+    /// content. The weak reference prevents old candidate trees from being retained
     /// solely by a cache entry and makes address reuse harmless.
     entries: HashMap<usize, CachedLayout>,
     /// 累计实际进入测量器的缓存节点数，供回归测试观测。
@@ -166,8 +166,8 @@ pub(crate) fn measure_dirty_shared<M: TextMeasurer + ?Sized>(
     Ok(box_)
 }
 
-/// `Full` remains an explicit escape hatch. It is a structural property, not a content
-/// fingerprint: a cached parent must not hide a descendant that requested full measurement.
+/// `Full` remains an explicit escape hatch. It is a structural property, not a content-derived
+/// cache key: a cached parent must not hide a descendant that requested full measurement.
 fn contains_full_override(node: &Rc<UiNode>) -> bool {
     node.identity
         .as_ref()

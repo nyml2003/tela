@@ -26,6 +26,7 @@ pub enum DialogActionKind {
 }
 
 /// 对话框底部一个由应用处理的动作。
+#[derive(Clone)]
 pub struct DialogAction {
     label: String,
     action_key: SemanticKey,
@@ -88,6 +89,7 @@ impl Default for DialogStyle {
 }
 
 /// 一次显式挂入当前页面 Stack 的 modal 对话框。
+#[derive(Clone)]
 pub struct Dialog {
     id: String,
     title: String,

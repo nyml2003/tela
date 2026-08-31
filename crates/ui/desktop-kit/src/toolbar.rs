@@ -241,6 +241,7 @@ impl ToolbarOverflow {
 }
 
 /// 一行命令项与可选溢出入口。
+#[derive(Clone)]
 pub struct Toolbar {
     items: Vec<ToolbarItem>,
     overflow: Option<ToolbarOverflow>,
@@ -302,9 +303,9 @@ impl Toolbar {
 
     /// 生成本帧节点树。
     ///
-    /// Toolbar 的项目可由选择、权限或窗口宽度条件增删，因此它只在集合边界声明 core 的
-    /// `AutoStableIdentity` 策略。每个命令的稳定语义 key 由 `ToolbarItem` 自身携带，
-    /// FrameCoordinator 在当前帧把该 key 解析为组件事件路由。
+    /// Toolbar 的项目可由选择、权限或窗口宽度条件增删。每个命令的稳定语义 key 由
+    /// `ToolbarItem` 自身携带；集合容器只使用普通结构路径，FrameCoordinator 在当前帧
+    /// 把命令 key 解析为组件事件路由。
     pub fn into_node(self, icons: &dyn IconProvider) -> UiNode {
         let mut children: Vec<UiNode> = self
             .items
@@ -333,10 +334,6 @@ impl Toolbar {
             ));
         }
         LayoutContainer::row(children)
-            .identity(IdentityConcern {
-                key_strategy: KeyStrategy::AutoStableIdentity,
-                ..IdentityConcern::default()
-            })
             .layout(LayoutConcern {
                 width: Some(Size::percent(1.0)),
                 height: Some(Size::fixed(self.style.height)),
@@ -372,7 +369,7 @@ mod tests {
         BorderRadius, Color, IconName, IconOpticalMetrics, IconProvider, IconRequest,
         IconResolveError, IconVisual, SemanticKey, TextContent, TextStyleRef,
     };
-    use tela_core::{IdentityAllocator, Primitive, UiTree};
+    use tela_core::{Primitive, UiTree};
 
     struct TestIcons;
 
@@ -475,25 +472,22 @@ mod tests {
 
     #[test]
     fn conditional_items_keep_core_identity_without_page_keys() {
-        let mut allocator = IdentityAllocator::new();
-        let first = UiTree::new_with_allocator(
+        let first = UiTree::new(
             Toolbar::new()
                 .item(ToolbarItem::new("新建", "command.new-folder"))
                 .item(ToolbarItem::new("重命名", "command.rename"))
                 .item(ToolbarItem::new("列表", "command.toggle-view"))
                 .into_node(&TestIcons),
-            &mut allocator,
         )
         .expect("Toolbar 应构成合法树");
         let rename_key = key_for_action(&first, "command.rename");
         let view_key = key_for_action(&first, "command.toggle-view");
 
-        let second = UiTree::new_with_allocator(
+        let second = UiTree::new(
             Toolbar::new()
                 .item(ToolbarItem::new("新建", "command.new-folder"))
                 .item(ToolbarItem::new("列表", "command.toggle-view"))
                 .into_node(&TestIcons),
-            &mut allocator,
         )
         .expect("条件收缩后的 Toolbar 应构成合法树");
 
@@ -504,7 +498,7 @@ mod tests {
         assert_eq!(
             key_for_action(&second, "command.toggle-view"),
             view_key,
-            "同一命令移动后仍由 core 保持其身份"
+            "同一命令移动后仍由显式语义 key 保持其身份"
         );
     }
 

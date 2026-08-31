@@ -6,7 +6,7 @@
 use std::cell::{Cell, RefCell};
 
 use tela_app_abi::{
-    AppDispatchOutcome, AppEvent, AppFrameToken, AppPublication, ApplicationSession,
+    AppDispatchOutcome, AppEffect, AppEvent, AppFrameToken, AppPublication, ApplicationSession,
 };
 use tela_app_runtime::Application;
 use tela_bridge::{BridgeResult, GuestBridge};
@@ -46,6 +46,7 @@ tela_app_abi::export_guest! {
     publish = publish_app;
     presented = on_presented;
     rejected = on_rejected;
+    effects = take_presented_effects;
 }
 
 fn with_app<T>(f: impl FnOnce(&mut DemoApplication) -> T) -> T {
@@ -112,6 +113,10 @@ fn on_presented(
 ) -> Result<AppDispatchOutcome, String> {
     PENDING.with(|slot| slot.set(None));
     ApplicationSession::presented(app, token).map_err(|error| error.to_string())
+}
+
+fn take_presented_effects(app: &mut DemoApplication) -> Vec<AppEffect> {
+    ApplicationSession::take_presented_effects(app)
 }
 
 fn on_rejected(app: &mut DemoApplication, token: AppFrameToken) {

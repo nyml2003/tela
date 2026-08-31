@@ -2323,22 +2323,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
 
 [[package]]
-name = "tela-agent-demo"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tela-app-runtime",
- "tela-app-session",
- "tela-contract",
- "tela-core",
- "tela-icon-resources",
- "tela-text-resources",
- "tela-ui-dsl",
- "tela-ui-foundation",
-]
-
-[[package]]
 name = "tela-app-abi"
 version = "0.1.0"
 dependencies = [
@@ -2418,22 +2402,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tela-cc-remote"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tela-cc-protocol",
- "tela-contract",
- "tela-core",
- "tela-icon-resources",
- "tela-mobile-ui-kit",
- "tela-render-raster",
- "tela-text-resources",
- "tela-ui-dsl",
- "tela-ui-foundation",
-]
-
-[[package]]
 name = "tela-contract"
 version = "0.1.0"
 
@@ -2442,23 +2410,6 @@ name = "tela-core"
 version = "0.1.0"
 dependencies = [
  "tela-contract",
-]
-
-[[package]]
-name = "tela-desktop-demo"
-version = "0.1.0"
-dependencies = [
- "tela-app-runtime",
- "tela-app-session",
- "tela-contract",
- "tela-core",
- "tela-desktop-ui-dsl",
- "tela-desktop-ui-kit",
- "tela-icon-resources",
- "tela-render-raster",
- "tela-text-resources",
- "tela-ui-dsl",
- "tela-ui-foundation",
 ]
 
 [[package]]
@@ -2521,125 +2472,12 @@ name = "tela-log"
 version = "0.1.0"
 
 [[package]]
-name = "tela-mobile-demo"
-version = "0.1.0"
-dependencies = [
- "tela-contract",
- "tela-core",
- "tela-icon-resources",
- "tela-mobile-ui-kit",
- "tela-render-raster",
- "tela-text-resources",
- "tela-ui-dsl",
- "tela-ui-foundation",
-]
-
-[[package]]
 name = "tela-mobile-ui-kit"
 version = "0.1.0"
 dependencies = [
  "tela-contract",
  "tela-core",
  "tela-ui-foundation",
-]
-
-[[package]]
-name = "tela-product-agent-demo"
-version = "0.1.0"
-dependencies = [
- "tela-agent-demo",
- "tela-app-abi",
- "tela-contract",
- "tela-icon-resources",
- "tela-target-webview",
- "tela-text-resources",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "tela-product-cc-guest"
-version = "0.1.0"
-dependencies = [
- "tela-app-abi",
- "tela-bridge",
- "tela-cc-protocol",
- "tela-cc-remote",
- "tela-contract",
- "tela-icon-resources",
- "tela-text-resources",
-]
-
-[[package]]
-name = "tela-product-desktop-guest"
-version = "0.1.0"
-dependencies = [
- "tela-app-abi",
- "tela-app-runtime",
- "tela-app-session",
- "tela-bridge",
- "tela-contract",
- "tela-desktop-demo",
- "tela-icon-resources",
- "tela-text-resources",
-]
-
-[[package]]
-name = "tela-product-ios"
-version = "0.1.0"
-dependencies = [
- "tela-contract",
- "tela-icon-resources",
- "tela-mobile-demo",
- "tela-target-ios",
- "tela-text-resources",
-]
-
-[[package]]
-name = "tela-product-mobile-guest"
-version = "0.1.0"
-dependencies = [
- "tela-app-abi",
- "tela-contract",
- "tela-icon-resources",
- "tela-mobile-demo",
- "tela-text-resources",
-]
-
-[[package]]
-name = "tela-product-speed-gear"
-version = "0.1.0"
-dependencies = [
- "tela-app-runtime",
- "tela-contract",
- "tela-icon-resources",
- "tela-speed-gear",
- "tela-target-win32",
- "tela-text-resources",
-]
-
-[[package]]
-name = "tela-product-win32-agent"
-version = "0.1.0"
-dependencies = [
- "tela-agent-demo",
- "tela-contract",
- "tela-icon-resources",
- "tela-target-win32",
- "tela-text-resources",
-]
-
-[[package]]
-name = "tela-product-win32-editor"
-version = "0.1.0"
-dependencies = [
- "tela-app-runtime",
- "tela-contract",
- "tela-desktop-runtime",
- "tela-icon-resources",
- "tela-target-win32",
- "tela-text-resources",
- "tela-utils",
- "tela-win32-editor",
 ]
 
 [[package]]
@@ -2679,36 +2517,6 @@ version = "0.1.0"
 dependencies = [
  "tela-contract",
 ]
-
-[[package]]
-name = "tela-speed-gear"
-version = "0.1.0"
-dependencies = [
- "tela-app-runtime",
- "tela-app-session",
- "tela-contract",
- "tela-core",
- "tela-desktop-ui-dsl",
- "tela-desktop-ui-kit",
- "tela-icon-resources",
- "tela-speed-gear-protocol",
- "tela-text-resources",
- "tela-ui-dsl",
- "tela-ui-foundation",
- "windows",
-]
-
-[[package]]
-name = "tela-speed-gear-hook"
-version = "0.1.0"
-dependencies = [
- "tela-speed-gear-protocol",
- "windows",
-]
-
-[[package]]
-name = "tela-speed-gear-protocol"
-version = "0.1.0"
 
 [[package]]
 name = "tela-target-android"
@@ -2840,21 +2648,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "tela-win32-editor"
-version = "0.1.0"
-dependencies = [
- "tela-app-runtime",
- "tela-app-session",
- "tela-bridge",
- "tela-contract",
- "tela-core",
- "tela-icon-resources",
- "tela-text-resources",
- "tela-ui-dsl",
- "tela-ui-foundation",
 ]
 
 [[package]]

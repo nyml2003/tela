@@ -12,8 +12,8 @@ use tela_contract::{
 };
 use tela_core::builder::{LayoutContainer, LogicalContainer, Primitive};
 use tela_core::{
-    DefaultApplicationProfile, UiTree, ViewStateStore, ensure_modal_focus, handle_kernel_input,
-    restore_focus, save_focus,
+    DefaultApplicationProfile, FocusSlot, UiTree, ViewStateStore, ensure_modal_focus,
+    handle_kernel_input, restore_focus, save_focus,
 };
 
 const VIEWPORT: Viewport = Viewport {
@@ -37,6 +37,7 @@ impl TextMeasurer for MockMeasurer {
 fn frame(tree: &UiTree) -> tela_contract::UiFrame {
     tree.resolve(VIEWPORT, &MockMeasurer, &HashMap::new())
         .unwrap()
+        .to_ui_frame()
 }
 
 fn rect(width: f32, height: f32) -> tela_contract::UiNode {
@@ -582,8 +583,64 @@ fn keyboard_intent_activates_shortcut() {
         &key(KeyboardIntent::Invoke(ShortcutId::Save)),
     );
     assert!(actions.iter().any(
-        |action| matches!(action, KernelInteraction::ShortcutActivated { shortcut_id } if *shortcut_id == ShortcutId::Save)
+        |action| matches!(action, KernelInteraction::ShortcutActivated { origin_node_id, shortcut_id } if *origin_node_id == tree.node_ids()[0] && *shortcut_id == ShortcutId::Save)
     ));
+}
+
+#[test]
+fn shortcut_origin_prefers_the_current_focus_then_the_active_modal() {
+    let modal_key = SemanticKey("modal".to_owned());
+    let tree = UiTree::new(
+        LogicalContainer::modal_host().children([
+            focusable_item("background", 50.0, 20.0),
+            LogicalContainer::group()
+                .identity(IdentityConcern {
+                    semantic_key: Some(modal_key.clone()),
+                    ..IdentityConcern::default()
+                })
+                .children([focusable_item("modal-child", 50.0, 20.0)])
+                .into_node(),
+        ]),
+    )
+    .unwrap();
+    let frame = frame(&tree);
+    let background = tree
+        .focusable_nodes()
+        .into_iter()
+        .find(|(key, _)| key == &SemanticKey("background".to_owned()))
+        .expect("background focusable node");
+    let modal_node = tree
+        .node_id_for_key(&modal_key)
+        .expect("modal semantic key");
+    let mut state = ViewStateStore::new();
+    state.set_current_focus(FocusSlot {
+        node_id: Some(background.1),
+        key: Some(background.0),
+    });
+
+    let focused_actions = handle_kernel_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::Invoke(ShortcutId::Save)),
+    );
+    assert!(focused_actions.iter().any(
+        |action| matches!(action, KernelInteraction::ShortcutActivated { origin_node_id, .. } if *origin_node_id == background.1)
+    ));
+
+    state.push_modal(modal_key);
+    let modal_actions = handle_kernel_input(
+        &tree,
+        &frame,
+        &mut state,
+        &key(KeyboardIntent::Invoke(ShortcutId::Save)),
+    );
+    assert!(
+        modal_actions.iter().any(
+            |action| matches!(action, KernelInteraction::ShortcutActivated { origin_node_id, .. } if *origin_node_id == modal_node)
+        ),
+        "an open modal must not let a background focus origin route its shortcut"
+    );
 }
 
 #[test]

@@ -20,6 +20,6 @@ pub use remote_bundle::{
     MAX_ARCHIVE_BYTES, RemoteBundle, RemoteBundleMetrics, load_remote_bundle, resolve_bundle_url,
     validate_bundle_archive,
 };
-pub use runtime::{GuestRuntime, GuestRuntimeError, GuestRuntimeMetrics};
+pub use runtime::{GuestPresentationAck, GuestRuntime, GuestRuntimeError, GuestRuntimeMetrics};
 pub use session::GuestSession;
 pub use verify::{BundleVerification, verify_bundle};

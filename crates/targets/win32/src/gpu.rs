@@ -9,7 +9,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle, RawWindowHandle,
     Win32WindowHandle,
 };
-use tela_contract::{FrameDamage, UiFrame};
+use tela_contract::{FrameDamage, RenderPlan};
 use tela_render_wgpu::{WgpuRenderer, renderer::RetainedFrameTarget};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -276,7 +276,7 @@ impl GpuSession {
     /// Acquires the next texture, renders the frame, and presents.
     pub fn render(
         &mut self,
-        frame: &UiFrame,
+        frame: &RenderPlan,
         damage: &FrameDamage,
     ) -> Result<RenderOutcome, String> {
         let (texture, suboptimal) = match self.surface.get_current_texture() {

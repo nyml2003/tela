@@ -9,6 +9,7 @@ use crate::Text;
 ///
 /// 它不重复 Button 的调色板、禁用或焦点逻辑：状态与配色直接使用 foundation 的类型，
 /// 最终仍由一个 Button 根节点承载交互和 core 默认身份。
+#[derive(Clone)]
 pub struct IconButton {
     icon: IconName,
     label: Option<String>,

@@ -1,10 +1,7 @@
 //! Procedural macros for Tela's application-composition DSL.
 //!
-//! 033 定稿：DSL 只有一个概念——组件。宏只做属性搬运工（零校验、零白名单）：
-//! 收集标签属性 → `Props` 字面量 → `render` 调用；保留的 `output={function_path}`
-//! 属性把类型化组件 Output 静态映射为应用动作。控制流语法（Fragment/For/
-//! VirtualList）保留宏级；`@provide/@inject/@watch` 指令已删除（迁移为
-//! `#[derive(DslComponent)]` 字段属性）。
+//! DSL 只负责把标签、普通属性和显式 `@output` 连接搬运到组件的统一装配入口。
+//! 它不按标签名、节点类型或叶子性推断能力；`For`、`Show` 等结构也是普通注册组件。
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -12,9 +9,9 @@
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::{
-    Error, Expr, Ident, Result, Token, braced,
+    Error, Expr, ExprLit, Ident, Lit, LitStr, Result, Token, braced,
     parse::{Parse, ParseStream},
     parse_macro_input,
 };
@@ -24,8 +21,11 @@ mod derive;
 /// Expands Tela's explicit application-composition syntax.
 ///
 /// The public spelling is `ui!(build { ... })`.
-/// 派生 `DslComponent`：struct 字段即 Props，生成 Props 镜像与 render 脚手架。
-#[proc_macro_derive(DslComponent, attributes(prop, inject, provide, watch))]
+/// 派生 `DslComponent`：struct 字段即 Props，生成 Props 镜像与 assemble 脚手架。
+/// `#[bind(paint = function_path)]` 和 `#[bind(layout = function_path)]` 声明从一个
+/// `Signal<T>` 到该组件输出根呈现字段的静态边；它们生成现有 `StaticBindingTable` 的
+/// 样板，不扫描 view 函数或自动订阅任意读取。
+#[proc_macro_derive(DslComponent, attributes(prop, inject, provide, watch, bind))]
 pub fn dsl_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
     match derive::expand_derive(input) {
@@ -36,8 +36,7 @@ pub fn dsl_component(input: TokenStream) -> TokenStream {
 
 /// Expands Tela's application-composition DSL.
 ///
-/// 公开拼写 `ui!(build { ... })`。标签统一降级为 `DslComponent::render` 调用；
-/// `Fragment`/`For`/`VirtualList`/`ActionTarget` 保留宏级（控制流/动作绑定语法）。
+/// 公开拼写 `ui!(build { ... })`。标签统一装配为 `UiSpec::assemble` 调用。
 #[proc_macro]
 pub fn ui(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as UiInput);
@@ -50,25 +49,6 @@ pub fn ui(input: TokenStream) -> TokenStream {
 struct UiInput {
     build: Ident,
     items: Vec<Item>,
-}
-
-/// 为同一真实 parent body 内透明 `<For>` 声明分配固定 namespace。
-#[derive(Default)]
-struct CollectionScopes {
-    next: u64,
-}
-
-impl CollectionScopes {
-    fn allocate(&mut self, span: Span) -> Result<u32> {
-        let scope = u32::try_from(self.next).map_err(|_| {
-            Error::new(
-                span,
-                "too many <For> or <VirtualList> declarations in one DSL body",
-            )
-        })?;
-        self.next += 1;
-        Ok(scope)
-    }
 }
 
 impl Parse for UiInput {
@@ -105,14 +85,24 @@ enum Item {
 struct Attribute {
     name: Ident,
     value: Expr,
+    output: bool,
 }
 
 struct Element {
     name: Ident,
     attributes: Vec<Attribute>,
     children: Vec<Item>,
-    repeat_binding: Option<Ident>,
     self_closing: bool,
+}
+
+/// A direct `<Fragment slot={"name"}>...</Fragment>` child of an arbitrary component.
+///
+/// This is generic `ui!` structure syntax, not a component-name hook: the receiving component
+/// decides whether to consume the slot through `Children::build_named`. The literal name is part
+/// of that component invocation's static template contract.
+struct NamedSlotFragment<'a> {
+    name: LitStr,
+    children: &'a [Item],
 }
 
 fn parse_items(input: ParseStream<'_>, closing: Option<&str>) -> Result<Vec<Item>> {
@@ -193,59 +183,21 @@ fn parse_element(input: ParseStream<'_>) -> Result<Element> {
         false
     };
 
-    let tag_name = name.to_string();
     if self_closing {
-        if matches!(tag_name.as_str(), "For" | "VirtualList") {
-            return Err(Error::new(
-                name.span(),
-                format!("<{tag_name}> requires a {{|item| ...}} body"),
-            ));
-        }
         return Ok(Element {
             name,
             attributes,
             children: Vec::new(),
-            repeat_binding: None,
             self_closing,
         });
     }
 
-    if matches!(tag_name.as_str(), "For" | "VirtualList") {
-        let closure;
-        braced!(closure in input);
-        closure.parse::<Token![|]>().map_err(|_| {
-            Error::new(
-                closure.span(),
-                format!("<{tag_name}> body must begin with |item|"),
-            )
-        })?;
-        let binding = closure.parse::<Ident>()?;
-        closure.parse::<Token![|]>().map_err(|_| {
-            Error::new(closure.span(), format!("<{tag_name}> body must use |item|"))
-        })?;
-        let children = parse_items(&closure, None)?;
-        let closing = parse_closing_tag(input)?;
-        if closing != tag_name {
-            return Err(Error::new(
-                name.span(),
-                format!("expected </{tag_name}>, found </{closing}>"),
-            ));
-        }
-        return Ok(Element {
-            name,
-            attributes,
-            children,
-            repeat_binding: Some(binding),
-            self_closing,
-        });
-    }
-
+    let tag_name = name.to_string();
     let children = parse_items(input, Some(&tag_name))?;
     Ok(Element {
         name,
         attributes,
         children,
-        repeat_binding: None,
         self_closing,
     })
 }
@@ -253,7 +205,19 @@ fn parse_element(input: ParseStream<'_>) -> Result<Element> {
 fn parse_attributes(input: ParseStream<'_>) -> Result<Vec<Attribute>> {
     let mut attributes = Vec::new();
     while !input.peek(Token![>]) && !input.peek(Token![/]) {
+        let output = if input.peek(Token![@]) {
+            input.parse::<Token![@]>()?;
+            true
+        } else {
+            false
+        };
         let name = input.parse::<Ident>()?;
+        if output && name != "output" {
+            return Err(Error::new(
+                name.span(),
+                "the only @ attribute is @output={function_path}",
+            ));
+        }
         input.parse::<Token![=]>().map_err(|_| {
             Error::new(
                 name.span(),
@@ -266,17 +230,20 @@ fn parse_attributes(input: ParseStream<'_>) -> Result<Vec<Attribute>> {
         if !content.is_empty() {
             return Err(content.error("a DSL attribute must contain one Rust expression"));
         }
-        attributes.push(Attribute { name, value });
+        attributes.push(Attribute {
+            name,
+            value,
+            output,
+        });
     }
     Ok(attributes)
 }
 
 fn expand(input: UiInput) -> Result<TokenStream2> {
     let dsl = dsl_path();
-    let mut scopes = CollectionScopes::default();
-    let body = generate_body(&input.items, &input.build, &dsl, &mut scopes)?;
+    let body = generate_body(&input.items, &input.build, &dsl)?;
     let build = input.build;
-    let site = site(&dsl);
+    let site = site(&dsl, Span::call_site());
     Ok(quote! {{
         let __tela_dsl_body = #body?;
         #build.finish(__tela_dsl_body, #site)
@@ -294,19 +261,23 @@ pub(crate) fn dsl_path() -> TokenStream2 {
     }
 }
 
-fn site(dsl: &TokenStream2) -> TokenStream2 {
-    quote!(#dsl::ViewSite::new(file!(), line!(), column!()))
+fn site(dsl: &TokenStream2, span: Span) -> TokenStream2 {
+    // The built-in location macros inherit this span, so every tag gets its own stable lexical
+    // coordinate even when several tags live inside one `ui!` invocation.  Identity must never
+    // fall back to the outer macro call site: same-type sibling components would otherwise share
+    // State and a transparent `For` namespace.
+    quote_spanned!(span=> #dsl::ViewSite::new(file!(), line!(), column!()))
 }
 
-fn generate_body(
-    items: &[Item],
-    build: &Ident,
-    dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
-) -> Result<TokenStream2> {
+fn generate_body(items: &[Item], build: &Ident, dsl: &TokenStream2) -> Result<TokenStream2> {
+    let items = items.iter().collect::<Vec<_>>();
+    generate_body_refs(&items, build, dsl)
+}
+
+fn generate_body_refs(items: &[&Item], build: &Ident, dsl: &TokenStream2) -> Result<TokenStream2> {
     let mut children = Vec::new();
     for item in items {
-        children.push(generate_child(item, build, dsl, scopes)?);
+        children.push(generate_child(item, build, dsl)?);
     }
     Ok(quote! {{
         let __tela_dsl_children = vec![#(#children?),*];
@@ -314,40 +285,27 @@ fn generate_body(
     }})
 }
 
-fn generate_child(
-    item: &Item,
-    build: &Ident,
-    dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
-) -> Result<TokenStream2> {
+fn generate_child(item: &Item, build: &Ident, dsl: &TokenStream2) -> Result<TokenStream2> {
     match item {
-        Item::Element(element) => generate_element(element, build, dsl, scopes),
+        Item::Element(element) => generate_element(element, build, dsl),
         Item::Expr(expression) => Ok(quote! {{
             #dsl::into_view_child(#expression)
         }}),
     }
 }
 
-fn generate_element(
-    element: &Element,
-    build: &Ident,
-    dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
-) -> Result<TokenStream2> {
+fn generate_element(element: &Element, build: &Ident, dsl: &TokenStream2) -> Result<TokenStream2> {
     match element.name.to_string().as_str() {
-        // 控制流/动作绑定语法（非 UI 元素，保留宏级）。
-        "Fragment" => generate_fragment(element, build, dsl, scopes),
-        "For" => generate_for(element, false, build, dsl, scopes),
-        "VirtualList" => generate_for(element, true, build, dsl, scopes),
-        // ActionTarget 的动作类型依赖调用点的 A（Props 无法脱离 A 构造），
-        // 保留宏内建（033 C1 修订：ActionTarget 不组件化）。
-        "ActionTarget" => generate_action_target(element, build, dsl, scopes),
-        // 其余标签全部是组件：原样保留标识符，由编译器校验类型/契约。
-        _ => generate_component(element, build, dsl, scopes),
+        // `Fragment` is the only syntax-level transparent grouping form. `For`, `Show` and
+        // every interactive surface assembles through the ordinary component path below.
+        "Fragment" => generate_fragment(element, build, dsl),
+        // Every other tag is a component. The macro never treats leaves, collection names, or
+        // application actions as privileged syntax.
+        _ => generate_component(element, build, dsl),
     }
 }
 
-/// 组件解析：收集标签属性 → `Props` 字面量 → `render` 调用。
+/// 组件解析：收集标签属性 → `Props` 字面量 → `assemble` 调用。
 ///
 /// Props 从 `Default::default()` 起步、逐个覆盖提供的字段（字段均 `pub`）。
 /// 类型位置使用 qualified path（稳定），避免关联类型字面量的实验特性与
@@ -356,22 +314,15 @@ fn generate_component(
     element: &Element,
     build: &Ident,
     dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
 ) -> Result<TokenStream2> {
     let tag = &element.name;
-    if element.repeat_binding.is_some() {
-        return Err(Error::new(
-            element.name.span(),
-            "component tags do not take a |item| body",
-        ));
-    }
-    let mut child_scopes = CollectionScopes::default();
-    let body = generate_body(&element.children, build, dsl, &mut child_scopes)?;
-    let _ = scopes;
+    let component_site = site(dsl, tag.span());
+    let (default_children, named_children) = partition_component_children(&element.children)?;
+    let body = generate_body_refs(&default_children, build, dsl)?;
     let mut output_attributes = element
         .attributes
         .iter()
-        .filter(|attribute| attribute.name == "output");
+        .filter(|attribute| attribute.output);
     let output = output_attributes.next();
     if let Some(duplicate) = output_attributes.next() {
         return Err(Error::new(
@@ -390,64 +341,161 @@ fn generate_component(
     let assignments = element
         .attributes
         .iter()
-        .filter(|attribute| attribute.name != "output")
+        .filter(|attribute| !attribute.output)
         .map(|attribute| {
             let name = &attribute.name;
             let value = &attribute.value;
-            // 属性值统一 `Some((expr).into())`：Props 字段约定为 Option<T>，
-            // 字符串字面量（&str）经 Into<String> 转换。
-            quote!(__tela_dsl_props.#name = Some((#value).into());)
+            // 属性统一交给 Props 字段的槽位解释：普通 `Option<T>` 走 `Into<T>`，带有
+            // 精确函数签名的结构组件槽位则自行限制输入。宏不按组件类型分支。
+            quote!(__tela_dsl_props.#name.assign(#value);)
         });
-    // 无 child 内容的组件元素不创建闭包；有内容的 children 会在首次 render 后
-    // 物化为 retained 槽位快照，而不是跨帧保留此 FnOnce。
-    let children_expr = if element.children.is_empty() {
-        quote!(#dsl::Children::empty())
+    // Named fragments are split before the component is assembled. Every slot remains a
+    // FnOnce until its receiving component explicitly consumes it; the macro never traverses a
+    // completed child tree or infers which component capability a slot represents.
+    let named_slot_builders = named_children
+        .iter()
+        .map(|slot| {
+            let name = &slot.name;
+            let body = generate_body(slot.children, build, dsl)?;
+            Ok(quote! {
+                #dsl::NamedSlot::new(#dsl::SlotName::new(#name), |#build| {
+                    let _ = &mut *#build;
+                    #body
+                })
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // No named slot keeps the old compact construction path. Otherwise a default closure exists
+    // only when there are direct, unlabelled children; this preserves `Children::is_empty()` for
+    // structural components that reject all child slots.
+    let children_expr = if named_slot_builders.is_empty() {
+        if default_children.is_empty() {
+            quote!(#dsl::Children::empty())
+        } else {
+            quote!(#dsl::Children::new(|#build| {
+                let _ = &mut *#build;
+                #body
+            }))
+        }
+    } else if default_children.is_empty() {
+        quote!(#dsl::Children::with_named_slots(vec![#(#named_slot_builders),*])?)
     } else {
-        quote!(#dsl::Children::new(|#build| {
-            let _ = &mut *#build;
-            #body
-        }))
+        quote!(#dsl::Children::with_default_and_named_slots(
+            |#build| {
+                let _ = &mut *#build;
+                #body
+            },
+            vec![#(#named_slot_builders),*],
+        )?)
     };
-    let render = if let Some(attribute) = output {
+    let assembly = if let Some(attribute) = output {
         let output = &attribute.value;
         quote! {
             {
-                let __tela_dsl_output: fn(<#tag as #dsl::DslComponent>::Output) -> _ = #output;
-                #dsl::render_component_with_output::<#tag, _>(
-                    build,
+                let __tela_dsl_output = #dsl::component_output_mapper::<#tag, _, _>(
+                    #build,
+                    #output,
+                );
+                #dsl::assemble_component_with_output::<#tag, _, _>(
+                    #build,
                     __tela_dsl_props,
                     #children_expr,
                     __tela_dsl_output,
-                    #dsl::ViewSite::new(file!(), line!(), column!())
+                    stringify!(#output),
+                    #component_site
                 )
             }
         }
     } else {
         quote! {
-            #dsl::render_component::<#tag, _>(
-                build,
+            #dsl::assemble_component::<#tag, _>(
+                #build,
                 __tela_dsl_props,
                 #children_expr,
-                #dsl::ViewSite::new(file!(), line!(), column!())
+                #component_site
             )
         }
     };
     Ok(quote! {{
-        let mut __tela_dsl_props: <#tag as #dsl::DslComponent>::Props =
-            Default::default();
+        use #dsl::DslPropSlot as _;
+        let mut __tela_dsl_props = #dsl::default_component_props::<#tag, _>(#build);
         #(#assignments)*
         #dsl::into_view_child(
-            #render?
+            #assembly?
         )
     }})
 }
 
-fn generate_fragment(
-    element: &Element,
-    build: &Ident,
-    dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
-) -> Result<TokenStream2> {
+fn partition_component_children<'a>(
+    children: &'a [Item],
+) -> Result<(Vec<&'a Item>, Vec<NamedSlotFragment<'a>>)> {
+    let mut default = Vec::new();
+    let mut named = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
+
+    for child in children {
+        let Item::Element(element) = child else {
+            default.push(child);
+            continue;
+        };
+        if element.name != "Fragment" {
+            default.push(child);
+            continue;
+        }
+        let slot_attributes = element
+            .attributes
+            .iter()
+            .filter(|attribute| !attribute.output && attribute.name == "slot")
+            .collect::<Vec<_>>();
+        if slot_attributes.is_empty() {
+            default.push(child);
+            continue;
+        }
+        let slot = slot_attributes[0];
+        if element.self_closing {
+            return Err(Error::new(
+                slot.name.span(),
+                "a named <Fragment slot={\"...\"}> requires a closing tag",
+            ));
+        }
+        if element.attributes.len() != 1 || slot_attributes.len() != 1 {
+            return Err(Error::new(
+                slot.name.span(),
+                "a named Fragment accepts only slot={\"static-name\"}",
+            ));
+        }
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(name),
+            ..
+        }) = &slot.value
+        else {
+            return Err(Error::new_spanned(
+                &slot.value,
+                "a named Fragment slot must be a string literal, for example slot={\"header\"}",
+            ));
+        };
+        if name.value().is_empty() {
+            return Err(Error::new(
+                name.span(),
+                "a named Fragment slot cannot be empty",
+            ));
+        }
+        if !names.insert(name.value()) {
+            return Err(Error::new(
+                name.span(),
+                "duplicate named Fragment slot in one component invocation",
+            ));
+        }
+        named.push(NamedSlotFragment {
+            name: name.clone(),
+            children: &element.children,
+        });
+    }
+
+    Ok((default, named))
+}
+
+fn generate_fragment(element: &Element, build: &Ident, dsl: &TokenStream2) -> Result<TokenStream2> {
     if element.self_closing {
         return Err(Error::new(
             element.name.span(),
@@ -460,235 +508,12 @@ fn generate_fragment(
             "Fragment is identity-transparent and accepts no attributes",
         ));
     }
-    let body = generate_body(&element.children, build, dsl, scopes)?;
-    let site = site(dsl);
+    let body = generate_body(&element.children, build, dsl)?;
+    let site = site(dsl, element.name.span());
     Ok(quote! {{
         let __tela_dsl_body = #body?;
         #build.fragment(__tela_dsl_body, #site)
     }})
-}
-
-/// ActionTarget 宏内建：动作类型 `A` 依赖调用点，Props 无法脱离 `A` 构造（033 C1 修订）。
-fn generate_action_target(
-    element: &Element,
-    build: &Ident,
-    dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
-) -> Result<TokenStream2> {
-    if element.self_closing {
-        return Err(Error::new(
-            element.name.span(),
-            "ActionTarget requires exactly one real child",
-        ));
-    }
-    const ACTION_ATTRIBUTES: &[&str] = &["action", "on_input", "on_submit", "on_cancel"];
-    validate_attributes(&element.attributes, ACTION_ATTRIBUTES)?;
-    if element.attributes.is_empty() {
-        return Err(Error::new(
-            element.name.span(),
-            "ActionTarget requires at least one action, on_input, on_submit, or on_cancel attribute",
-        ));
-    }
-    let body = generate_body(&element.children, build, dsl, scopes)?;
-    let mut registrations = Vec::new();
-    for attribute in &element.attributes {
-        let site = site(dsl);
-        match attribute.name.to_string().as_str() {
-            "action" => {
-                let value = &attribute.value;
-                registrations.push(quote! {
-                    __tela_dsl_target = __tela_dsl_target.action_at(#value, #site);
-                });
-            }
-            "on_cancel" => {
-                let value = &attribute.value;
-                registrations.push(quote! {
-                    __tela_dsl_target = __tela_dsl_target.on_cancel_at(#value, #site);
-                });
-            }
-            "on_input" | "on_submit" => {
-                let value = &attribute.value;
-                let method = if attribute.name == "on_input" {
-                    "on_input_at"
-                } else {
-                    "on_submit_at"
-                };
-                let method = Ident::new(method, attribute.name.span());
-                if is_with_context_call(value) {
-                    registrations.push(quote! {
-                        __tela_dsl_target = __tela_dsl_target.#method(#value, #site);
-                    });
-                } else if matches!(value, Expr::Path(_)) {
-                    registrations.push(quote! {
-                        __tela_dsl_target = {
-                            let __tela_dsl_mapper: fn(String) -> _ = #value;
-                            __tela_dsl_target.#method(
-                                #dsl::TextActionMap::unary(__tela_dsl_mapper),
-                                #site,
-                            )
-                        };
-                    });
-                } else {
-                    return Err(Error::new_spanned(
-                        value,
-                        "on_input and on_submit require a function path or with_context(value, mapper)",
-                    ));
-                }
-            }
-            _ => unreachable!("attributes were validated"),
-        }
-    }
-    let site = site(dsl);
-    Ok(quote! {{
-        let __tela_dsl_body = #body?;
-        let mut __tela_dsl_target = #dsl::ActionTarget::new();
-        #(#registrations)*
-        let __tela_dsl_view_node = #build.action_target(
-            __tela_dsl_body,
-            __tela_dsl_target,
-            #site,
-        )?;
-        Ok(#dsl::ViewChild::view_node(__tela_dsl_view_node))
-    }})
-}
-
-fn generate_for(
-    element: &Element,
-    virtual_list: bool,
-    build: &Ident,
-    dsl: &TokenStream2,
-    scopes: &mut CollectionScopes,
-) -> Result<TokenStream2> {
-    let Some(binding) = &element.repeat_binding else {
-        return Err(Error::new(
-            element.name.span(),
-            "For and VirtualList require a {|item| ...} body",
-        ));
-    };
-    let item_source_name = if virtual_list { "items" } else { "each" };
-    let allowed = if virtual_list {
-        vec![
-            "items",
-            "total_items",
-            "key",
-            "item_height",
-            "item_spacing",
-            "overscan",
-            "first_item_index",
-        ]
-    } else {
-        vec!["each", "key"]
-    };
-    validate_attributes(&element.attributes, &allowed)?;
-    let source = required_attribute(&element.attributes, item_source_name, element.name.span())?;
-    let key = required_attribute(&element.attributes, "key", element.name.span())?;
-    let mut item_scopes = CollectionScopes::default();
-    let item_body = generate_body(&element.children, build, dsl, &mut item_scopes)?;
-    let item_site = site(dsl);
-    let collection_scope = scopes.allocate(element.name.span())?;
-    let loop_body = quote! {
-        let __tela_dsl_item_key = &(#key);
-        let __tela_dsl_item_body = #build.with_item_identity(
-            #collection_scope,
-            __tela_dsl_item_key,
-            |#build| #item_body,
-        )?;
-        let __tela_dsl_item = #build.for_item(
-            __tela_dsl_item_body,
-            __tela_dsl_item_key,
-            #item_site,
-        )?;
-        __tela_dsl_items.push(__tela_dsl_item);
-    };
-
-    if !virtual_list {
-        return Ok(quote! {{
-            let mut __tela_dsl_items = Vec::new();
-            for #binding in #source {
-                #loop_body
-            }
-            Ok(#dsl::ViewChild::collection(#collection_scope, __tela_dsl_items))
-        }});
-    }
-
-    let total_items = required_attribute(&element.attributes, "total_items", element.name.span())?;
-    let item_height = required_attribute(&element.attributes, "item_height", element.name.span())?;
-    let item_spacing =
-        required_attribute(&element.attributes, "item_spacing", element.name.span())?;
-    let overscan = required_attribute(&element.attributes, "overscan", element.name.span())?;
-    let first_item_index =
-        required_attribute(&element.attributes, "first_item_index", element.name.span())?;
-    Ok(quote! {{
-        let mut __tela_dsl_items = Vec::new();
-        for #binding in #source {
-            #loop_body
-        }
-        let __tela_dsl_body = #dsl::Body::new(
-            vec![#dsl::ViewChild::collection(#collection_scope, __tela_dsl_items)],
-            Vec::new(),
-        );
-        let __tela_dsl_node = #dsl::__private::UiNode::new(
-            #dsl::__private::NodeKind::VirtualListView(#dsl::__private::VirtualListSpec {
-                total_items: #total_items,
-                first_item_index: #first_item_index,
-                item_height: #item_height,
-                item_spacing: #item_spacing,
-                overscan: #overscan,
-            }),
-        );
-        let __tela_dsl_view_node = #build.container(__tela_dsl_node, __tela_dsl_body)?;
-        Ok(#dsl::ViewChild::view_node(__tela_dsl_view_node))
-    }})
-}
-
-/// 表达式是否为 `with_context(value, mapper)` 调用。
-fn is_with_context_call(expression: &Expr) -> bool {
-    let Expr::Call(call) = expression else {
-        return false;
-    };
-    matches!(
-        &*call.func,
-        Expr::Path(path)
-            if path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "with_context")
-    )
-}
-
-fn attribute<'a>(attributes: &'a [Attribute], wanted: &str) -> Option<&'a Attribute> {
-    attributes.iter().find(|attribute| attribute.name == wanted)
-}
-
-fn required_attribute<'a>(
-    attributes: &'a [Attribute],
-    wanted: &str,
-    span: Span,
-) -> Result<&'a Expr> {
-    attribute(attributes, wanted)
-        .map(|attribute| &attribute.value)
-        .ok_or_else(|| Error::new(span, format!("missing required {wanted}={{...}} attribute")))
-}
-
-fn validate_attributes(attributes: &[Attribute], allowed: &[&str]) -> Result<()> {
-    let mut seen = std::collections::BTreeSet::new();
-    for attribute in attributes {
-        let name = attribute.name.to_string();
-        if !allowed.contains(&name.as_str()) {
-            return Err(Error::new(
-                attribute.name.span(),
-                format!("attribute {name} is not allowed on this DSL tag"),
-            ));
-        }
-        if !seen.insert(name.clone()) {
-            return Err(Error::new(
-                attribute.name.span(),
-                format!("duplicate attribute {name}"),
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -731,23 +556,23 @@ mod tests {
     }
 
     #[test]
-    fn component_tags_lower_to_render_calls() {
+    fn component_tags_assemble_to_spec_calls() {
         let input = parse("build { <NavButton label={\"设置\"} width={72.0}>{\"x\"}</NavButton> }");
-        let tokens = expand(input).expect("component lowering must succeed");
+        let tokens = expand(input).expect("component assembly must succeed");
         let code = tokens.to_string();
-        assert!(code.contains("DslComponent"));
-        assert!(code.contains("render"));
+        assert!(code.contains("assemble_component"));
         assert!(code.contains("label"));
         assert!(code.contains("width"));
-        assert!(code.contains("into"));
+        assert!(code.contains("assign"));
+        assert!(code.contains("ViewSite"));
     }
 
     #[test]
-    fn component_output_lowers_to_the_static_lifecycle_binding() {
-        let input = parse("build { <Transfer items={items} output={map_transfer} /> }");
-        let tokens = expand(input).expect("component output lowering must succeed");
+    fn component_output_assembles_to_the_static_lifecycle_binding() {
+        let input = parse("build { <Transfer items={items} @output={map_transfer} /> }");
+        let tokens = expand(input).expect("component output assembly must succeed");
         let code = tokens.to_string();
-        assert!(code.contains("render_component_with_output"));
+        assert!(code.contains("assemble_component_with_output"));
         assert!(code.contains("map_transfer"));
         assert!(!code.contains("props . output"));
     }

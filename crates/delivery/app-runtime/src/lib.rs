@@ -15,8 +15,10 @@
 pub mod keymap;
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
+    sync::Arc,
 };
 
 use tela_app_session::{
@@ -25,64 +27,142 @@ use tela_app_session::{
 };
 use tela_contract::{
     DirtyFlags, FocusAppearance, FrameDamage, InputEvent, KernelInteraction, NodeId, NodeKind,
-    Point, PointerEvent, ScrollState, SemanticKey, TextInputEvent, TextSelection, UiFrame,
+    Point, PointerEvent, RenderPlan, ScrollState, SemanticKey, TextInputEvent, TextSelection,
     UiLayoutError, UiNode, UiResources, Viewport,
 };
 use tela_core::{
     DefaultApplicationProfile, FocusSlot, UiTree, ViewStateStore, restore_focus, save_focus,
 };
 use tela_ui_dsl::{
-    AnimationClock, AnimationSchedule, FrameCoordinator, FrameToken, FramedInteraction,
-    PreparedFrame, ResolvedFrame, Signal, ViewBuild, ViewOutput, ViewResult, ViewSite,
+    AnimationClock, AnimationSchedule, ComponentEffectScope, ComponentEventInvalidator,
+    ComponentEventSender, ComponentLifecycleEvent, DirtySet, FrameCoordinator, FrameToken,
+    FramedInteraction, PreparedFrame, ResolvedFrame, Signal, SignalWriter, ViewBuild, ViewOutput,
+    ViewResult,
 };
 
 use crate::keymap::{KeymapError, KeymapSnapshot, raw_key_from_codes};
 
-/// 单帧渲染上下文：壳状态中应用渲染需要的只读投影。
+#[derive(Clone, Default)]
+struct HostScrollSources {
+    entries: Rc<RefCell<BTreeMap<SemanticKey, HostScrollSource>>>,
+}
+
+struct HostScrollSource {
+    signal: Signal<ScrollState>,
+    writer: SignalWriter<ScrollState>,
+}
+
+impl std::fmt::Debug for HostScrollSources {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostScrollSources")
+            .field("len", &self.entries.borrow().len())
+            .finish()
+    }
+}
+
+impl HostScrollSources {
+    fn signal(&self, key: &SemanticKey, initial: ScrollState) -> Signal<ScrollState> {
+        let mut entries = self.entries.borrow_mut();
+        let entry = entries.entry(key.clone()).or_insert_with(|| {
+            let writer = SignalWriter::new(initial);
+            let signal = writer.signal();
+            HostScrollSource { signal, writer }
+        });
+        entry.signal.clone()
+    }
+
+    fn synchronize(&self, state: &ViewStateStore) {
+        for (key, entry) in self.entries.borrow().iter() {
+            entry.writer.set(state.scroll(key));
+        }
+    }
+
+    fn retain_keys(&self, keys: &[SemanticKey]) {
+        let keys = keys.iter().collect::<BTreeSet<_>>();
+        self.entries
+            .borrow_mut()
+            .retain(|key, _| keys.contains(key));
+    }
+
+    fn same_registry(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.entries, &other.entries)
+    }
+}
+
+/// reconcile 前捕获的候选 Host 事实。
 ///
-/// [`PartialEq`] 用于收敛循环判定：reconcile 之后投影仍与渲染输入一致时，候选才算
-/// 稳定。
+/// 它刻意不通过 [`FrameContext`] 暴露：组件只取得显式的只读 [`Signal`] source；runtime
+/// 仍需要不可变值快照，以判断 kernel reconcile 是否改写了候选 Host 投影。
+#[derive(Clone, Debug, PartialEq)]
+struct HostProjectionSnapshot {
+    viewport: Viewport,
+    window_maximized: bool,
+    hover_key: Option<SemanticKey>,
+    pressed_key: Option<SemanticKey>,
+    focus_key: Option<SemanticKey>,
+}
+
+/// 单帧渲染上下文：壳状态中应用渲染需要的只读 source。
+///
+/// 组件只能通过显式传入的 [`Signal`] 建立依赖；候选 reconcile 使用的 Host 值快照保持
+/// 私有，不能成为绕过声明边的普通读取入口。
 #[derive(Clone, Debug)]
 pub struct FrameContext {
-    /// 当前逻辑内容区尺寸（CSS 点）。
-    pub viewport: Viewport,
-    /// viewport 的图节点（001 §2 宿主态收编）：组件以 `#[watch] viewport` 声明
-    /// 依赖，宽高变化驱动重建而无需普通 props 通道。与 `viewport` 字段同源。
+    /// viewport 的图节点（001 §2 宿主态收编）：组件以 `#[watch]` 声明依赖，宽高变化
+    /// 驱动重建而无需普通 props 通道。
     pub viewport_signal: Signal<Viewport>,
-    /// 当前悬停坐标的图节点。组件可用 `#[watch]` 声明局部高亮，而 Core 仍以
-    /// `hover_key` 快照完成命中和生命周期投影。
+    /// 当前悬停坐标的图节点。组件可用 `#[watch]` 声明局部高亮。
     pub hover_signal: Signal<Option<SemanticKey>>,
-    /// 当前焦点坐标的图节点。焦点环等 Kernel 投影继续消费 `focus_key` 快照；业务视图
-    /// 通过此边避免把 focus 变化一律升级为根级重建。
+    /// 当前鼠标按压命中的坐标图节点。组件可显式声明按压态，而不能读取 HostState。
+    pub pressed_signal: Signal<Option<SemanticKey>>,
+    /// 当前焦点坐标的图节点。业务视图通过此边避免把 focus 变化一律升级为根级重建。
     pub focus_signal: Signal<Option<SemanticKey>>,
     /// Host 注入的单调动画时钟图节点。只有显式 watch 它的组件会因一个 tick 标脏。
     pub animation_clock_signal: Signal<AnimationClock>,
-    /// 原生窗口是否最大化（自绘标题栏投影需要）。
-    pub window_maximized: bool,
-    /// 当前悬停节点的语义 key（组件高亮需要）。
-    pub hover_key: Option<SemanticKey>,
-    /// 当前鼠标按压命中的节点 key。
-    pub pressed_key: Option<SemanticKey>,
-    /// 当前键盘焦点 key（输入框聚焦投影需要）。
-    pub focus_key: Option<SemanticKey>,
-    /// 已发现滚动容器（提交序）的当前 offset_y（虚拟列表窗口化需要）。
-    pub scroll_offsets: Vec<(SemanticKey, f32)>,
+    /// 原生窗口最大化状态的只读图节点。自绘标题栏等组件应显式 watch 此 source，不能
+    /// 依赖 Host 每次窗口消息都重跑应用根。
+    pub window_maximized_signal: Signal<bool>,
+    /// 当前模态栈顶的只读图节点。Host 保留 stack 的写能力与输入仲裁；组件只能把它当成
+    /// 显式数据边读取或 watch，不能修改模态生命周期。
+    pub modal_signal: Signal<Option<SemanticKey>>,
+    /// 候选收敛用的 runtime 私有值快照；应用代码必须通过上面的某条 source 边显式接入。
+    projection_snapshot: HostProjectionSnapshot,
+    scroll_sources: HostScrollSources,
+    scroll_state_snapshot: BTreeMap<SemanticKey, ScrollState>,
+}
+
+impl FrameContext {
+    /// 返回一个滚动容器身份对应的只读 source。
+    ///
+    /// key 是 Host 所有的容器坐标，不是通往其他组件的路由。writer 始终留在
+    /// `Application`；组件可以显式传递或 watch 返回的 signal，但不能修改 offset，也不能
+    /// 复活已卸载的 source。
+    pub fn scroll_signal(&self, key: &SemanticKey) -> Signal<ScrollState> {
+        self.scroll_sources.signal(
+            key,
+            self.scroll_state_snapshot
+                .get(key)
+                .copied()
+                .unwrap_or_default(),
+        )
+    }
 }
 
 // PartialEq 用于收敛循环判定（reconcile 后投影与渲染输入一致才算稳定）。
 // Host signal 均在 Application 构造时创建，收敛判定只比较其稳定 SignalId。
 impl PartialEq for FrameContext {
     fn eq(&self, other: &Self) -> bool {
-        self.viewport == other.viewport
-            && self.viewport_signal.id() == other.viewport_signal.id()
+        self.viewport_signal.id() == other.viewport_signal.id()
             && self.hover_signal.id() == other.hover_signal.id()
+            && self.pressed_signal.id() == other.pressed_signal.id()
             && self.focus_signal.id() == other.focus_signal.id()
             && self.animation_clock_signal.id() == other.animation_clock_signal.id()
-            && self.window_maximized == other.window_maximized
-            && self.hover_key == other.hover_key
-            && self.pressed_key == other.pressed_key
-            && self.focus_key == other.focus_key
-            && self.scroll_offsets == other.scroll_offsets
+            && self.window_maximized_signal.id() == other.window_maximized_signal.id()
+            && self.modal_signal.id() == other.modal_signal.id()
+            && self.projection_snapshot == other.projection_snapshot
+            && self.scroll_sources.same_registry(&other.scroll_sources)
+            && self.scroll_state_snapshot == other.scroll_state_snapshot
     }
 }
 
@@ -104,8 +184,8 @@ pub struct ControllerOutcome {
     pub changed: bool,
     /// 仅在对应 publication 成功呈现后执行的 Host effect。
     pub effects: Vec<AppEffect>,
-    /// 随本动作归零的滚动容器 key（详情内容被整体替换时；key 由控制器从
-    /// [`FrameContext::scroll_offsets`] 学到）。
+    /// 随本动作归零的滚动容器 key（详情内容被整体替换时；key 是控制器声明的
+    /// 语义坐标，而不是从 Host 投影枚举得到）。
     pub scroll_resets: Vec<SemanticKey>,
 }
 
@@ -157,7 +237,7 @@ impl Default for ApplicationConfig {
 /// 前两个方法。壳协议（viewport/输入/焦点/窗口命令）由 [`Application`]
 /// 一次性实现，应用不得感知壳的细节。
 pub trait AppController<A: Clone + 'static> {
-    /// 用当前应用状态渲染一帧 DSL 视图。
+    /// 用当前应用状态和显式 Host source 渲染一帧 DSL 视图。
     fn render(&mut self, build: &mut ViewBuild<A>, ctx: &FrameContext)
     -> ViewResult<ViewOutput<A>>;
 
@@ -184,29 +264,10 @@ pub trait AppController<A: Clone + 'static> {
     fn modal_key(&self) -> Option<SemanticKey> {
         None
     }
-
-    /// 本帧需要锚定到语义 key 的动态点击动作。
-    ///
-    /// 键可能不存在于当前树（`entry-{id}` 等动态 key）；运行时先渲染试探遍收集
-    /// 存活 key，再渲染定稿遍只为存活键挂载锚点。返回空时跳过第二遍。
-    fn anchor_actions(&mut self) -> Vec<(SemanticKey, A)> {
-        Vec::new()
-    }
-
-    /// 无法路由到 DSL 动作或组件的 core 交互事实（`CloseModal`、
-    /// `ShortcutActivated`、`OpenModal`、`OutsidePress` 等）。
-    ///
-    /// 默认忽略。返回的 outcome 与 `handle_action` 的 outcome 同语义。
-    fn on_kernel_interaction(&mut self, _interaction: &KernelInteraction) -> ControllerOutcome {
-        ControllerOutcome::changed(false)
-    }
 }
 
 /// 收敛循环上限。超过后与布局错误同路径：保留旧 active 帧。
 const MAX_FRAME_FIXPOINT_ITERATIONS: usize = 8;
-
-/// 定稿渲染遍的锚点输入：候选动作表 + 试探遍发现的存活 key 集合。
-type AnchorPass<'a, A> = (&'a [(SemanticKey, A)], &'a BTreeSet<SemanticKey>);
 
 fn session_trace_enabled() -> bool {
     std::env::var_os("TELA_APP_TRACE").is_some()
@@ -234,26 +295,55 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     /// viewport 的图节点（宿主态收编）：`set_viewport` 同步写入，组件经
     /// `#[watch] viewport` 订阅（相等性短路防同值帧）。
     viewport_signal: Signal<Viewport>,
+    /// viewport source 的唯一写能力；不随 [`FrameContext`] 传入组件。
+    viewport_writer: SignalWriter<Viewport>,
     /// Focus/hover/clock are host-owned graph sources. Their values are synchronized with the
     /// candidate projection before render and restored to active state when that candidate fails.
     hover_signal: Signal<Option<SemanticKey>>,
+    /// hover source 的唯一写能力。
+    hover_writer: SignalWriter<Option<SemanticKey>>,
+    pressed_signal: Signal<Option<SemanticKey>>,
+    /// pressed source 的唯一写能力。
+    pressed_writer: SignalWriter<Option<SemanticKey>>,
     focus_signal: Signal<Option<SemanticKey>>,
+    /// focus source 的唯一写能力。
+    focus_writer: SignalWriter<Option<SemanticKey>>,
     animation_clock_signal: Signal<AnimationClock>,
-    window_maximized: bool,
+    /// animation clock source 的唯一写能力。
+    animation_clock_writer: SignalWriter<AnimationClock>,
+    window_maximized_signal: Signal<bool>,
+    /// window maximized source 的唯一写能力。
+    window_maximized_writer: SignalWriter<bool>,
+    modal_signal: Signal<Option<SemanticKey>>,
+    /// modal stack top source 的唯一写能力；其值随 candidate ViewStateStore 一起恢复。
+    modal_writer: SignalWriter<Option<SemanticKey>>,
     profile: DefaultApplicationProfile,
     view_state: ViewStateStore,
+    /// HostInput 先写入这里，而不是直接突变 active `view_state`。下一次候选会取走它；
+    /// 成功 present 才通过 `PendingFrame::view_state` 原子替换 active，rejected 则丢弃。
+    staged_host_state: Option<ViewStateStore>,
     frames: FrameCoordinator<A>,
     pending_frame: Option<PendingFrame<A>>,
     text_input: Option<TextInputChannel>,
     /// IME 组合态。组合期间原始按键全部让路，Edit 事件携带 composing 标志。
     text_composing: bool,
+    /// 业务 State、结构或未声明输入发生变化。该类变化必须重新执行 controller 的根
+    /// projection，不能复用 active composition tree。
     projection_invalidated: bool,
+    /// 纯宿主投影发生变化。它仍需要一个候选 frame（例如 scroll/focus 会改变 emit），
+    /// 但不自动意味着应用结构也变了。
+    host_projection_invalidated: bool,
+    /// Coordinates and facts supplied by Host, never inferred by command comparison.
+    host_dirty_keys: BTreeSet<SemanticKey>,
+    host_dirty_flags: DirtyFlags,
     /// 弹窗关闭后的显式焦点恢复延迟到新树建好后执行，避免把旧帧 node id 带回页面。
     restore_focus_pending: bool,
     /// 控制器上一帧是否声明过模态；检测开->闭迁移（无论栈由谁弹出都欠一次恢复）。
     modal_open: bool,
-    /// 上次提交帧发现的滚动容器 key（发现序）。渲染投影与控制器学习都从这里取。
+    /// 上次提交帧发现的滚动容器 key（发现序），用于 Host scroll source 的同步与回收。
     scroll_keys: Vec<SemanticKey>,
+    /// 按已提交 scroll 容器身份持有的只读 source registry。writer 永远不离开 Host。
+    scroll_sources: HostScrollSources,
     /// 上次提交帧发现的可点击 key 集合。光标策略只在悬停命中可点击节点时给手型。
     clickable_keys: BTreeSet<SemanticKey>,
     keymap: KeymapSnapshot,
@@ -265,13 +355,31 @@ pub struct Application<A: Clone + 'static, C: AppController<A>> {
     pending_publication_token: Option<AppFrameToken>,
     pending_reuses_active: bool,
     presented_publication_token: Option<AppFrameToken>,
-    pending_effects: Vec<AppEffect>,
+    /// Effects staged by an AppAction that still needs a candidate frame. `ensure_frame` moves
+    /// them into the exact `PendingFrame`; rejection or supersession restores them for retry.
+    staged_effects: Vec<AppEffect>,
+    /// Effects released after their exact candidate has been acknowledged as presented. They are
+    /// unavailable to every host until `ApplicationSession::presented` succeeds, then leave
+    /// through the one-shot `take_presented_effects` handoff.
+    presented_effects: Vec<AppEffect>,
+    /// 生命周期事件只在对应候选帧 presented 后进入这里。Host/服务据此启动或取消外部
+    /// 工作，避免在 setup 的可回滚阶段越过事务边界。
+    committed_component_lifecycle: Vec<ComponentLifecycleEvent>,
 }
 
 struct PendingFrame<A> {
     resolved: ResolvedFrame<A>,
     view_state: ViewStateStore,
-    dirty: BTreeSet<SemanticKey>,
+    dirty: DirtySet,
+    /// Effects staged by actions that contributed to this exact candidate publication.
+    staged_effects: Vec<AppEffect>,
+    /// `true` only when this candidate was assembled by re-entering the application root. A
+    /// rejected rooted candidate must do that work again; a Host/retained/presentation candidate
+    /// can safely retry from the active composition and its restored dirty coordinates.
+    requires_root_retry: bool,
+    host_projection_invalidated: bool,
+    host_dirty_keys: BTreeSet<SemanticKey>,
+    host_dirty_flags: DirtyFlags,
     controls: Controls,
     restore_focus_pending: bool,
 }
@@ -307,26 +415,54 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     ) -> Self {
         let viewport = config.initial_viewport;
         let keymap = config.keymap.clone();
+        let viewport_writer = SignalWriter::new(viewport);
+        let viewport_signal = viewport_writer.signal();
+        let hover_writer = SignalWriter::new(None);
+        let hover_signal = hover_writer.signal();
+        let pressed_writer = SignalWriter::new(None);
+        let pressed_signal = pressed_writer.signal();
+        let focus_writer = SignalWriter::new(None);
+        let focus_signal = focus_writer.signal();
+        let animation_clock_writer = SignalWriter::new(AnimationClock::default());
+        let animation_clock_signal = animation_clock_writer.signal();
+        let window_maximized_writer = SignalWriter::new(false);
+        let window_maximized_signal = window_maximized_writer.signal();
+        let modal_writer = SignalWriter::new(None);
+        let modal_signal = modal_writer.signal();
         Self {
             resources,
             controller,
             config,
-            viewport_signal: Signal::new(viewport),
-            hover_signal: Signal::new(None),
-            focus_signal: Signal::new(None),
-            animation_clock_signal: Signal::new(AnimationClock::default()),
+            viewport_signal,
+            viewport_writer,
+            hover_signal,
+            hover_writer,
+            pressed_signal,
+            pressed_writer,
+            focus_signal,
+            focus_writer,
+            animation_clock_signal,
+            animation_clock_writer,
+            window_maximized_signal,
+            window_maximized_writer,
+            modal_signal,
+            modal_writer,
             viewport,
-            window_maximized: false,
             profile: DefaultApplicationProfile::new(),
             view_state: ViewStateStore::new(),
+            staged_host_state: None,
             frames: FrameCoordinator::new(),
             pending_frame: None,
             text_input: None,
             text_composing: false,
             projection_invalidated: true,
+            host_projection_invalidated: false,
+            host_dirty_keys: BTreeSet::new(),
+            host_dirty_flags: DirtyFlags::EMPTY,
             restore_focus_pending: false,
             modal_open: false,
             scroll_keys: Vec::new(),
+            scroll_sources: HostScrollSources::default(),
             clickable_keys: BTreeSet::new(),
             keymap,
             last_layout_measures: 0,
@@ -336,8 +472,45 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             pending_publication_token: None,
             pending_reuses_active: false,
             presented_publication_token: None,
-            pending_effects: Vec::new(),
+            staged_effects: Vec::new(),
+            presented_effects: Vec::new(),
+            committed_component_lifecycle: Vec::new(),
         }
+    }
+
+    /// 安装后台组件 Event 入队后的 UI 调度唤醒端口。
+    ///
+    /// sender 只会请求 Host 开始下一帧；Host 仍须在自己的 UI 线程调用
+    /// [`Self::ensure_frame`]，由它创建候选事务并执行组件 handler。Application 仅持有
+    /// 弱引用，调用方应在 Host 生命周期内保留传入的 `Arc`。
+    pub fn set_component_event_invalidator(&self, invalidator: Arc<dyn ComponentEventInvalidator>) {
+        self.frames.set_component_event_invalidator(invalidator);
+    }
+
+    /// 移除后台组件 Event 的 UI 调度唤醒端口。
+    pub fn clear_component_event_invalidator(&self) {
+        self.frames.clear_component_event_invalidator();
+    }
+
+    /// 取走最近成功 `presented` 的组件挂载/卸载事件。
+    ///
+    /// 这是外部 timer、task、stream 或服务的生命周期桥接：在 `Mounted` 后启动自己拥有
+    /// 的工作，在 `Unmounted` 后取消它。候选被拒绝不会产生事件；晚到 sender 回调仍会
+    /// 被 FrameCoordinator 的内部 lease 校验静默过滤。
+    pub fn take_component_lifecycle_events(&mut self) -> Vec<ComponentLifecycleEvent> {
+        std::mem::take(&mut self.committed_component_lifecycle)
+    }
+
+    /// 为一个已经 `Mounted` 的组件 effect capability 取得其自身 Event sender。
+    ///
+    /// Host 应先从 [`Self::take_component_lifecycle_events`] 取得 `Mounted`，再调用本方法
+    /// 启动自己的 timer/task/stream；`Unmounted` 后同一 scope 会返回 `None`。这条 API
+    /// 不接受裸组件 identity，也不会绕过 UI 线程候选事务。
+    pub fn component_event_sender_for<E: Send + 'static>(
+        &self,
+        scope: &ComponentEffectScope,
+    ) -> Option<ComponentEventSender<E>> {
+        self.frames.component_event_sender_for(scope)
     }
 
     /// 注入一个程序化应用动作（菜单、快捷键、测试等非 UI 派发入口）；返回是否引起界面变化。
@@ -364,7 +537,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             return false;
         }
         self.animation_clock = AnimationClock { timestamp_ms };
-        self.animation_clock_signal.set(self.animation_clock);
+        self.animation_clock_writer.set(self.animation_clock);
         let requested = self.animation_schedule().active;
         let controller_changed = self.controller.on_animation_tick(timestamp_ms);
         let graph_changed = self.frames.runtime().has_dirty();
@@ -403,7 +576,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     }
 
     /// 当前 active frame 的树与绘制帧（测试与诊断入口）。
-    pub fn active(&self) -> Option<(&UiTree, &UiFrame)> {
+    pub fn active(&self) -> Option<(&UiTree, &RenderPlan)> {
         self.frames
             .active()
             .map(|active| (active.tree(), active.frame()))
@@ -416,11 +589,13 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 直接写入一个滚动容器状态；返回是否引起变化。
     pub fn set_scroll(&mut self, key: SemanticKey, state: ScrollState) -> bool {
-        if self.view_state.scroll(&key) == state {
+        let host_state = self.host_input_state_mut();
+        if host_state.scroll(&key) == state {
             return false;
         }
-        self.view_state.set_scroll(key, state);
-        self.invalidate_frame();
+        host_state.set_scroll(key.clone(), state);
+        self.sync_staged_host_signals();
+        self.invalidate_scroll_projection(key);
         true
     }
 
@@ -431,22 +606,62 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     /// 写入当前键盘焦点 key（测试与宿主恢复入口）。
     pub fn set_current_focus_key(&mut self, key: Option<SemanticKey>) {
+        let previous = self
+            .active_or_staged_host_state()
+            .current_focus_key()
+            .cloned();
+        let host_state = self.host_input_state_mut();
         match key {
-            Some(key) => self.view_state.set_current_focus(FocusSlot {
+            Some(key) => host_state.set_current_focus(FocusSlot {
                 node_id: None,
                 key: Some(key),
             }),
             None => {
-                self.view_state.clear_current_focus();
+                host_state.clear_current_focus();
             }
         }
-        self.sync_projection_signals(&self.view_state);
-        self.invalidate_frame_unless_dirty();
+        let current = host_state.current_focus_key().cloned();
+        self.sync_staged_host_signals();
+        if previous != current {
+            self.invalidate_focus_projection(previous, current);
+        }
     }
 
     /// 使当前投影失效，下一次 `ensure_frame` 重建候选帧。
     pub fn invalidate_frame(&mut self) {
         self.projection_invalidated = true;
+    }
+
+    /// Requests a candidate that reuses active composition but refreshes host-owned projection.
+    ///
+    /// This is intentionally separate from [`Self::invalidate_frame`]: scroll, focus and native
+    /// window state are input facts owned by the host, not permission to rerun arbitrary
+    /// application structure. If a component explicitly watches the corresponding source, the
+    /// normal dirty graph will additionally select a retained/root projection as appropriate.
+    fn invalidate_host_projection(&mut self) {
+        self.host_projection_invalidated = true;
+        self.host_dirty_flags.insert(DirtyFlags::VISUAL);
+    }
+
+    /// Records the two concrete paint coordinates affected by a focus-ring transition.
+    ///
+    /// Focus remains Host-owned state and still goes through the ordinary candidate/present
+    /// transaction. The keys here are only paint coordinates: they do not grant a component any
+    /// extra input route or lifecycle authority.
+    fn invalidate_focus_projection(
+        &mut self,
+        previous: Option<SemanticKey>,
+        current: Option<SemanticKey>,
+    ) {
+        self.invalidate_host_projection();
+        self.host_dirty_keys.extend(previous);
+        self.host_dirty_keys.extend(current);
+    }
+
+    fn invalidate_scroll_projection(&mut self, key: SemanticKey) {
+        self.host_projection_invalidated = true;
+        self.host_dirty_keys.insert(key);
+        self.host_dirty_flags.insert(DirtyFlags::VISUAL);
     }
 
     /// 控制器状态变化后的失效入口：Signal 订阅已标脏时不再全局失效，
@@ -482,40 +697,51 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         self.viewport = viewport;
         // 宿主态收编（001 §2）：viewport 同步进图节点；相等性短路防同值帧。
         // 全局失效路径保留（scroll 钳制、虚拟列表窗口等宿主逻辑仍需全量重建）。
-        self.viewport_signal.set(viewport);
+        self.viewport_writer.set(viewport);
         self.invalidate_frame();
         true
     }
 
     /// 更新原生窗口最大化状态（自绘标题栏投影需要）；返回是否引起界面变化。
     pub fn set_window_maximized(&mut self, maximized: bool) -> bool {
-        if self.window_maximized == maximized {
+        let previous = self.window_maximized_signal.get();
+        if previous == maximized {
             return false;
         }
         session_trace!(
             "session_set_window_maximized old={} new={maximized}",
-            self.window_maximized
+            previous
         );
-        self.window_maximized = maximized;
-        self.invalidate_frame();
+        self.window_maximized_writer.set(maximized);
+        self.invalidate_host_projection();
         true
     }
 
     /// 当前是否已最大化（壳与诊断查询）。
     pub fn window_maximized(&self) -> bool {
-        self.window_maximized
+        self.window_maximized_signal.get()
     }
 
     /// 确保当前投影与帧存在；返回是否重建了帧。
     ///
     /// 候选构建运行有界收敛循环：先用候选投影渲染试探遍，reconcile 后投影若被改写
     /// （模态焦点、悬停卸载清理、焦点重映射）则用新投影重建；滚动钳制改变了边界时
-    /// 同样重建（窗口化列表依据 offset 构建子项）。动态动作锚点（`anchor_actions`）
-    /// 只在定稿遍为存活 key 挂载。
+    /// 同样重建（窗口化列表依据 offset 构建子项）。节点输入始终由创建它的组件
+    /// `UiSpec` 接收，不会在应用运行时按动态 key 额外挂载 AppAction。
     pub fn ensure_frame(&mut self) -> bool {
+        // 外部 sender 不能和一张尚待 present 的候选帧交错执行。当前帧已经提交或尚未
+        // 创建时，才可把固定 ingress 快照转成新的组件候选事务。
+        let external_component_events_changed = if self.pending_frame.is_none() {
+            self.dispatch_queued_component_events()
+        } else {
+            false
+        };
         if (self.pending_frame.is_some() || self.frames.active().is_some())
             && !self.projection_invalidated
+            && !self.host_projection_invalidated
             && !self.frames.runtime().has_dirty()
+            && !self.frames.has_pending_component_transaction()
+            && !external_component_events_changed
         {
             return false;
         }
@@ -523,18 +749,23 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         // 新失效发生在候选已 resolve、尚未 present 的窗口内时，旧候选树可以直接丢弃，
         // 但它消费过的 Signal dirty 仍属于这次未完成的发布事务。组件 handler 的 pending
         // State/Output 则继续保留，由下面重建的新候选接管。
-        let mut inherited_dirty = self
-            .pending_frame
-            .take()
-            .map(|pending| {
+        let (mut inherited_dirty, inherited_host_state) = match self.pending_frame.take() {
+            Some(pending) => {
                 // A superseded candidate never reached present, so its profile cache and paint
-                // projection must not leak into the next candidate.
+                // projection must not leak into the next candidate. Its Host state is still the
+                // newest candidate baseline for a later active-frame input.
                 self.profile.discard_candidate();
-                pending.dirty
-            })
-            .unwrap_or_default();
+                self.host_projection_invalidated |= pending.host_projection_invalidated;
+                self.host_dirty_keys.extend(pending.host_dirty_keys);
+                self.host_dirty_flags.insert(pending.host_dirty_flags);
+                self.projection_invalidated |= pending.requires_root_retry;
+                self.restore_staged_effects(pending.staged_effects);
+                (pending.dirty, Some(pending.view_state))
+            }
+            None => (DirtySet::default(), None),
+        };
         self.frames.runtime().begin_frame();
-        inherited_dirty.extend(self.frames.runtime().take_dirty());
+        inherited_dirty.merge(self.frames.runtime().take_dirty());
         let dirty = inherited_dirty;
         session_trace!(
             "session_ensure_frame begin viewport={:.1}x{:.1} invalidated={} dirty={dirty:?} active_before={:?}",
@@ -558,7 +789,11 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             );
         }
 
-        let mut candidate_state = self.view_state.clone();
+        let mut candidate_state = self
+            .staged_host_state
+            .take()
+            .or(inherited_host_state)
+            .unwrap_or_else(|| self.view_state.clone());
         let mut candidate_restore_focus_pending = self.restore_focus_pending;
         // 模态栈与业务状态同步：入栈前保存焦点，出栈把恢复延迟到新树建好之后。
         // core 可能在 Cancel 意图处理中自行弹栈（Escape 路径），所以闭合迁移用
@@ -581,20 +816,22 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 }
             }
         }
-        let anchors = self.controller.anchor_actions();
-        // signal 驱动帧（无全局投影失效）启用 `#[memo]` 记忆化；
-        // viewport/焦点/悬停等宿主失效帧走全量渲染。
+        // 没有全局投影失效时，Host 投影和图脏边可以共享同一张窄候选：retained/binding
+        // candidate 负责更新显式 source 所有的树片段，候选 HostState 与 host damage 仍在
+        // 下方统一进入 resolve。`FrameContext` 不提供可被 root 偷读的 Host 裸快照，因而
+        // 不需要为了混合同帧输入而强制根装配。结构 target、没有独立 retained 根或无
+        // 坐标的图脏边仍会让窄路径返回 `None`，由下面的 rooted projection 保持权威。
         let memo_enabled = !self.projection_invalidated;
 
-        let mut staged: Option<(ResolvedFrame<A>, Controls)> = None;
+        let mut staged: Option<(ResolvedFrame<A>, Controls, bool)> = None;
         for _ in 0..MAX_FRAME_FIXPOINT_ITERATIONS {
             let ctx = self.candidate_context(&candidate_state);
-            // A signal-only frame with no dynamically anchored controller actions can re-enter
-            // retained roots directly from the active shared tree. Any unsupported local case
-            // (no retained coordinate, actions/animation appeared, structural host invalidation)
-            // returns `None` and uses the established root projection transaction below.
-            let retained = if memo_enabled && anchors.is_empty() {
-                match self.frames.prepare_retained_dirty(dirty.clone()) {
+            // The narrowest correct path wins. A committed static presentation binding may
+            // path-copy only its own node shell; otherwise a signal-only frame can re-enter
+            // retained roots. Every unsupported case falls back to the rooted projection
+            // transaction, which remains the authority for structure and component State.
+            let presentation = if memo_enabled {
+                match self.frames.prepare_presentation_dirty(dirty.clone()) {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         self.retain_previous_frame(dirty, error);
@@ -604,16 +841,53 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             } else {
                 None
             };
-            let provisional = match retained
-                .map(Ok)
-                .unwrap_or_else(|| self.prepare_projection(&ctx, None, &dirty, memo_enabled))
+            let retained = if presentation.is_none() && memo_enabled {
+                match self
+                    .frames
+                    .prepare_retained_dirty_at(dirty.clone(), self.animation_clock)
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.retain_previous_frame(dirty, error);
+                        return false;
+                    }
+                }
+            } else {
+                None
+            };
+            let host_projection = if presentation.is_none()
+                && retained.is_none()
+                && memo_enabled
+                && self.host_projection_invalidated
             {
+                match self.frames.prepare_host_projection(self.host_dirty_flags) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.retain_previous_frame(dirty, error);
+                        return false;
+                    }
+                }
+            } else {
+                None
+            };
+            let (provisional, requires_root_retry) = match presentation {
+                Some(prepared) => (Ok(prepared), false),
+                None => match retained {
+                    Some(prepared) => (Ok(prepared), false),
+                    None => match host_projection {
+                        Some(prepared) => (Ok(prepared), false),
+                        None => (self.prepare_projection(&ctx, &dirty, memo_enabled), true),
+                    },
+                },
+            };
+            let provisional = match provisional {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     self.retain_previous_frame(dirty, error);
                     return false;
                 }
             };
+            let focus_before_reconcile = candidate_state.current_focus_key().cloned();
             self.profile
                 .reconcile_tree(provisional.tree(), &mut candidate_state);
             if candidate_restore_focus_pending {
@@ -622,40 +896,27 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             }
             self.profile
                 .ensure_modal_focus(provisional.tree(), &mut candidate_state);
+            let focus_after_reconcile = candidate_state.current_focus_key().cloned();
+            if focus_before_reconcile != focus_after_reconcile {
+                self.invalidate_focus_projection(focus_before_reconcile, focus_after_reconcile);
+            }
             if self.candidate_context(&candidate_state) != ctx {
                 // reconcile 改写了焦点/悬停投影；用新投影重建候选。
                 continue;
             }
-            let prepared = if anchors.is_empty() {
-                provisional
-            } else {
-                let present_keys: BTreeSet<SemanticKey> =
-                    provisional.tree().keys().iter().cloned().collect();
-                let prepared = match self.prepare_projection(
-                    &ctx,
-                    Some((&anchors, &present_keys)),
-                    &dirty,
-                    memo_enabled,
-                ) {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        self.retain_previous_frame(dirty, error);
-                        return false;
-                    }
-                };
-                self.profile
-                    .reconcile_tree(prepared.tree(), &mut candidate_state);
-                self.profile
-                    .ensure_modal_focus(prepared.tree(), &mut candidate_state);
-                prepared
-            };
+            let prepared = provisional;
+            let mut dirty_flags = prepared.dirty_flags();
+            dirty_flags.insert(self.host_dirty_flags);
             let controls = discover_controls(prepared.tree());
             let scroll_inputs = scroll_inputs_for(&candidate_state, &controls.scrolls);
             // 走 Dirty 布局缓存路径（resolve 而非 resolve_candidate）：纯视觉变化（hover
-            // 高亮等）不改变子树指纹，直接命中缓存零重测；只有尺寸/文本/结构变化才重算
+            // 高亮等）不改变子树对象身份，直接命中缓存零重测；只有尺寸/文本/结构变化才重算
             // 对应子树。滚动输入使用真实状态，滚动偏移进入布局。
-            let dirty_coordinates =
-                (!self.projection_invalidated && !dirty.is_empty()).then_some(&dirty);
+            let mut dirty_coordinates_owned = dirty.semantic_keys();
+            dirty_coordinates_owned.extend(self.host_dirty_keys.iter().cloned());
+            let dirty_coordinates = (!self.projection_invalidated
+                && !dirty_coordinates_owned.is_empty())
+            .then_some(&dirty_coordinates_owned);
             let frame = match self.profile.resolve_with_dirty(
                 prepared.tree(),
                 self.viewport,
@@ -664,7 +925,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 &candidate_state,
                 self.config.focus_appearance,
                 dirty_coordinates,
-                DirtyFlags::ALL,
+                dirty_flags,
             ) {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -677,13 +938,19 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
                 // active state 和 active frame 在成功提交前都保持不变。
                 continue;
             }
+            if !prepared.is_current() {
+                // layout/资源预检可能同步重入应用代码并写入一个显式 watch source。
+                // 不能把基于旧版本构建的 frame 送到 Host；保留同一候选 owner/output
+                // 事务，下一次循环只用最新 source 重新投影。
+                continue;
+            }
             let resolved = prepared
                 .resolve(|_| Ok::<_, UiLayoutError>(frame))
                 .expect("already resolved session candidate cannot fail again");
-            staged = Some((resolved, controls));
+            staged = Some((resolved, controls, requires_root_retry));
             break;
         }
-        let Some((resolved, controls)) = staged else {
+        let Some((resolved, controls, requires_root_retry)) = staged else {
             self.retain_previous_frame(dirty, "frame fixpoint did not converge");
             return false;
         };
@@ -703,10 +970,16 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             resolved,
             view_state: candidate_state,
             dirty,
+            staged_effects: std::mem::take(&mut self.staged_effects),
+            requires_root_retry,
+            host_projection_invalidated: self.host_projection_invalidated,
+            host_dirty_keys: std::mem::take(&mut self.host_dirty_keys),
+            host_dirty_flags: std::mem::take(&mut self.host_dirty_flags),
             controls,
             restore_focus_pending: candidate_restore_focus_pending,
         });
         self.projection_invalidated = false;
+        self.host_projection_invalidated = false;
         session_trace!("session_ensure_frame result=staged frame_viewport={candidate_viewport:?}");
         true
     }
@@ -723,41 +996,77 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             resolved,
             view_state,
             dirty: _,
+            staged_effects,
+            requires_root_retry,
+            host_projection_invalidated,
+            host_dirty_keys,
+            host_dirty_flags,
             controls,
             restore_focus_pending,
         } = pending;
+        // `commit_with` consumes its closure even when it rejects the candidate before calling
+        // `commit_host`. Keep a Host-only retry snapshot outside that closure so a stale
+        // publication cannot silently drop the HostInput that formed this candidate.
+        let retry_host_state = view_state.clone();
         let committed_viewport = resolved.frame().viewport;
-        let active_view_state = &mut self.view_state;
-        let scroll_keys = &mut self.scroll_keys;
-        let clickable_keys = &mut self.clickable_keys;
-        let pending_restore = &mut self.restore_focus_pending;
-        self.frames.commit_with(resolved, |_| {
-            *active_view_state = view_state;
-            *scroll_keys = controls.scrolls;
-            *clickable_keys = controls.clickable;
-            *pending_restore = restore_focus_pending;
-        });
+        let commit = {
+            let active_view_state = &mut self.view_state;
+            let scroll_keys = &mut self.scroll_keys;
+            let clickable_keys = &mut self.clickable_keys;
+            let pending_restore = &mut self.restore_focus_pending;
+            self.frames.commit_with(resolved, |_| {
+                *active_view_state = view_state;
+                *scroll_keys = controls.scrolls;
+                *clickable_keys = controls.clickable;
+                *pending_restore = restore_focus_pending;
+            })
+        };
+        if let Err(error) = commit {
+            // `presented` 到达前 source 仍可能被同线程宿主回调更新。FrameCoordinator
+            // 已恢复过期 watch 的 dirty 坐标；这里仅回收 Host 候选投影，下一次 publish
+            // 会用同一候选组件事务和最新 source 重建。
+            self.profile.discard_candidate();
+            self.host_projection_invalidated |= host_projection_invalidated;
+            self.host_dirty_keys.extend(host_dirty_keys);
+            self.host_dirty_flags.insert(host_dirty_flags);
+            if self.staged_host_state.is_none() {
+                self.staged_host_state = Some(retry_host_state);
+            }
+            self.restore_staged_effects(staged_effects);
+            self.sync_projection_signals(&self.view_state);
+            self.projection_invalidated |= requires_root_retry;
+            session_trace!("session_frame_presented result=stale_candidate error={error}");
+            return true;
+        }
         self.profile.commit_candidate();
+        self.presented_effects.extend(staged_effects);
+        self.scroll_sources.retain_keys(&self.scroll_keys);
         self.reconcile_text_input_channel();
 
-        for lifecycle in self.frames.take_component_lifecycle_events() {
+        let lifecycle_events = self.frames.take_component_lifecycle_events();
+        for lifecycle in &lifecycle_events {
             session_trace!(
                 "session_component_lifecycle generation={} identity={:?}",
                 lifecycle.generation(),
                 lifecycle.identity()
             );
         }
+        self.committed_component_lifecycle.extend(lifecycle_events);
         let mut output_changed = false;
         for action in self.frames.take_component_outputs() {
-            output_changed |= self.apply_controller_action(action);
+            output_changed |= self.apply_presented_controller_action(action);
         }
+        // 一个 sender 可能在 publication 等待 presented 的窗口里入队。现在旧帧已经
+        // 原子成为 active，才能安全地把它作为下一张候选事务的起点；绝不回写刚刚呈现
+        // 的 active State。
+        let external_component_events_changed = self.dispatch_queued_component_events();
         if output_changed {
             self.invalidate_frame_unless_dirty();
         }
         session_trace!(
-            "session_frame_presented result=committed frame_viewport={committed_viewport:?} output_changed={output_changed}"
+            "session_frame_presented result=committed frame_viewport={committed_viewport:?} output_changed={output_changed} external_component_events_changed={external_component_events_changed}"
         );
-        output_changed
+        output_changed || external_component_events_changed
     }
 
     /// 通知会话候选帧未能 present；旧 active frame 保持不变，候选 State 与 Output 丢弃。
@@ -768,8 +1077,18 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         self.frames.abort_component_transaction();
         self.profile.discard_candidate();
         self.frames.runtime().restore_dirty(pending.dirty);
+        self.projection_invalidated |= pending.requires_root_retry;
+        self.host_projection_invalidated |= pending.host_projection_invalidated;
+        self.host_dirty_keys.extend(pending.host_dirty_keys);
+        self.host_dirty_flags.insert(pending.host_dirty_flags);
+        self.restore_staged_effects(pending.staged_effects);
+        // A rejected candidate must not publish this state, but its HostInput is still a real
+        // fact received against the active frame. Re-stage it unless a newer input already built
+        // a successor state while this publication was in flight.
+        if self.staged_host_state.is_none() {
+            self.staged_host_state = Some(pending.view_state);
+        }
         self.sync_projection_signals(&self.view_state);
-        self.projection_invalidated = true;
         session_trace!("session_frame_rejected result=retained_active");
     }
 
@@ -783,12 +1102,13 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         frame.is_some_and(|frame| {
             frame.viewport == self.viewport
                 && !self.projection_invalidated
+                && !self.host_projection_invalidated
                 && !self.frames.runtime().has_dirty()
         })
     }
 
     /// Host 当前应呈现的候选帧；没有候选时返回已发布的 active frame。
-    pub fn frame(&self) -> &UiFrame {
+    pub fn frame(&self) -> &RenderPlan {
         self.pending_frame
             .as_ref()
             .map(|pending| pending.resolved.frame())
@@ -809,22 +1129,51 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let pressed_before = self.view_state.pressed_mouse_key().cloned();
-        let hover_before = self.view_state.hover_key().cloned();
-        let focus_before = self.view_state.current_focus_key().cloned();
+        self.ensure_staged_host_state();
+        let (pressed_before, hover_before, focus_before) = {
+            let state = self
+                .staged_host_state
+                .as_ref()
+                .expect("host input state was staged above");
+            (
+                state.pressed_mouse_key().cloned(),
+                state.hover_key().cloned(),
+                state.current_focus_key().cloned(),
+            )
+        };
         let actions = self
             .frames
             .active()
             .expect("accepted token requires an active frame")
             .input_plan()
-            .dispatch(&mut self.view_state, &InputEvent::Pointer(event));
-        let projected_pointer_state_changed = pressed_before
-            != self.view_state.pressed_mouse_key().cloned()
-            || hover_before != self.view_state.hover_key().cloned()
-            || focus_before != self.view_state.current_focus_key().cloned();
-        self.sync_projection_signals(&self.view_state);
+            .dispatch(
+                self.staged_host_state
+                    .as_mut()
+                    .expect("host input state remains staged for dispatch"),
+                &InputEvent::Pointer(event),
+            );
+        let (projected_pointer_state_changed, focus_after) = {
+            let state = self
+                .staged_host_state
+                .as_ref()
+                .expect("host input state remains staged after dispatch");
+            let focus_after = state.current_focus_key().cloned();
+            (
+                pressed_before != state.pressed_mouse_key().cloned()
+                    || hover_before != state.hover_key().cloned()
+                    || focus_before != focus_after,
+                focus_after,
+            )
+        };
+        self.sync_staged_host_signals();
         let framed_action_changed = self.handle_framed_actions(token, &actions);
-        if projected_pointer_state_changed || framed_action_changed {
+        if projected_pointer_state_changed {
+            self.invalidate_host_projection();
+        }
+        if focus_before != focus_after {
+            self.invalidate_focus_projection(focus_before, focus_after);
+        }
+        if framed_action_changed {
             self.invalidate_frame_unless_dirty();
         }
         let changed = projected_pointer_state_changed || framed_action_changed;
@@ -866,7 +1215,7 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             .map(|active| {
                 active
                     .tree()
-                    .keymap_scopes_for_focus(self.view_state.current_focus_key())
+                    .keymap_scopes_for_focus(self.active_or_staged_host_state().current_focus_key())
             })
             .unwrap_or_default();
         let Some(intent) = self.keymap.resolve(raw, &scopes) else {
@@ -875,17 +1224,37 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         let Some(token) = self.current_frame_token() else {
             return 0;
         };
-        let focus_before = self.view_state.current_focus_key().cloned();
+        self.ensure_staged_host_state();
+        let focus_before = self
+            .staged_host_state
+            .as_ref()
+            .expect("host input state was staged above")
+            .current_focus_key()
+            .cloned();
         let actions = self
             .frames
             .active()
             .expect("accepted token requires an active frame")
             .input_plan()
-            .dispatch(&mut self.view_state, &InputEvent::Keyboard(intent));
+            .dispatch(
+                self.staged_host_state
+                    .as_mut()
+                    .expect("host input state remains staged for dispatch"),
+                &InputEvent::Keyboard(intent),
+            );
         let changed = self.handle_framed_actions(token, &actions);
-        let focus_changed = focus_before != self.view_state.current_focus_key().cloned();
-        self.sync_projection_signals(&self.view_state);
-        if changed || focus_changed {
+        let focus_after = self
+            .staged_host_state
+            .as_ref()
+            .expect("host input state remains staged after dispatch")
+            .current_focus_key()
+            .cloned();
+        let focus_changed = focus_before != focus_after;
+        self.sync_staged_host_signals();
+        if focus_changed {
+            self.invalidate_focus_projection(focus_before, focus_after);
+        }
+        if changed {
             self.invalidate_frame_unless_dirty();
         }
         1
@@ -1123,22 +1492,59 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
         active.input_plan().hit_test_interactive(point)
     }
 
+    /// Returns the one HostInput-writable candidate state for the current UI turn.
+    ///
+    /// A pending publication can still be superseded by a newer active-frame input. In that case
+    /// the new staged state starts from the pending candidate snapshot, preserving prior host
+    /// reconciliation while keeping the committed `view_state` untouched until presentation.
+    fn ensure_staged_host_state(&mut self) {
+        if self.staged_host_state.is_none() {
+            let base = self
+                .pending_frame
+                .as_ref()
+                .map(|pending| pending.view_state.clone())
+                .unwrap_or_else(|| self.view_state.clone());
+            self.staged_host_state = Some(base);
+        }
+    }
+
+    fn host_input_state_mut(&mut self) -> &mut ViewStateStore {
+        self.ensure_staged_host_state();
+        self.staged_host_state
+            .as_mut()
+            .expect("host input state was installed immediately above")
+    }
+
+    fn active_or_staged_host_state(&self) -> &ViewStateStore {
+        self.staged_host_state.as_ref().unwrap_or(&self.view_state)
+    }
+
+    fn sync_staged_host_signals(&self) {
+        self.sync_projection_signals(self.active_or_staged_host_state());
+    }
+
     fn candidate_context(&mut self, state: &ViewStateStore) -> FrameContext {
         self.sync_projection_signals(state);
         FrameContext {
-            viewport: self.viewport,
             viewport_signal: self.viewport_signal.clone(),
             hover_signal: self.hover_signal.clone(),
+            pressed_signal: self.pressed_signal.clone(),
             focus_signal: self.focus_signal.clone(),
             animation_clock_signal: self.animation_clock_signal.clone(),
-            window_maximized: self.window_maximized,
-            hover_key: state.hover_key().cloned(),
-            pressed_key: state.pressed_mouse_key().cloned(),
-            focus_key: state.current_focus_key().cloned(),
-            scroll_offsets: self
-                .scroll_keys
+            window_maximized_signal: self.window_maximized_signal.clone(),
+            modal_signal: self.modal_signal.clone(),
+            projection_snapshot: HostProjectionSnapshot {
+                viewport: self.viewport,
+                window_maximized: self.window_maximized_signal.get(),
+                hover_key: state.hover_key().cloned(),
+                pressed_key: state.pressed_mouse_key().cloned(),
+                focus_key: state.current_focus_key().cloned(),
+            },
+            scroll_sources: self.scroll_sources.clone(),
+            scroll_state_snapshot: state
+                .scrolls()
                 .iter()
-                .map(|key| (key.clone(), state.scroll(key).offset_y))
+                .map(|(key, value)| (key.clone(), *value))
                 .collect(),
         }
     }
@@ -1147,33 +1553,27 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
     /// The signals are restored from `view_state` on candidate rejection, so a failed candidate
     /// cannot leave a watcher observing an unpresented coordinate.
     fn sync_projection_signals(&self, state: &ViewStateStore) {
-        self.hover_signal.set(state.hover_key().cloned());
-        self.focus_signal.set(state.current_focus_key().cloned());
+        self.hover_writer.set(state.hover_key().cloned());
+        self.pressed_writer.set(state.pressed_mouse_key().cloned());
+        self.focus_writer.set(state.current_focus_key().cloned());
+        self.modal_writer.set(state.modal_stack().last().cloned());
+        self.scroll_sources.synchronize(state);
     }
 
     fn prepare_projection(
         &mut self,
         ctx: &FrameContext,
-        anchors: Option<AnchorPass<'_, A>>,
-        dirty: &std::collections::BTreeSet<SemanticKey>,
+        dirty: &DirtySet,
         memo_enabled: bool,
     ) -> Result<PreparedFrame<A>, String> {
         let mut build = self
             .frames
             .begin_build_for_frame(dirty.clone(), memo_enabled);
         build.set_animation_clock(self.animation_clock);
-        let mut output = self
+        let output = self
             .controller
             .render(&mut build, ctx)
             .map_err(|error| error.to_string())?;
-        if let Some((anchors, present_keys)) = anchors {
-            let site = ViewSite::new(file!(), line!(), column!());
-            for (key, action) in anchors {
-                if present_keys.contains(key) {
-                    output = output.attach_action_at(key.clone(), action.clone(), site);
-                }
-            }
-        }
         self.frames
             .prepare(output)
             .map_err(|error| error.to_string())
@@ -1210,63 +1610,127 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             if !self.frames.accepts_interaction(&framed) {
                 continue;
             }
-            if let Some(action) = self.frames.dispatch_interaction(&framed) {
-                changed |= self.apply_controller_action(action);
-                continue;
-            }
-            if self
-                .frames
-                .dispatch_component_interaction(&framed)
-                .is_some()
-            {
-                changed = true;
-                continue;
+            match self.frames.dispatch_component_interaction(&framed) {
+                Ok(Some(_)) => match self.reconcile_component_output_batches() {
+                    Ok(()) => {
+                        changed = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "tela-app-runtime: discarded failed candidate component transaction: {error}"
+                        );
+                        continue;
+                    }
+                },
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "tela-app-runtime: discarded failed candidate component transaction: {error}"
+                    );
+                    continue;
+                }
             }
             let interaction = framed.into_parts().1;
             match &interaction {
-                KernelInteraction::RequestFocus { .. } | KernelInteraction::FocusChanged { .. } => {
-                    changed = true
-                }
-                KernelInteraction::Hover { .. } => changed = true,
+                // `KernelInputPlan::dispatch` has already updated candidate ViewStateStore for
+                // these host facts. Their caller schedules the host-only candidate separately;
+                // reporting them as controller changes would unnecessarily rerun root render.
+                KernelInteraction::RequestFocus { .. }
+                | KernelInteraction::FocusChanged { .. }
+                | KernelInteraction::Hover { .. } => {}
                 KernelInteraction::Scroll { node_id, delta } => {
-                    changed |= self.apply_scroll(*node_id, delta.y);
+                    self.apply_scroll(*node_id, delta.y);
                 }
-                _ => {
-                    let outcome = self.controller.on_kernel_interaction(&interaction);
-                    changed |= self.apply_controller_outcome(outcome);
-                }
+                // HostInput 不得回退到 `AppController` 直接改写应用状态。有目标的
+                // 交互事实已经在上面由组件私有 Event 消费；宿主状态事实由本 match 的
+                // 前几个分支候选化。剩下无目标的 core 信号也不能借这条路径变成应用
+                // 动作；若将来需要新语义，必须先定义其候选组件路由合同。
+                _ => {}
             }
         }
         changed
     }
 
+    /// 在每个候选 Output 批结束时重建组件路由快照。
+    ///
+    /// 这不是最终 frame 的 resolve/present：它只让 `FrameCoordinator` 取得批末 Props
+    /// 投影和 Show/For 对账后的 lease/Parent Event 表，供下一批安全派发。最终候选仍由
+    /// `ensure_frame` 统一经过宿主 reconcile、布局和 present；两次装配共享 pending
+    /// transaction 的 lease 种子，因此不会产生代数漂移。
+    fn reconcile_component_output_batches(&mut self) -> Result<(), String> {
+        let candidate_view_state = self.view_state.clone();
+        let context = self.candidate_context(&candidate_view_state);
+        let animation_clock = self.animation_clock;
+        let controller = &mut self.controller;
+        self.frames
+            .reconcile_component_outputs(|frames| {
+                let mut build = frames.begin_build();
+                build.set_animation_clock(animation_clock);
+                let output = controller
+                    .render(&mut build, &context)
+                    .map_err(|error| error.to_string())?;
+                frames
+                    .prepare(output)
+                    .map(|prepared| prepared.into_component_output_projection())
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    /// 把已经入队的后台组件 Event 交给当前 active 组件实例。
+    ///
+    /// 该方法只在 UI 线程、且没有尚待 presented 的候选帧时调用。它不释放 AppAction；
+    /// handler 的 State/Output 先进入 FrameCoordinator 的候选事务，之后仍走普通的
+    /// assemble、layout、present 原子提交路径。
+    fn dispatch_queued_component_events(&mut self) -> bool {
+        let report = match self.frames.dispatch_queued_component_events() {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!(
+                    "tela-app-runtime: discarded failed candidate external component event transaction: {error}"
+                );
+                return false;
+            }
+        };
+        if report.delivered == 0 {
+            return false;
+        }
+        if let Err(error) = self.reconcile_component_output_batches() {
+            eprintln!(
+                "tela-app-runtime: discarded failed candidate external component event transaction: {error}"
+            );
+            return false;
+        }
+        self.projection_invalidated = true;
+        true
+    }
+
     /// 滚轮/触控板滚动：按 active 帧的 scroll_bounds 应用并钳制偏移。
     fn apply_scroll(&mut self, node_id: NodeId, delta_y: f32) -> bool {
-        let Some(bounds) = self.frames.active().and_then(|active| {
+        let Some((key, max_offset_y)) = self.frames.active().and_then(|active| {
             active
                 .frame()
                 .scroll_bounds
                 .iter()
                 .find(|bounds| bounds.node_id == node_id)
+                .map(|bounds| (bounds.key.clone(), bounds.max_offset_y))
         }) else {
             return false;
         };
-        let mut state = self.view_state.scroll(&bounds.key);
-        let next = (state.offset_y + delta_y).clamp(0.0, bounds.max_offset_y);
+        let mut state = self.host_input_state_mut().scroll(&key);
+        let next = (state.offset_y + delta_y).clamp(0.0, max_offset_y);
         if (next - state.offset_y).abs() < f32::EPSILON {
             return false;
         }
         state.offset_y = next;
-        let key = bounds.key.clone();
-        self.view_state.set_scroll(key, state);
+        self.host_input_state_mut().set_scroll(key.clone(), state);
+        self.sync_staged_host_signals();
+        self.invalidate_scroll_projection(key);
         true
     }
 
-    fn retain_previous_frame(
-        &mut self,
-        dirty: BTreeSet<SemanticKey>,
-        reason: impl std::fmt::Display,
-    ) {
+    fn retain_previous_frame(&mut self, dirty: DirtySet, reason: impl std::fmt::Display) {
         eprintln!("tela-app-runtime: retain previous frame: {reason}");
         session_trace!("session_ensure_frame result=retain");
         self.frames.abort_component_transaction();
@@ -1275,16 +1739,43 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
 
     fn apply_controller_action(&mut self, action: A) -> bool {
         let outcome = self.controller.handle_action(action);
-        self.apply_controller_outcome(outcome)
+        self.stage_controller_outcome(outcome)
     }
 
-    fn apply_controller_outcome(&mut self, outcome: ControllerOutcome) -> bool {
-        self.pending_effects.extend(outcome.effects);
+    /// Applies an action only after the candidate that produced it has committed. Its effects
+    /// therefore bypass the next-candidate staging queue and become available to the just-acked
+    /// host through `take_presented_effects`.
+    fn apply_presented_controller_action(&mut self, action: A) -> bool {
+        let outcome = self.controller.handle_action(action);
+        self.release_controller_outcome(outcome)
+    }
+
+    fn stage_controller_outcome(&mut self, outcome: ControllerOutcome) -> bool {
+        let changed = self.apply_controller_outcome_state(&outcome);
+        self.staged_effects.extend(outcome.effects);
+        changed
+    }
+
+    fn release_controller_outcome(&mut self, outcome: ControllerOutcome) -> bool {
+        let changed = self.apply_controller_outcome_state(&outcome);
+        self.presented_effects.extend(outcome.effects);
+        changed
+    }
+
+    fn apply_controller_outcome_state(&mut self, outcome: &ControllerOutcome) -> bool {
         for key in &outcome.scroll_resets {
             self.view_state
                 .set_scroll(key.clone(), ScrollState::default());
         }
-        outcome.changed || !outcome.scroll_resets.is_empty()
+        outcome.changed || !outcome.scroll_resets.is_empty() || !outcome.effects.is_empty()
+    }
+
+    fn restore_staged_effects(&mut self, mut effects: Vec<AppEffect>) {
+        if effects.is_empty() {
+            return;
+        }
+        effects.append(&mut self.staged_effects);
+        self.staged_effects = effects;
     }
 }
 
@@ -1339,7 +1830,7 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
         let spine = self
             .pending_frame
             .as_ref()
-            .map(|pending| pending.dirty.iter().cloned().collect())
+            .map(|pending| pending.dirty.semantic_keys().into_iter().collect())
             .unwrap_or_default();
         let retained_tree = self
             .pending_frame
@@ -1371,13 +1862,37 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
         };
         self.pending_reuses_active = self.pending_frame.is_none();
         let schedule = self.animation_schedule();
-        let cursor = if self.input_focused() {
+        // Publication describes the exact candidate frame the Host is about to present. Host
+        // input state therefore comes from PendingFrame when one exists; reading active state
+        // here would publish a stale cursor/focus while correctly keeping active state isolated.
+        let (hover_clickable, input_focused) = {
+            let state = self
+                .pending_frame
+                .as_ref()
+                .map(|pending| &pending.view_state)
+                .unwrap_or(&self.view_state);
+            let hover_key = state.hover_key().cloned();
+            let focus_key = state.current_focus_key().cloned();
+            let hover_clickable = hover_key.as_ref().is_some_and(|key| {
+                self.pending_frame
+                    .as_ref()
+                    .map(|pending| pending.controls.clickable.contains(key))
+                    .unwrap_or_else(|| self.clickable_keys.contains(key))
+            });
+            let input_focused = focus_key.as_ref().is_some_and(|key| {
+                self.pending_frame
+                    .as_ref()
+                    .map(|pending| pending.resolved.tree())
+                    .or_else(|| self.frames.active().map(|active| active.tree()))
+                    .and_then(|tree| tree.interact_for_key(key))
+                    .and_then(|interact| interact.input.as_ref())
+                    .is_some()
+            });
+            (hover_clickable, input_focused)
+        };
+        let cursor = if input_focused {
             CursorKind::Text
-        } else if self
-            .view_state
-            .hover_key()
-            .is_some_and(|key| self.clickable_keys.contains(key))
-        {
+        } else if hover_clickable {
             CursorKind::Pointer
         } else {
             CursorKind::Default
@@ -1391,12 +1906,11 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
             status: AppStatus {
                 frame_token: Some(token),
                 cursor,
-                input_focused: self.input_focused(),
+                input_focused,
                 input_value: self.input_value(),
                 animation_active: schedule.active,
                 next_deadline_ms: schedule.next_deadline_ms,
             },
-            effects: self.pending_effects.clone(),
         })
     }
 
@@ -1414,11 +1928,14 @@ impl<A: Clone + 'static, C: AppController<A>> ApplicationSession for Application
         self.pending_publication_token = None;
         self.pending_reuses_active = false;
         self.presented_publication_token = Some(token);
-        self.pending_effects.clear();
         Ok(AppDispatchOutcome {
             handled: true,
             publish_requested,
         })
+    }
+
+    fn take_presented_effects(&mut self) -> Vec<AppEffect> {
+        std::mem::take(&mut self.presented_effects)
     }
 
     fn rejected(&mut self, token: AppFrameToken) {
@@ -1486,7 +2003,7 @@ fn scroll_inputs_for(
         .collect()
 }
 
-fn clamp_scroll_states(view_state: &mut ViewStateStore, frame: &UiFrame) -> bool {
+fn clamp_scroll_states(view_state: &mut ViewStateStore, frame: &RenderPlan) -> bool {
     let mut changed = false;
     for bounds in &frame.scroll_bounds {
         let state = view_state.scroll(&bounds.key);
@@ -1532,10 +2049,12 @@ mod tests {
 
     use super::*;
     use tela_contract::{
-        IconProvider, IconRequest, IconResolveError, IconVisual, IdentityConcern, InteractConcern,
-        KeyStrategy, Overflow, PointerButtons, PointerId, PointerKind, PointerPhase, Size,
-        TextMeasureRequest, TextMeasurer, TextMetrics, UpdateMode,
+        ContentConcern, IconProvider, IconRequest, IconResolveError, IconVisual, IdentityConcern,
+        InteractConcern, KeyStrategy, Overflow, PointerButtons, PointerId, PointerKind,
+        PointerPhase, Size, TextMeasureRequest, TextMeasurer, TextMetrics, UpdateMode,
     };
+    use tela_ui_dsl::prelude::{Column, Text};
+    use tela_ui_dsl::{Body, Children, DslComponent, ViewChild, ViewSite, signal, ui};
 
     static TEST_RESOURCES: TestResources = TestResources;
 
@@ -1587,7 +2106,11 @@ mod tests {
         Signal<Viewport>,
         Signal<Option<SemanticKey>>,
         Signal<Option<SemanticKey>>,
+        Signal<Option<SemanticKey>>,
         Signal<AnimationClock>,
+        Signal<bool>,
+        Signal<Option<SemanticKey>>,
+        Signal<ScrollState>,
     );
 
     /// 最小可交互夹具：可滚动列表 + 可点击行 + 可开关模态。
@@ -1595,6 +2118,61 @@ mod tests {
         clicks: Vec<u32>,
         modal_open: bool,
         host_signals: Option<HostProjectionSignals>,
+        stale_source: Signal<u32>,
+        render_count: usize,
+    }
+
+    /// A retained child gives the scheduler a legitimate narrow graph candidate. It watches both
+    /// a Host source and an ordinary application source, so the mixed path must choose one
+    /// atomic candidate rather than independently selecting two narrow paths.
+    #[derive(DslComponent)]
+    struct RetainedHostProbe {
+        #[watch]
+        value: Signal<u32>,
+        #[watch]
+        maximized: Signal<bool>,
+    }
+
+    impl RetainedHostProbe {
+        fn view<A: 'static>(
+            &self,
+            build: &mut ViewBuild<A>,
+            children: &Children<'_, A>,
+        ) -> ViewResult<ViewOutput<A>> {
+            // The fixture explicitly consumes its empty slot so it uses the ordinary retained
+            // slot protocol; the scheduler must not need a leaf-node exception.
+            let _children = children.build(build)?;
+            ui!(build {
+                <Text value={format!("probe={} window={}", self.value.get(), self.maximized.get())} />
+            })
+        }
+    }
+
+    struct HostAndRetainedController {
+        value: Signal<u32>,
+        render_count: usize,
+    }
+
+    impl AppController<()> for HostAndRetainedController {
+        fn render(
+            &mut self,
+            build: &mut ViewBuild<()>,
+            ctx: &FrameContext,
+        ) -> ViewResult<ViewOutput<()>> {
+            self.render_count += 1;
+            ui!(build {
+                <Column>
+                    <RetainedHostProbe
+                        value={self.value.clone()}
+                        maximized={ctx.window_maximized_signal.clone()}
+                    />
+                </Column>
+            })
+        }
+
+        fn handle_action(&mut self, _action: ()) -> ControllerOutcome {
+            ControllerOutcome::changed(false)
+        }
     }
 
     fn keyed(mut node: UiNode, key: &str) -> UiNode {
@@ -1666,14 +2244,19 @@ mod tests {
     impl AppController<FixtureAction> for FixtureController {
         fn render(
             &mut self,
-            _build: &mut ViewBuild<FixtureAction>,
+            build: &mut ViewBuild<FixtureAction>,
             ctx: &FrameContext,
         ) -> ViewResult<ViewOutput<FixtureAction>> {
+            self.render_count += 1;
             self.host_signals = Some((
                 ctx.viewport_signal.clone(),
                 ctx.hover_signal.clone(),
+                ctx.pressed_signal.clone(),
                 ctx.focus_signal.clone(),
                 ctx.animation_clock_signal.clone(),
+                ctx.window_maximized_signal.clone(),
+                ctx.modal_signal.clone(),
+                ctx.scroll_signal(&SemanticKey("fixture.scroll".to_owned())),
             ));
             let rows: Vec<UiNode> = (0..10)
                 .map(|index| fixed_box(&format!("row.{index}"), 180.0, 20.0, true))
@@ -1686,7 +2269,17 @@ mod tests {
             if self.modal_open {
                 root.push(fixed_box("fixture.modal", 120.0, 40.0, true));
             }
-            Ok(ViewOutput::opaque(column("fixture.root", root)))
+            let watch = build.watch_source(
+                &self.stale_source,
+                ViewSite::new(file!(), line!(), column!()),
+            );
+            build.finish(
+                Body::new(
+                    vec![ViewChild::node(column("fixture.root", root))],
+                    vec![watch],
+                ),
+                ViewSite::new(file!(), line!(), column!()),
+            )
         }
 
         fn handle_action(&mut self, action: FixtureAction) -> ControllerOutcome {
@@ -1703,20 +2296,65 @@ mod tests {
     }
 
     fn app() -> Application<FixtureAction, FixtureController> {
-        Application::new(
+        app_with_stale_source().0
+    }
+
+    fn app_with_focus_ring() -> Application<FixtureAction, FixtureController> {
+        let mut application = app();
+        application.config.focus_appearance = Some(FocusAppearance {
+            color: tela_contract::Color::BLUE,
+            width: 6.0,
+            inset: 0.0,
+        });
+        application
+    }
+
+    fn app_with_stale_source() -> (
+        Application<FixtureAction, FixtureController>,
+        SignalWriter<u32>,
+    ) {
+        let (stale_writer, stale_source) = signal(0_u32);
+        let application = Application::new(
             &TEST_RESOURCES,
             FixtureController {
                 clicks: Vec::new(),
                 modal_open: false,
                 host_signals: None,
+                stale_source,
+                render_count: 0,
             },
             ApplicationConfig::default(),
-        )
+        );
+        (application, stale_writer)
+    }
+
+    fn host_and_retained_app() -> (
+        Application<(), HostAndRetainedController>,
+        SignalWriter<u32>,
+    ) {
+        let (writer, value) = signal(0_u32);
+        let application = Application::new(
+            &TEST_RESOURCES,
+            HostAndRetainedController {
+                value,
+                render_count: 0,
+            },
+            ApplicationConfig::default(),
+        );
+        (application, writer)
     }
 
     fn ensure_and_present(application: &mut Application<FixtureAction, FixtureController>) {
         assert!(application.ensure_frame());
         application.frame_presented();
+    }
+
+    fn tree_contains_text(node: &UiNode, text: &str) -> bool {
+        matches!(node.content.as_ref(), Some(ContentConcern::Text(content)) if content.text == text)
+            || node
+                .children
+                .iter()
+                .any(|child| tree_contains_text(child, text))
     }
 
     fn wheel_at(
@@ -1776,6 +2414,264 @@ mod tests {
         assert!(wheel_at(&mut application, max_offset * 4.0) > 0);
         ensure_and_present(&mut application);
         assert_eq!(scroll_offset(&application), max_offset);
+    }
+
+    #[test]
+    fn scroll_projection_reuses_the_active_component_tree() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        let renders_before_scroll = application.controller().render_count;
+
+        assert!(wheel_at(&mut application, 40.0) > 0);
+        assert!(application.ensure_frame());
+        assert_eq!(
+            application.controller().render_count,
+            renders_before_scroll,
+            "a host-only scroll candidate must reuse active composition instead of re-running controller render"
+        );
+        let damage = application.frame_damage();
+        assert!(damage.flags.contains(DirtyFlags::VISUAL));
+        assert!(
+            damage
+                .rects
+                .iter()
+                .all(|rect| rect.w <= 200.0 && rect.h <= 100.0),
+            "scroll damage must be bounded by the scroll viewport, not the whole window: {damage:?}"
+        );
+        application.frame_presented();
+        assert_eq!(scroll_offset(&application), 40.0);
+    }
+
+    #[test]
+    fn host_projection_and_retained_dirty_share_one_narrow_candidate() {
+        let (mut application, value_writer) = host_and_retained_app();
+        assert!(application.ensure_frame());
+        application.frame_presented();
+        assert!(tree_contains_text(
+            application.active().expect("initial frame").0.root(),
+            "probe=0 window=false"
+        ));
+
+        // 首帧是全局投影，随后这一帧建立可独立重入的 committed memo entry。
+        value_writer.set(1);
+        assert!(application.ensure_frame());
+        application.frame_presented();
+        assert!(tree_contains_text(
+            application.active().expect("memo primed frame").0.root(),
+            "probe=1 window=false"
+        ));
+        let renders_before = application.controller().render_count;
+
+        assert!(application.set_window_maximized(true));
+        value_writer.set(2);
+        assert!(application.ensure_frame());
+        assert_eq!(
+            application.controller().render_count,
+            renders_before,
+            "explicit Host and retained Signal sources must share one retained candidate without re-running the root"
+        );
+        application.frame_presented();
+        assert!(tree_contains_text(
+            application.active().expect("updated frame").0.root(),
+            "probe=2 window=true"
+        ));
+    }
+
+    #[test]
+    fn rejected_mixed_host_and_retained_candidate_retries_without_root_reassembly() {
+        let (mut application, value_writer) = host_and_retained_app();
+        assert!(application.ensure_frame());
+        application.frame_presented();
+
+        // As above, establish the retained entry before testing the mixed candidate path.
+        value_writer.set(1);
+        assert!(application.ensure_frame());
+        application.frame_presented();
+        let renders_before = application.controller().render_count;
+
+        assert!(application.set_window_maximized(true));
+        value_writer.set(2);
+        assert!(application.ensure_frame());
+        assert_eq!(application.controller().render_count, renders_before);
+
+        application.frame_rejected();
+        assert!(tree_contains_text(
+            application
+                .active()
+                .expect("active frame after rejection")
+                .0
+                .root(),
+            "probe=1 window=false"
+        ));
+
+        assert!(application.ensure_frame());
+        assert_eq!(
+            application.controller().render_count,
+            renders_before,
+            "a rejected narrow candidate restores both source edges without escalating to root assembly"
+        );
+        application.frame_presented();
+        assert!(tree_contains_text(
+            application.active().expect("retried frame").0.root(),
+            "probe=2 window=true"
+        ));
+    }
+
+    #[test]
+    fn focus_projection_reuses_the_active_tree_and_repaints_only_focus_coordinates() {
+        let mut application = app_with_focus_ring();
+        ensure_and_present(&mut application);
+        let renders_before_focus = application.controller().render_count;
+
+        application.set_current_focus_key(Some(SemanticKey("row.0".to_owned())));
+        assert!(application.ensure_frame());
+        assert_eq!(
+            application.controller().render_count,
+            renders_before_focus,
+            "a focus-only candidate must reuse active component composition"
+        );
+        let initial_focus_damage = application.frame_damage();
+        assert!(initial_focus_damage.flags.contains(DirtyFlags::VISUAL));
+        assert!(
+            initial_focus_damage
+                .rects
+                .iter()
+                .all(|rect| rect.w < 200.0 && rect.h < 40.0),
+            "focus damage must be bounded by the focused node, not the whole viewport: {initial_focus_damage:?}"
+        );
+        assert_eq!(
+            application.view_state().current_focus_key(),
+            None,
+            "a pending focus candidate must not mutate the active host state"
+        );
+        application.frame_rejected();
+        assert_eq!(
+            application.view_state().current_focus_key(),
+            None,
+            "rejection keeps the previous active focus"
+        );
+        assert!(application.ensure_frame());
+        assert!(
+            application
+                .frame_damage()
+                .rects
+                .iter()
+                .all(|rect| rect.w < 200.0 && rect.h < 40.0),
+            "a rejected focus candidate must retain its local damage coordinates for retry"
+        );
+        application.frame_presented();
+
+        application.set_current_focus_key(Some(SemanticKey("fixture.button".to_owned())));
+        assert!(application.ensure_frame());
+        assert_eq!(
+            application.controller().render_count,
+            renders_before_focus,
+            "switching focus must not re-run controller render"
+        );
+        let switched_focus_damage = application.frame_damage();
+        assert!(
+            switched_focus_damage.rects.len() >= 2,
+            "old and new focus coordinates must both be repainted: {switched_focus_damage:?}"
+        );
+        assert!(
+            switched_focus_damage
+                .rects
+                .iter()
+                .all(|rect| rect.w < 200.0 && rect.h < 40.0),
+            "focus transition damage must stay local: {switched_focus_damage:?}"
+        );
+    }
+
+    #[test]
+    fn rejected_host_candidate_keeps_active_state_and_retries_the_input() {
+        let mut application = app();
+        ensure_and_present(&mut application);
+        let key = SemanticKey("fixture.scroll".to_owned());
+        let scroll_source = application
+            .controller()
+            .host_signals
+            .as_ref()
+            .expect("initial render captures host sources")
+            .7
+            .clone();
+
+        assert!(application.set_scroll(
+            key.clone(),
+            ScrollState {
+                offset_y: 40.0,
+                ..ScrollState::default()
+            }
+        ));
+        assert_eq!(
+            application.view_state().scroll(&key).offset_y,
+            0.0,
+            "HostInput must not mutate active state before its candidate presents"
+        );
+        assert!(application.ensure_frame());
+        assert_eq!(application.view_state().scroll(&key).offset_y, 0.0);
+        assert_eq!(scroll_source.get().offset_y, 40.0);
+
+        application.frame_rejected();
+        assert_eq!(
+            application.view_state().scroll(&key).offset_y,
+            0.0,
+            "rejection keeps the prior active projection"
+        );
+        assert_eq!(
+            scroll_source.get().offset_y,
+            0.0,
+            "rejection restores the active value of the same scroll source"
+        );
+        assert!(application.ensure_frame());
+        application.frame_presented();
+        assert_eq!(
+            application.view_state().scroll(&key).offset_y,
+            40.0,
+            "the rejected HostInput is retried rather than silently dropped"
+        );
+    }
+
+    #[test]
+    fn stale_presented_host_candidate_keeps_and_retries_its_host_input() {
+        let (mut application, stale_writer) = app_with_stale_source();
+        ensure_and_present(&mut application);
+        let key = SemanticKey("fixture.scroll".to_owned());
+        let scroll_source = application
+            .controller()
+            .host_signals
+            .as_ref()
+            .expect("initial render captures host sources")
+            .7
+            .clone();
+
+        assert!(application.set_scroll(
+            key.clone(),
+            ScrollState {
+                offset_y: 40.0,
+                ..ScrollState::default()
+            }
+        ));
+        assert!(application.ensure_frame());
+        stale_writer.set(1);
+
+        assert!(
+            application.frame_presented(),
+            "a stale candidate asks the host to publish the retry"
+        );
+        assert_eq!(application.view_state().scroll(&key).offset_y, 0.0);
+        assert_eq!(
+            scroll_source.get().offset_y,
+            0.0,
+            "the old active Host graph remains observable after stale rejection"
+        );
+
+        assert!(application.ensure_frame());
+        application.frame_presented();
+        assert_eq!(
+            application.view_state().scroll(&key).offset_y,
+            40.0,
+            "a stale presented candidate must not lose its already accepted HostInput"
+        );
     }
 
     #[test]
@@ -1894,7 +2790,7 @@ mod tests {
     fn host_projection_values_are_stable_signal_sources() {
         let mut application = app();
         ensure_and_present(&mut application);
-        let (viewport, hover, focus, clock) = application
+        let (viewport, hover, pressed, focus, clock, window_maximized, modal, scroll) = application
             .controller()
             .host_signals
             .as_ref()
@@ -1905,8 +2801,12 @@ mod tests {
             ApplicationConfig::default().initial_viewport
         );
         assert_eq!(hover.get(), None);
+        assert_eq!(pressed.get(), None);
         assert_eq!(focus.get(), None);
         assert_eq!(clock.get(), AnimationClock::default());
+        assert!(!window_maximized.get());
+        assert_eq!(modal.get(), None);
+        assert_eq!(scroll.get(), ScrollState::default());
 
         assert!(application.set_viewport(800.0, 600.0, 1.0));
         assert_eq!(
@@ -1923,9 +2823,33 @@ mod tests {
             "fixture.button",
         )));
         assert_eq!(hover.get(), Some(SemanticKey("fixture.button".to_owned())));
+        application.handle_pointer(PointerEvent::mouse_down(point_for_key(
+            &application,
+            "fixture.button",
+        )));
+        assert_eq!(
+            pressed.get(),
+            Some(SemanticKey("fixture.button".to_owned()))
+        );
+
+        assert!(application.set_scroll(
+            SemanticKey("fixture.scroll".to_owned()),
+            ScrollState {
+                offset_y: 24.0,
+                ..ScrollState::default()
+            }
+        ));
+        assert_eq!(scroll.get().offset_y, 24.0);
 
         assert!(!application.on_animation_tick(42));
         assert_eq!(clock.get(), AnimationClock { timestamp_ms: 42 });
+        assert!(application.set_window_maximized(true));
+        assert!(window_maximized.get());
+
+        application.controller_mut().modal_open = true;
+        application.invalidate_frame();
+        ensure_and_present(&mut application);
+        assert_eq!(modal.get(), Some(SemanticKey("fixture.modal".to_owned())));
     }
 
     #[test]

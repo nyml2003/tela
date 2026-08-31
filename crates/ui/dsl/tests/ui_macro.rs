@@ -1,1351 +1,748 @@
-use std::collections::BTreeSet;
+//! v3 DSL integration tests.
+//!
+//! These tests deliberately exercise the public composition surface: HostInput reaches a
+//! child-owned handler, the child reports typed
+//! Output to its nearest logical parent, and only a successfully committed frame releases the
+//! resulting application action.
+
+use std::cell::Cell;
 
 use tela_contract::{
-    KernelInteraction, NodeKind, SemanticKey, TextInputEvent, TextInputKind, TextInputSpec,
-    TextSelection, UiBuildError, UiFrame, Viewport,
+    KernelInteraction, NodeKind, RenderPlan, SemanticKey, UiFrame, UiNode, Viewport,
 };
-use tela_core::UiTree;
 use tela_ui_dsl::prelude::*;
 use tela_ui_dsl::{
-    Body, DslComponent, FrameCoordinator, FramePrepareError, FramedInteraction, ItemKey, Signal,
-    ViewBuild, ViewBuildError, ViewOutput, ViewResult, ui, with_context,
+    Body, Children, ComponentAssembleContext, ComponentDispatch, ComponentHostInputSpec,
+    ComponentIdentity, ComponentInput, ComponentOutcome, DslComponent, FrameCoordinator,
+    FramePrepareError, FramedInteraction, OutputConnection, UiSpec, ViewBuild, ViewBuildError,
+    ViewChild, ViewOutput, ViewResult, ViewSite, component_host_input_route, ignore_output, ui,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Action {
-    Save,
-    Open(u32),
-    Search(String),
-    Rename { entry_id: u32, value: String },
-    ClearSearch,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AppAction {
+    ChildPressed { total: u32 },
+    GrandparentObserved { total: u32 },
 }
 
-struct State {
-    count: Signal<u32>,
-    child_count: Signal<u32>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ChildOutput {
+    Pressed,
 }
 
-struct Item {
-    id: u32,
-    name: &'static str,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParentEvent {
+    Child(ChildOutput),
 }
 
-#[derive(Clone)]
-struct WatchedItem {
-    id: u32,
-    value: Signal<u32>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParentOutput {
+    total: u32,
 }
 
-struct WatchedGroup {
-    id: u32,
-    items: Vec<WatchedItem>,
+#[derive(Clone, Default)]
+struct ChildProps {
+    key: Option<String>,
 }
 
-struct DomainItemId(&'static str);
+struct Child;
+struct ChildSpec;
 
-impl ItemKey for DomainItemId {
-    fn encode_item_key(&self) -> String {
-        format!("domain:{}", self.0)
+impl DslComponent for Child {
+    type UiSpec<A: 'static> = ChildSpec;
+}
+
+impl<A: 'static> UiSpec<A> for ChildSpec {
+    type Props = ChildProps;
+    type State = ();
+    type Event = ();
+    type Output = ChildOutput;
+
+    fn identity_key(props: &Self::Props) -> Option<String> {
+        props.key.clone()
+    }
+
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
+        props: Self::Props,
+        _state: &Self::State,
+        _children: Children<'a, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let site = context.site();
+        let key = props.key.unwrap_or_else(|| "child".to_owned());
+        single_view(context.build(), site, key)
+    }
+
+    fn handle(
+        _state: &mut Self::State,
+        _props: &Self::Props,
+        _event: Self::Event,
+    ) -> ComponentOutcome<Self::Output> {
+        ComponentOutcome::Output(ChildOutput::Pressed)
+    }
+
+    fn wire_output<M: 'static>(
+        view: ViewOutput<A>,
+        identity: ComponentIdentity,
+        props: &Self::Props,
+        output: OutputConnection<Self::Output, A, M>,
+        site: ViewSite,
+    ) -> ViewResult<ViewOutput<A>> {
+        let key = props.key.clone().unwrap_or_else(|| "child".to_owned());
+        Ok(
+            view.attach_host_input_route(component_host_input_route::<Child, A, _, M>(
+                ComponentHostInputSpec {
+                    identity,
+                    site,
+                    key: key.into(),
+                    props: props.clone(),
+                    event_context: (),
+                    event: child_semantic_input,
+                    output,
+                },
+            )),
+        )
     }
 }
 
-struct DomainItem {
-    id: DomainItemId,
-    name: &'static str,
+fn child_semantic_input(_: (), input: ComponentInput<'_>) -> Option<()> {
+    matches!(
+        input,
+        ComponentInput::Ui {
+            action: KernelInteraction::Activate { .. }
+                | KernelInteraction::CloseModal { .. }
+                | KernelInteraction::ShortcutActivated { .. },
+            ..
+        }
+    )
+    .then_some(())
 }
 
-/// 测试组件：订阅 `Signal`，渲染其值（替代旧 `@watch` 指令）。
-#[derive(DslComponent)]
-struct WatchedCount {
-    #[watch]
-    count: Signal<u32>,
+#[derive(Clone, Default)]
+struct ParentProps;
+
+struct Parent;
+struct ParentSpec;
+
+impl DslComponent for Parent {
+    type UiSpec<A: 'static> = ParentSpec;
 }
 
-impl WatchedCount {
-    fn view<A>(&self, build: &mut ViewBuild<A>, _children: Body<A>) -> ViewResult<ViewOutput<A>> {
-        ui!(build { <Text value={self.count.get().to_string()} /> })
-    }
-}
+impl<A: 'static> UiSpec<A> for ParentSpec {
+    type Props = ParentProps;
+    type State = u32;
+    type Event = ParentEvent;
+    type Output = ParentOutput;
 
-/// 从当前词法作用域读取一个 `String` 并渲染为文本。
-///
-/// derive 契约（001 §2）下作用域注入不再作为 derive 字段通道；此普通函数
-/// 直接消费 `ViewContext::inject`，验证 provide/inject 机制本身仍然可用。
-fn inject_label(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    let label: String = build
-        .current_scope()
-        .inject::<String>(tela_ui_dsl::ViewSite::new(file!(), line!(), column!()))?
-        .clone();
-    ui!(build { <Text value={label} /> })
-}
-
-fn render_basics(build: &mut ViewBuild<Action>, state: &State) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column key={"browse.root"} gap={8.0}>
-            <WatchedCount count={state.count.clone()} />
-            <Frame clickable={true}>
-                <Text value={"Save"} />
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
+        _props: Self::Props,
+        _state: &Self::State,
+        _children: Children<'a, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let build = context.build();
+        ui!(build {
+            <Frame>
+                <Child key={"child"} @output={child_to_parent} />
             </Frame>
-        </Column>
-    })
+        })
+    }
+
+    fn handle(
+        state: &mut Self::State,
+        _props: &Self::Props,
+        event: Self::Event,
+    ) -> ComponentOutcome<Self::Output> {
+        match event {
+            ParentEvent::Child(ChildOutput::Pressed) => {
+                *state += 1;
+                ComponentOutcome::Output(ParentOutput { total: *state })
+            }
+        }
+    }
 }
 
-fn render_child(build: &mut ViewBuild<Action>, state: &State) -> ViewResult<ViewOutput<Action>> {
+fn child_to_parent(output: ChildOutput) -> ParentEvent {
+    ParentEvent::Child(output)
+}
+
+fn parent_to_action(output: ParentOutput) -> AppAction {
+    AppAction::ChildPressed {
+        total: output.total,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GrandparentEvent {
+    Parent(ParentOutput),
+}
+
+#[derive(Clone, Default)]
+struct GrandparentProps;
+
+struct Grandparent;
+struct GrandparentSpec;
+
+impl DslComponent for Grandparent {
+    type UiSpec<A: 'static> = GrandparentSpec;
+}
+
+impl<A: 'static> UiSpec<A> for GrandparentSpec {
+    type Props = GrandparentProps;
+    type State = u32;
+    type Event = GrandparentEvent;
+    type Output = u32;
+
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
+        _props: Self::Props,
+        _state: &Self::State,
+        _children: Children<'a, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let build = context.build();
+        ui!(build {
+            <Frame>
+                <Parent @output={parent_to_grandparent} />
+            </Frame>
+        })
+    }
+
+    fn handle(
+        state: &mut Self::State,
+        _props: &Self::Props,
+        event: Self::Event,
+    ) -> ComponentOutcome<Self::Output> {
+        match event {
+            GrandparentEvent::Parent(output) => {
+                *state = output.total;
+                ComponentOutcome::Output(*state)
+            }
+        }
+    }
+}
+
+fn parent_to_grandparent(output: ParentOutput) -> GrandparentEvent {
+    GrandparentEvent::Parent(output)
+}
+
+fn grandparent_to_action(total: u32) -> AppAction {
+    AppAction::GrandparentObserved { total }
+}
+
+fn render_root(build: &mut ViewBuild<AppAction>) -> ViewResult<ViewOutput<AppAction>> {
     ui!(build {
-        <Frame>
-            <WatchedCount count={state.child_count.clone()} />
-        </Frame>
+        <Parent @output={parent_to_action} />
     })
 }
 
-fn temporary_count_signal(state: &State) -> Signal<u32> {
-    state.count.clone()
-}
-
-fn render_temporary_watch_source(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-) -> ViewResult<ViewOutput<Action>> {
+fn render_batched_root(build: &mut ViewBuild<AppAction>) -> ViewResult<ViewOutput<AppAction>> {
     ui!(build {
-        <Frame>
-            <WatchedCount count={temporary_count_signal(state)} />
-        </Frame>
+        <Grandparent @output={grandparent_to_action} />
     })
 }
 
-fn render_node_scoped_watch(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-) -> ViewResult<ViewOutput<Action>> {
+#[derive(Clone, Default)]
+struct HijackerProps;
+
+struct Hijacker;
+struct HijackerSpec;
+
+impl DslComponent for Hijacker {
+    type UiSpec<A: 'static> = HijackerSpec;
+}
+
+impl<A: 'static> UiSpec<A> for HijackerSpec {
+    type Props = HijackerProps;
+    type State = ();
+    type Event = ();
+    type Output = ();
+
+    fn assemble<'a>(
+        context: &mut ComponentAssembleContext<'_, A>,
+        _props: Self::Props,
+        _state: &Self::State,
+        _children: Children<'a, A>,
+    ) -> ViewResult<ViewOutput<A>> {
+        let build = context.build();
+        ui!(build {
+            <Frame>
+                <Child key={"child"} @output={ignore_output} />
+            </Frame>
+        })
+    }
+
+    fn wire_output<M: 'static>(
+        view: ViewOutput<A>,
+        identity: ComponentIdentity,
+        props: &Self::Props,
+        output: OutputConnection<Self::Output, A, M>,
+        site: ViewSite,
+    ) -> ViewResult<ViewOutput<A>> {
+        // A wrapper knows a child's key and attempts to install its own handler there. Candidate
+        // validation must reject this cross-component route.
+        Ok(
+            view.attach_host_input_route(component_host_input_route::<Hijacker, A, _, M>(
+                ComponentHostInputSpec {
+                    identity,
+                    site,
+                    key: "child".into(),
+                    props: props.clone(),
+                    event_context: (),
+                    event: hijacker_input,
+                    output,
+                },
+            )),
+        )
+    }
+}
+
+fn hijacker_input(_: (), input: ComponentInput<'_>) -> Option<()> {
+    matches!(
+        input,
+        ComponentInput::Ui {
+            action: KernelInteraction::Activate { .. },
+            ..
+        }
+    )
+    .then_some(())
+}
+
+fn render_hijacker_root(build: &mut ViewBuild<AppAction>) -> ViewResult<ViewOutput<AppAction>> {
     ui!(build {
-        <Column>
-            <WatchedCount count={state.count.clone()} />
-        </Column>
+        <Hijacker />
     })
 }
 
-fn render_explicit_child_scope(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    let site = tela_ui_dsl::ViewSite::new(file!(), line!(), column!());
-    build.with_scope(
-        vec![tela_ui_dsl::ProvidedValue::new::<String>("outer".to_owned())],
+fn single_view<A>(
+    build: &mut ViewBuild<A>,
+    site: ViewSite,
+    key: String,
+) -> ViewResult<ViewOutput<A>> {
+    let node = build
+        .container(
+            UiNode::new(NodeKind::View),
+            Body::new(Vec::new(), Vec::new()),
+        )?
+        .with_semantic_key(key);
+    build.finish(
+        Body::new(vec![ViewChild::view_node(node)], Vec::new()),
         site,
-        |build| {
-            build.with_scope(
-                vec![tela_ui_dsl::ProvidedValue::new::<String>("inner".to_owned())],
-                tela_ui_dsl::ViewSite::new(file!(), line!(), column!()),
-                |build| ui!(build { <Frame>{ inject_label(build)? }</Frame> }),
-            )
-        },
     )
 }
 
-fn render_nested(build: &mut ViewBuild<Action>, state: &State) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            { render_child(build, state) }
-        </Column>
-    })
-}
-
-fn render_prebuilt_nested(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-) -> ViewResult<ViewOutput<Action>> {
-    let child = render_child(build, state)?;
-    ui!(build {
-        <Column>
-            { child }
-        </Column>
-    })
-}
-
-fn render_conditional_child(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-    show_child: bool,
-) -> ViewResult<ViewOutput<Action>> {
-    let child = if show_child {
-        render_child(build, state)
-    } else {
-        Ok(ViewOutput::opaque(ViewBuild::<Action>::text_node("hidden")))
-    };
-    ui!(build {
-        <Column>
-            { child }
-        </Column>
-    })
-}
-
-fn render_action_target(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ActionTarget action={Action::Save}>
-            <Frame clickable={true}>
-                <Text value={"Save"} />
-            </Frame>
-        </ActionTarget>
-    })
-}
-
-fn render_watched_action_target(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ActionTarget action={Action::Save}>
-            <Frame clickable={true}>
-                <WatchedCount count={state.count.clone()} />
-            </Frame>
-        </ActionTarget>
-    })
-}
-
-fn render_watched_fragment(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Fragment>
-            <Frame>
-                <WatchedCount count={state.count.clone()} />
-            </Frame>
-        </Fragment>
-    })
-}
-
-fn render_empty_watched_fragment(
-    build: &mut ViewBuild<Action>,
-    state: &State,
-) -> ViewResult<ViewOutput<Action>> {
-    let _ = state;
-    ui!(build {
-        <Fragment></Fragment>
-    })
-}
-
-fn render_multi_root_fragment(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Fragment>
-            <Frame><Text value={"Save"} /></Frame>
-            <Frame><Text value={"Save"} /></Frame>
-        </Fragment>
-    })
-}
-
-fn render_empty_action_target(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ActionTarget action={Action::Save}></ActionTarget>
-    })
-}
-
-fn render_multi_root_action_target(
-    build: &mut ViewBuild<Action>,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ActionTarget action={Action::Save}>
-            <Frame clickable={true}><Text value={"Save"} /></Frame>
-            <Frame clickable={true}><Text value={"Save"} /></Frame>
-        </ActionTarget>
-    })
-}
-
-fn render_duplicate_action_target(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ActionTarget action={Action::Save}>
-            <ActionTarget action={Action::Open(7)}>
-                <Frame clickable={true}>
-                    <Text value={"Save"} />
-                </Frame>
-            </ActionTarget>
-        </ActionTarget>
-    })
-}
-
-fn rename_entry(entry_id: u32, value: String) -> Action {
-    Action::Rename { entry_id, value }
-}
-
-fn render_text_action_target(
-    build: &mut ViewBuild<Action>,
-    entry_id: u32,
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <ActionTarget
-            on_input={with_context(entry_id, rename_entry)}
-            on_submit={Action::Search}
-            on_cancel={Action::ClearSearch}
-        >
-            <Frame input={TextInputSpec::new(TextInputKind::Text)}>
-                <Text value={"Save"} />
-            </Frame>
-        </ActionTarget>
-    })
-}
-
-fn render_prebuilt_action_target(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
-    let action = render_action_target(build)?;
-    ui!(build {
-        <Column>
-            { action }
-        </Column>
-    })
-}
-
-fn render_for(build: &mut ViewBuild<Action>, items: &[Item]) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Frame>
-                        <Text value={item.name} />
-                    </Frame>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_watched_for(
-    build: &mut ViewBuild<Action>,
-    items: &[WatchedItem],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Frame>
-                        <WatchedCount count={item.value.clone()} />
-                    </Frame>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_nested_watched_for(
-    build: &mut ViewBuild<Action>,
-    groups: &[WatchedGroup],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={groups} key={group.id}>
-                {|group|
-                    <Column>
-                        <For each={group.items.iter()} key={item.id}>
-                            {|item|
-                                <Frame>
-                                    <WatchedCount count={item.value.clone()} />
-                                </Frame>
-                            }
-                        </For>
-                    </Column>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_watched_virtual_list(
-    build: &mut ViewBuild<Action>,
-    items: &[WatchedItem],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <VirtualList
-            items={items}
-            total_items={20_u32}
-            first_item_index={0_u32}
-            item_height={32.0_f32}
-            item_spacing={0.0_f32}
-            overscan={0_u32}
-            key={item.id}
-        >
-            {|item|
-                <Frame>
-                    <WatchedCount count={item.value.clone()} />
-                </Frame>
-            }
-        </VirtualList>
-    })
-}
-
-fn render_action_for(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <ActionTarget action={Action::Open(item.id)}>
-                        <Frame clickable={true}>
-                            <Text value={item.name} />
-                        </Frame>
-                    </ActionTarget>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_virtual_list(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <VirtualList
-            items={items}
-            total_items={20_u32}
-            first_item_index={12_u32}
-            item_height={32.0_f32}
-            item_spacing={4.0_f32}
-            overscan={2_u32}
-            key={item.id}
-        >
-            {|item|
-                <Frame>
-                    <Text value={item.name} />
-                </Frame>
-            }
-        </VirtualList>
-    })
-}
-
-fn render_out_of_range_virtual_list(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <VirtualList
-            items={items}
-            total_items={2_u32}
-            first_item_index={2_u32}
-            item_height={32.0_f32}
-            item_spacing={0.0_f32}
-            overscan={0_u32}
-            key={item.id}
-        >
-            {|item|
-                <Frame>
-                    <Text value={item.name} />
-                </Frame>
-            }
-        </VirtualList>
-    })
-}
-
-fn render_sibling_lists(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Frame>
-                        <Text value={item.name} />
-                    </Frame>
-                }
-            </For>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Frame>
-                        <Text value={item.name} />
-                    </Frame>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_fragment_sibling_lists(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <Fragment>
-                <For each={items} key={item.id}>
-                    {|item|
-                        <Frame>
-                            <Text value={item.name} />
-                        </Frame>
-                    }
-                </For>
-                <For each={items} key={item.id}>
-                    {|item|
-                        <Frame>
-                            <Text value={item.name} />
-                        </Frame>
-                    }
-                </For>
-            </Fragment>
-        </Column>
-    })
-}
-
-fn render_domain_key_for(
-    build: &mut ViewBuild<Action>,
-    items: &[DomainItem],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Frame>
-                        <Text value={item.name} />
-                    </Frame>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_conflicting_for(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Frame key={"already-key"}>
-                        <Text value={item.name} />
-                    </Frame>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn render_primitive_for(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item| <Text value={item.name} />}
-            </For>
-        </Column>
-    })
-}
-
-fn render_empty_fragment_for(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item| <Fragment></Fragment>}
-            </For>
-        </Column>
-    })
-}
-
-fn render_multi_root_fragment_for(
-    build: &mut ViewBuild<Action>,
-    items: &[Item],
-) -> ViewResult<ViewOutput<Action>> {
-    ui!(build {
-        <Column>
-            <For each={items} key={item.id}>
-                {|item|
-                    <Fragment>
-                        <Frame><Text value={"Save"} /></Frame>
-                        <Frame><Text value={"Save"} /></Frame>
-                    </Fragment>
-                }
-            </For>
-        </Column>
-    })
-}
-
-fn empty_resolved_frame() -> UiFrame {
-    UiFrame {
+fn empty_frame() -> RenderPlan {
+    RenderPlan::from_flat_frame(UiFrame {
         viewport: Viewport {
-            width: 1.0,
-            height: 1.0,
+            width: 320.0,
+            height: 180.0,
         },
         commands: Vec::new(),
         hit_regions: Vec::new(),
         scroll_bounds: Vec::new(),
-    }
+    })
 }
 
-fn publish(coordinator: &mut FrameCoordinator<Action>, root: ViewOutput<Action>) {
-    let prepared = coordinator.prepare(root).expect("candidate frame");
-    let resolved = prepared
-        .resolve(|_| Ok::<_, ()>(empty_resolved_frame()))
-        .expect("resolved frame");
-    coordinator.commit(resolved);
-}
-
-#[test]
-fn directives_build_a_real_root_and_watch_its_resolved_key() {
-    let state = State {
-        count: Signal::new(3),
-        child_count: Signal::new(0),
-    };
-    let mut coordinator = FrameCoordinator::new();
+fn publish_root(coordinator: &mut FrameCoordinator<AppAction>) {
     let mut build = coordinator.begin_build();
-    let root = render_basics(&mut build, &state).expect("view");
-    publish(&mut coordinator, root);
-
-    assert!(coordinator.runtime().take_dirty().is_empty());
-    state.count.set(4);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/".to_owned())])
-    );
+    let root = render_root(&mut build).expect("root assembly");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("root preparation")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("root resolve");
+    coordinator.commit(resolved).expect("current root frame");
 }
 
-#[test]
-fn temporary_watch_source_is_cloned_before_its_reference_ends() {
-    let state = State {
-        count: Signal::new(3),
-        child_count: Signal::new(0),
-    };
-    let mut coordinator = FrameCoordinator::new();
+fn publish_batched_root(coordinator: &mut FrameCoordinator<AppAction>) {
     let mut build = coordinator.begin_build();
-    let root = render_temporary_watch_source(&mut build, &state).expect("view");
-    publish(&mut coordinator, root);
-
-    state.count.set(4);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/".to_owned())])
-    );
+    let root = render_batched_root(&mut build).expect("batched root assembly");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("batched root preparation")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("batched root resolve");
+    coordinator
+        .commit(resolved)
+        .expect("current batched root frame");
 }
 
-#[test]
-fn nested_ui_plan_is_rebased_to_the_real_opaque_child_root() {
-    let state = State {
-        count: Signal::new(0),
-        child_count: Signal::new(1),
-    };
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_nested(&mut build, &state).expect("view");
-    publish(&mut coordinator, root);
-
-    state.child_count.set(2);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/0/".to_owned())])
-    );
-}
-
-#[test]
-fn prebuilt_child_view_keeps_its_watch_plan_when_inserted_later() {
-    let state = State {
-        count: Signal::new(0),
-        child_count: Signal::new(1),
-    };
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_prebuilt_nested(&mut build, &state).expect("view");
-    publish(&mut coordinator, root);
-
-    state.child_count.set(2);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/0/".to_owned())])
-    );
-}
-
-#[test]
-fn conditional_child_rebases_and_releases_its_plan_with_the_real_branch() {
-    let state = State {
-        count: Signal::new(0),
-        child_count: Signal::new(1),
-    };
-    let mut coordinator = FrameCoordinator::new();
-
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_conditional_child(&mut build, &state, true).expect("visible child"),
-    );
-    state.child_count.set(2);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/0/".to_owned())])
-    );
-
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_conditional_child(&mut build, &state, false).expect("hidden child"),
-    );
-    state.child_count.set(3);
-    assert!(coordinator.runtime().take_dirty().is_empty());
-
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_conditional_child(&mut build, &state, true).expect("visible child again"),
-    );
-    state.child_count.set(4);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/0/".to_owned())])
-    );
-}
-
-#[test]
-fn watch_on_a_real_node_body_is_anchored_to_that_node() {
-    let state = State {
-        count: Signal::new(3),
-        child_count: Signal::new(0),
-    };
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_node_scoped_watch(&mut build, &state).expect("view");
-    publish(&mut coordinator, root);
-
-    state.count.set(4);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/".to_owned())])
-    );
-}
-
-#[test]
-fn nested_explicit_ui_scope_inherits_its_parent_context() {
-    let mut build = ViewBuild::<Action>::new();
-
-    let view = render_explicit_child_scope(&mut build).expect("view");
-    let tree = UiTree::new(view.node().clone())
-        .expect("nested explicit scope must resolve the parent provider");
-
-    // Frame > Text 两层；嵌套 with_scope（outer→inner）不添加树层，
-    // inject_label 解析最近作用域的 "inner"（缺失则构建失败）。
-    assert_eq!(
-        tree.keys(),
-        [SemanticKey("/".to_owned()), SemanticKey("/0/".to_owned()),]
-    );
-}
-
-#[test]
-fn action_target_routes_clicks_without_storing_a_callback_in_the_tree() {
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_action_target(&mut build).expect("view");
-    publish(&mut coordinator, root);
-    let node_id = coordinator
-        .active()
-        .expect("active frame")
-        .tree()
-        .node_id_for_key(&SemanticKey("/".to_owned()))
-        .expect("root id");
-
-    assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            coordinator.active().expect("active frame").token(),
-            KernelInteraction::Activate { node_id },
-        )),
-        Some(Action::Save)
-    );
-}
-
-#[test]
-fn top_level_watch_and_action_target_anchor_to_the_unchanged_real_root() {
-    let state = State {
-        count: Signal::new(3),
-        child_count: Signal::new(0),
-    };
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_action_target(&mut build, &state).expect("watched action target"),
-    );
-
-    let active = coordinator.active().expect("active frame");
-    assert_eq!(
-        active.tree().keys(),
-        [SemanticKey("/".to_owned()), SemanticKey("/0/".to_owned()),]
-    );
-    let token = active.token();
-    let node_id = active
-        .tree()
-        .node_id_for_key(&SemanticKey("/".to_owned()))
-        .expect("the ActionTarget child is the real root");
-
-    state.count.set(4);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/".to_owned())])
-    );
-    assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            token,
-            KernelInteraction::Activate { node_id }
-        )),
-        Some(Action::Save)
-    );
-}
-
-#[test]
-fn top_level_fragment_does_not_add_an_auto_path_layer() {
-    let state = State {
-        count: Signal::new(3),
-        child_count: Signal::new(0),
-    };
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_fragment(&mut build, &state).expect("watched fragment"),
-    );
-
-    assert_eq!(
-        coordinator.active().expect("active frame").tree().keys(),
-        [SemanticKey("/".to_owned()), SemanticKey("/0/".to_owned()),]
-    );
-    state.count.set(4);
-    assert_eq!(
-        coordinator.runtime().take_dirty(),
-        BTreeSet::from([SemanticKey("/0/".to_owned())])
-    );
-}
-
-#[test]
-fn top_level_fragment_requires_exactly_one_real_root() {
-    let state = State {
-        count: Signal::new(0),
-        child_count: Signal::new(0),
-    };
-    let mut build = ViewBuild::new();
-    assert!(matches!(
-        render_empty_watched_fragment(&mut build, &state),
-        Err(ViewBuildError::ExpectedSingleRoot { actual: 0, .. })
-    ));
-
-    let mut build = ViewBuild::new();
-    assert!(matches!(
-        render_multi_root_fragment(&mut build),
-        Err(ViewBuildError::ExpectedSingleRoot { actual: 2, .. })
-    ));
-}
-
-#[test]
-fn action_target_requires_exactly_one_real_child() {
-    let mut build = ViewBuild::new();
-    assert!(matches!(
-        render_empty_action_target(&mut build),
-        Err(ViewBuildError::ActionTargetRequiresSingleRoot { actual: 0, .. })
-    ));
-
-    let mut build = ViewBuild::new();
-    assert!(matches!(
-        render_multi_root_action_target(&mut build),
-        Err(ViewBuildError::ActionTargetRequiresSingleRoot { actual: 2, .. })
-    ));
-}
-
-#[test]
-fn duplicate_action_targets_for_one_real_root_are_rejected() {
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_duplicate_action_target(&mut build).expect("lowered duplicate target");
-
-    assert!(matches!(
-        coordinator.prepare(root),
-        Err(FramePrepareError::Plans(
-            ViewBuildError::DuplicateActionBinding { .. }
-        ))
-    ));
-}
-
-#[test]
-fn text_action_target_routes_declared_payloads_and_pure_context() {
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_text_action_target(&mut build, 42).expect("text target view");
-    publish(&mut coordinator, root);
-
-    let active = coordinator.active().expect("active frame");
-    let token = active.token();
-    let node_id = active
-        .tree()
-        .node_id_for_key(&SemanticKey("/".to_owned()))
-        .expect("text input root id");
-
-    assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            token,
-            KernelInteraction::TextInput {
-                node_id,
-                event: TextInputEvent::Edit {
-                    value: "draft".to_owned(),
-                    selection: TextSelection::collapsed(5),
-                    composing: true,
-                },
-            },
-        )),
-        Some(Action::Rename {
-            entry_id: 42,
-            value: "draft".to_owned(),
+fn reconcile_outputs(coordinator: &mut FrameCoordinator<AppAction>) -> usize {
+    let projections = Cell::new(0);
+    coordinator
+        .reconcile_component_outputs(|frames| {
+            projections.set(projections.get() + 1);
+            let mut build = frames.begin_build();
+            let root = render_root(&mut build).map_err(|error| error.to_string())?;
+            frames
+                .prepare(root)
+                .map(|prepared| prepared.into_component_output_projection())
+                .map_err(|error| error.to_string())
         })
-    );
-    assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            token,
-            KernelInteraction::TextInput {
-                node_id,
-                event: TextInputEvent::Commit {
-                    value: "confirmed".to_owned(),
-                    selection: TextSelection::collapsed(9),
-                },
-            },
-        )),
-        Some(Action::Search("confirmed".to_owned()))
-    );
-    assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            token,
-            KernelInteraction::TextInput {
-                node_id,
-                event: TextInputEvent::Cancel {
-                    selection: TextSelection::collapsed(0),
-                },
-            },
-        )),
-        Some(Action::ClearSearch)
-    );
+        .expect("candidate Output batches must reconcile");
+    projections.get()
+}
+
+fn reconcile_batched_outputs(coordinator: &mut FrameCoordinator<AppAction>) -> usize {
+    let projections = Cell::new(0);
+    coordinator
+        .reconcile_component_outputs(|frames| {
+            projections.set(projections.get() + 1);
+            let mut build = frames.begin_build();
+            let root = render_batched_root(&mut build).map_err(|error| error.to_string())?;
+            frames
+                .prepare(root)
+                .map(|prepared| prepared.into_component_output_projection())
+                .map_err(|error| error.to_string())
+        })
+        .expect("nested candidate Output batches must reconcile");
+    projections.get()
 }
 
 #[test]
-fn prebuilt_child_view_keeps_its_action_plan_when_inserted_later() {
+fn output_travels_only_to_the_logical_parent_then_releases_after_commit() {
     let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    let root = render_prebuilt_action_target(&mut build).expect("view");
-    publish(&mut coordinator, root);
-    let node_id = coordinator
-        .active()
-        .expect("active frame")
+    publish_root(&mut coordinator);
+
+    let active = coordinator.active().expect("published root");
+    let child_node = active
         .tree()
-        .node_id_for_key(&SemanticKey("/0/".to_owned()))
-        .expect("prebuilt target root id");
+        .node_id_for_key(&SemanticKey("child".to_owned()))
+        .expect("child semantic key");
+    let input = FramedInteraction::new(
+        active.token(),
+        KernelInteraction::Activate {
+            node_id: child_node,
+        },
+    );
 
+    assert!(matches!(
+        coordinator.dispatch_component_interaction(&input),
+        Ok(Some(ComponentDispatch::Consumed))
+    ));
+    assert!(coordinator.take_component_outputs().is_empty());
+
+    assert_eq!(reconcile_outputs(&mut coordinator), 1);
+    assert!(
+        coordinator.take_component_outputs().is_empty(),
+        "AppAction remains candidate-local until the final frame commits"
+    );
+
+    publish_root(&mut coordinator);
     assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            coordinator.active().expect("active frame").token(),
-            KernelInteraction::Activate { node_id },
-        )),
-        Some(Action::Save)
+        coordinator.take_component_outputs(),
+        vec![AppAction::ChildPressed { total: 1 }]
     );
 }
 
 #[test]
-fn for_watches_follow_business_keys_through_reorder_and_release_removed_items() {
-    let first_signal = Signal::new(7_u32);
-    let second_signal = Signal::new(8_u32);
-    let initial = [
-        WatchedItem {
-            id: 7,
-            value: first_signal.clone(),
-        },
-        WatchedItem {
-            id: 8,
-            value: second_signal.clone(),
-        },
-    ];
+fn nested_output_chain_advances_one_lexical_owner_per_batch() {
     let mut coordinator = FrameCoordinator::new();
+    publish_batched_root(&mut coordinator);
 
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_for(&mut build, &initial).expect("initial For view"),
+    let active = coordinator.active().expect("published batched root");
+    let child_node = active
+        .tree()
+        .node_id_for_key(&SemanticKey("child".to_owned()))
+        .expect("child semantic key");
+    let input = FramedInteraction::new(
+        active.token(),
+        KernelInteraction::Activate {
+            node_id: child_node,
+        },
     );
-    first_signal.set(70);
-    assert!(!coordinator.runtime().take_dirty().is_empty());
 
-    let reordered = [
-        WatchedItem {
-            id: 8,
-            value: second_signal.clone(),
-        },
-        WatchedItem {
-            id: 7,
-            value: first_signal.clone(),
-        },
-    ];
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_for(&mut build, &reordered).expect("reordered For view"),
-    );
-    first_signal.set(71);
-    assert!(!coordinator.runtime().take_dirty().is_empty());
-
-    let remaining = [WatchedItem {
-        id: 8,
-        value: second_signal.clone(),
-    }];
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_for(&mut build, &remaining).expect("filtered For view"),
-    );
-    first_signal.set(72);
-    assert!(coordinator.runtime().take_dirty().is_empty());
-    second_signal.set(80);
-    assert!(!coordinator.runtime().take_dirty().is_empty());
-}
-
-#[test]
-fn nested_for_keys_preserve_the_outer_and_inner_business_identity() {
-    let first_inner_signal = Signal::new(11_u32);
-    let second_inner_signal = Signal::new(12_u32);
-    let sibling_inner_signal = Signal::new(21_u32);
-    let mut coordinator = FrameCoordinator::new();
-
-    let initial = vec![
-        WatchedGroup {
-            id: 7,
-            items: vec![
-                WatchedItem {
-                    id: 11,
-                    value: first_inner_signal.clone(),
-                },
-                WatchedItem {
-                    id: 12,
-                    value: second_inner_signal.clone(),
-                },
-            ],
-        },
-        WatchedGroup {
-            id: 8,
-            items: vec![WatchedItem {
-                id: 11,
-                value: sibling_inner_signal.clone(),
-            }],
-        },
-    ];
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_nested_watched_for(&mut build, &initial).expect("initial nested For view"),
+    assert!(matches!(
+        coordinator.dispatch_component_interaction(&input),
+        Ok(Some(ComponentDispatch::Consumed))
+    ));
+    assert_eq!(
+        reconcile_batched_outputs(&mut coordinator),
+        2,
+        "child -> parent and parent -> grandparent are separate FIFO batches, each followed by one candidate projection"
     );
     assert!(
-        coordinator
-            .active()
-            .expect("active nested For frame")
-            .tree()
-            .keys()
-            .contains(&SemanticKey("/0/0/0/".to_owned()))
-    );
-    assert!(
-        coordinator
-            .active()
-            .expect("active nested For frame")
-            .tree()
-            .keys()
-            .contains(&SemanticKey("/0/1/0/".to_owned()))
+        coordinator.take_component_outputs().is_empty(),
+        "the grandparent AppAction remains candidate-local until the final frame commits"
     );
 
-    first_inner_signal.set(110);
-    assert!(!coordinator.runtime().take_dirty().is_empty());
-
-    let reordered = vec![
-        WatchedGroup {
-            id: 8,
-            items: vec![WatchedItem {
-                id: 11,
-                value: sibling_inner_signal.clone(),
-            }],
-        },
-        WatchedGroup {
-            id: 7,
-            items: vec![
-                WatchedItem {
-                    id: 12,
-                    value: second_inner_signal.clone(),
-                },
-                WatchedItem {
-                    id: 11,
-                    value: first_inner_signal.clone(),
-                },
-            ],
-        },
-    ];
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_nested_watched_for(&mut build, &reordered).expect("reordered nested For view"),
-    );
-    first_inner_signal.set(111);
-    assert!(!coordinator.runtime().take_dirty().is_empty());
-
-    let only_sibling = vec![WatchedGroup {
-        id: 8,
-        items: vec![WatchedItem {
-            id: 11,
-            value: sibling_inner_signal,
-        }],
-    }];
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_nested_watched_for(&mut build, &only_sibling).expect("filtered nested For view"),
-    );
-    first_inner_signal.set(112);
-    assert!(coordinator.runtime().take_dirty().is_empty());
-}
-
-#[test]
-fn virtual_list_window_release_removes_unloaded_item_watches() {
-    let first_signal = Signal::new(7_u32);
-    let second_signal = Signal::new(8_u32);
-    let visible = [
-        WatchedItem {
-            id: 7,
-            value: first_signal.clone(),
-        },
-        WatchedItem {
-            id: 8,
-            value: second_signal.clone(),
-        },
-    ];
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_virtual_list(&mut build, &visible).expect("visible window"),
-    );
-
-    let shifted_window = [WatchedItem {
-        id: 8,
-        value: second_signal.clone(),
-    }];
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_watched_virtual_list(&mut build, &shifted_window).expect("shifted window"),
-    );
-
-    first_signal.set(70);
-    assert!(coordinator.runtime().take_dirty().is_empty());
-    second_signal.set(80);
-    assert!(!coordinator.runtime().take_dirty().is_empty());
-}
-
-#[test]
-fn for_action_targets_rebind_to_the_same_business_item_after_reorder() {
-    let initial = [Item { id: 7, name: "A" }, Item { id: 8, name: "B" }];
-    let mut coordinator = FrameCoordinator::new();
-    let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_action_for(&mut build, &initial).expect("initial action list"),
-    );
-    let first_token = coordinator.active().expect("active frame").token();
-    let first_node = coordinator
-        .active()
-        .expect("active frame")
-        .tree()
-        .node_id_for_key(&SemanticKey("/@for-0/7".to_owned()))
-        .expect("first item root");
+    publish_batched_root(&mut coordinator);
     assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            first_token,
-            KernelInteraction::Activate {
-                node_id: first_node
-            },
-        )),
-        Some(Action::Open(7))
+        coordinator.take_component_outputs(),
+        vec![AppAction::GrandparentObserved { total: 1 }],
+        "each Output crosses exactly one lexical owner per batch before reaching the application boundary"
     );
+}
 
-    let reordered = [Item { id: 8, name: "B" }, Item { id: 7, name: "A" }];
+#[test]
+fn component_cannot_attach_a_host_input_route_to_a_child_node() {
+    let mut coordinator = FrameCoordinator::<AppAction>::new();
     let mut build = coordinator.begin_build();
-    publish(
-        &mut coordinator,
-        render_action_for(&mut build, &reordered).expect("reordered action list"),
-    );
-    let token = coordinator.active().expect("active frame").token();
-    let node = coordinator
-        .active()
-        .expect("active frame")
-        .tree()
-        .node_id_for_key(&SemanticKey("/@for-0/7".to_owned()))
-        .expect("reordered item root");
-    assert_eq!(
-        coordinator.dispatch_interaction(&FramedInteraction::new(
-            token,
-            KernelInteraction::Activate { node_id: node }
-        )),
-        Some(Action::Open(7))
-    );
-}
-
-#[test]
-fn for_keys_are_scoped_by_the_resolved_parent_key() {
-    let items = [Item { id: 7, name: "A" }, Item { id: 8, name: "B" }];
-    let mut build = ViewBuild::new();
-    let view = render_for(&mut build, &items).expect("view");
-    let tree = UiTree::new(view.node().clone()).expect("valid tree");
-
-    assert_eq!(
-        tree.keys(),
-        [
-            SemanticKey("/".to_owned()),
-            SemanticKey("/@for-0/7".to_owned()),
-            SemanticKey("/0/0/".to_owned()),
-            SemanticKey("/@for-0/8".to_owned()),
-            SemanticKey("/1/0/".to_owned()),
-        ]
-    );
-}
-
-#[test]
-fn virtual_list_requires_an_explicit_window_contract_and_scopes_item_keys() {
-    let items = [Item { id: 7, name: "A" }, Item { id: 8, name: "B" }];
-    let mut build = ViewBuild::new();
-    let view = render_virtual_list(&mut build, &items).expect("view");
-    let tree = UiTree::new(view.node().clone()).expect("valid virtual list window");
-
-    let NodeKind::VirtualListView(spec) = &tree.root().kind else {
-        panic!("the DSL root must be a VirtualListView");
+    let root = render_hijacker_root(&mut build).expect("hijacker assembly itself succeeds");
+    let error = match coordinator.prepare(root) {
+        Err(error) => error,
+        Ok(_) => panic!("a wrapper cannot install a route on a child-owned semantic node"),
     };
-    assert_eq!(spec.total_items, 20);
-    assert_eq!(spec.first_item_index, 12);
-    assert_eq!(spec.item_height, 32.0);
-    assert_eq!(spec.item_spacing, 4.0);
-    assert_eq!(spec.overscan, 2);
-    assert!(tree.keys().contains(&SemanticKey("/@for-0/7".to_owned())));
-    assert!(tree.keys().contains(&SemanticKey("/@for-0/8".to_owned())));
-}
-
-#[test]
-fn virtual_list_window_must_fit_the_explicit_total_range() {
-    let items = [Item { id: 7, name: "A" }];
-    let mut build = ViewBuild::new();
-    let root = render_out_of_range_virtual_list(&mut build, &items).expect("lowering");
 
     assert!(matches!(
-        UiTree::new(root.node().clone()),
-        Err(UiBuildError::InvalidVirtualListRange)
+        error,
+        FramePrepareError::Plans(ViewBuildError::HostInputRouteKeyNotOwned { ref key, .. })
+            if key == &SemanticKey("child".to_owned())
     ));
 }
 
 #[test]
-fn sibling_for_blocks_can_reuse_the_same_local_business_key() {
-    let items = [Item { id: 7, name: "A" }];
-    let mut build = ViewBuild::new();
-    let view = render_sibling_lists(&mut build, &items).expect("view");
-    let tree = UiTree::new(view.node().clone()).expect("sibling collection keys must not collide");
+fn targetful_modal_input_reaches_the_component_candidate_route() {
+    let mut coordinator = FrameCoordinator::new();
+    publish_root(&mut coordinator);
 
-    assert!(tree.keys().contains(&SemanticKey("/@for-0/7".to_owned())));
-    assert!(tree.keys().contains(&SemanticKey("/@for-1/7".to_owned())));
-}
+    let active = coordinator.active().expect("published root");
+    let child_node = active
+        .tree()
+        .node_id_for_key(&SemanticKey("child".to_owned()))
+        .expect("child semantic key");
+    let input = FramedInteraction::new(
+        active.token(),
+        KernelInteraction::CloseModal {
+            node_id: child_node,
+        },
+    );
 
-#[test]
-fn transparent_fragment_shares_the_parent_collection_namespace() {
-    let items = [Item { id: 7, name: "A" }];
-    let mut build = ViewBuild::new();
-    let view = render_fragment_sibling_lists(&mut build, &items).expect("view");
-    let tree = UiTree::new(view.node().clone()).expect("fragment collection keys must not collide");
-
-    assert!(tree.keys().contains(&SemanticKey("/@for-0/7".to_owned())));
-    assert!(tree.keys().contains(&SemanticKey("/@for-1/7".to_owned())));
-}
-
-#[test]
-fn domain_item_key_is_converted_without_exposing_key_segment() {
-    let items = [DomainItem {
-        id: DomainItemId("first"),
-        name: "A",
-    }];
-    let mut build = ViewBuild::new();
-    let view = render_domain_key_for(&mut build, &items).expect("view");
-    let tree = UiTree::new(view.node().clone()).expect("domain key must be accepted");
-
-    assert!(
-        tree.keys()
-            .contains(&SemanticKey("/@for-0/domain:first".to_owned()))
+    assert!(matches!(
+        coordinator.dispatch_component_interaction(&input),
+        Ok(Some(ComponentDispatch::Consumed))
+    ));
+    assert_eq!(reconcile_outputs(&mut coordinator), 1);
+    publish_root(&mut coordinator);
+    assert_eq!(
+        coordinator.take_component_outputs(),
+        vec![AppAction::ChildPressed { total: 1 }],
+        "CloseModal follows the same candidate Component::Event -> Output path as activation"
     );
 }
 
 #[test]
-fn for_rejects_a_root_that_already_owns_identity() {
-    let items = [Item { id: 7, name: "A" }];
-    let mut build = ViewBuild::new();
+fn semantic_shortcut_reaches_the_component_candidate_route() {
+    let mut coordinator = FrameCoordinator::new();
+    publish_root(&mut coordinator);
+
+    let active = coordinator.active().expect("published root");
+    let child_node = active
+        .tree()
+        .node_id_for_key(&SemanticKey("child".to_owned()))
+        .expect("child semantic key");
+    let input = FramedInteraction::new(
+        active.token(),
+        KernelInteraction::ShortcutActivated {
+            origin_node_id: child_node,
+            shortcut_id: tela_contract::ShortcutId::Undo,
+        },
+    );
 
     assert!(matches!(
-        render_conflicting_for(&mut build, &items),
-        Err(ViewBuildError::ForItemIdentityConflict { .. })
+        coordinator.dispatch_component_interaction(&input),
+        Ok(Some(ComponentDispatch::Consumed))
     ));
+    assert_eq!(reconcile_outputs(&mut coordinator), 1);
+    assert!(
+        coordinator.take_component_outputs().is_empty(),
+        "a shortcut's AppAction remains candidate-local until its frame commits"
+    );
+
+    publish_root(&mut coordinator);
+    assert_eq!(
+        coordinator.take_component_outputs(),
+        vec![AppAction::ChildPressed { total: 1 }],
+        "ShortcutActivated follows the same candidate Event -> Output path as activation"
+    );
 }
 
 #[test]
-fn for_rejects_a_primitive_item_root() {
-    let items = [Item { id: 7, name: "A" }];
-    let mut build = ViewBuild::new();
+fn aborted_candidate_drops_parent_output_and_owner_state() {
+    let mut coordinator = FrameCoordinator::new();
+    publish_root(&mut coordinator);
 
-    assert!(matches!(
-        render_primitive_for(&mut build, &items),
-        Err(ViewBuildError::ForItemRootCannotCarryIdentity { .. })
-    ));
+    let dispatch = |coordinator: &mut FrameCoordinator<AppAction>| {
+        let active = coordinator.active().expect("published root");
+        let child_node = active
+            .tree()
+            .node_id_for_key(&SemanticKey("child".to_owned()))
+            .expect("child semantic key");
+        let input = FramedInteraction::new(
+            active.token(),
+            KernelInteraction::Activate {
+                node_id: child_node,
+            },
+        );
+        assert!(matches!(
+            coordinator.dispatch_component_interaction(&input),
+            Ok(Some(ComponentDispatch::Consumed))
+        ));
+    };
+
+    dispatch(&mut coordinator);
+    assert_eq!(reconcile_outputs(&mut coordinator), 1);
+    coordinator.abort_component_transaction();
+    publish_root(&mut coordinator);
+    assert!(coordinator.take_component_outputs().is_empty());
+
+    dispatch(&mut coordinator);
+    assert_eq!(reconcile_outputs(&mut coordinator), 1);
+    publish_root(&mut coordinator);
+    assert_eq!(
+        coordinator.take_component_outputs(),
+        vec![AppAction::ChildPressed { total: 1 }],
+        "the aborted parent's candidate State was not committed"
+    );
 }
 
-#[test]
-fn for_requires_one_real_item_root_after_fragment_lowering() {
-    let items = [Item { id: 7, name: "A" }];
-    let mut build = ViewBuild::new();
-    assert!(matches!(
-        render_empty_fragment_for(&mut build, &items),
-        Err(ViewBuildError::ForItemRequiresSingleRoot { actual: 0, .. })
-    ));
-
-    let mut build = ViewBuild::new();
-    assert!(matches!(
-        render_multi_root_fragment_for(&mut build, &items),
-        Err(ViewBuildError::ForItemRequiresSingleRoot { actual: 2, .. })
-    ));
+#[derive(Clone)]
+struct RowValue {
+    id: u32,
+    label: String,
 }
 
-fn render_view_container(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
+fn row_key(context: ForContext<RowValue>) -> String {
+    context.item.id.to_string()
+}
+
+fn render_row(
+    build: &mut ViewBuild<AppAction>,
+    context: ForContext<RowValue>,
+) -> ViewResult<ViewOutput<AppAction>> {
     ui!(build {
-        <View
-            key={"view.container"}
-            width={120.0}
-            height={48.0}
-            fill={tela_contract::Fill::Solid(tela_contract::Color::BLUE)}
-        >
-            <Text value={"boxed"} />
+        <View>
+            <Text value={format!("{}:{}", context.index, context.item.label)} />
         </View>
     })
 }
 
-fn render_empty_view(build: &mut ViewBuild<Action>) -> ViewResult<ViewOutput<Action>> {
+fn is_even(value: &u32) -> bool {
+    value.is_multiple_of(2)
+}
+
+fn render_even(
+    build: &mut ViewBuild<AppAction>,
+    _context: ShowContext<u32>,
+) -> ViewResult<ViewOutput<AppAction>> {
+    ui!(build { <View><Text value={"even"} /></View> })
+}
+
+fn render_odd(
+    build: &mut ViewBuild<AppAction>,
+    _context: ShowContext<u32>,
+) -> ViewResult<ViewOutput<AppAction>> {
+    ui!(build { <View><Text value={"odd"} /></View> })
+}
+
+fn switch_branch(value: &u32) -> String {
+    if value.is_multiple_of(3) {
+        "multiple-of-three".to_owned()
+    } else {
+        "other".to_owned()
+    }
+}
+
+fn render_switch(
+    build: &mut ViewBuild<AppAction>,
+    context: SwitchContext<u32>,
+) -> ViewResult<ViewOutput<AppAction>> {
+    let label = if context.value.is_multiple_of(3) {
+        "multiple of three"
+    } else {
+        "other"
+    };
+    ui!(build { <View><Text value={label} /></View> })
+}
+
+fn render_structural(
+    build: &mut ViewBuild<AppAction>,
+    rows: Vec<RowValue>,
+) -> ViewResult<ViewOutput<AppAction>> {
     ui!(build {
-        <View
-            key={"view.empty"}
-            width={40.0}
-            height={2.0}
-            fill={tela_contract::Fill::Solid(tela_contract::Color::BLACK)}
-        />
+        <Column>
+            <For each={rows} key={row_key} row={render_row} />
+            <Show value={2_u32} test={is_even} then={render_even} fallback={render_odd} />
+            <Switch value={3_u32} branch={switch_branch} render={render_switch} />
+        </Column>
+    })
+}
+
+fn render_adjacent_collections(
+    build: &mut ViewBuild<AppAction>,
+    left: Vec<RowValue>,
+    right: Vec<RowValue>,
+) -> ViewResult<ViewOutput<AppAction>> {
+    ui!(build {
+        <Column>
+            <For each={left} key={row_key} row={render_row} />
+            <For each={right} key={row_key} row={render_row} />
+        </Column>
     })
 }
 
 #[test]
-fn view_renders_as_a_boxed_container() {
-    let mut build = ViewBuild::new();
-    let view = render_view_container(&mut build).expect("view container");
-    let tree = UiTree::new(view.node().clone()).expect("view tree");
-    assert_eq!(view.node().kind, tela_contract::NodeKind::View);
-    assert_eq!(view.node().children.len(), 1);
-    assert!(tree.keys().iter().any(|key| key.0 == "view.container"));
+fn registered_structural_components_accept_named_function_props_without_macro_special_cases() {
+    let rows = vec![
+        RowValue {
+            id: 1,
+            label: "one".to_owned(),
+        },
+        RowValue {
+            id: 2,
+            label: "two".to_owned(),
+        },
+    ];
+    let mut coordinator = FrameCoordinator::<AppAction>::new();
+    let mut build = coordinator.begin_build();
+    let root = render_structural(&mut build, rows)
+        .expect("registered structural components assemble through normal props");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("structural tree preparation")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("structural tree resolve");
+    coordinator
+        .commit(resolved)
+        .expect("current structural tree frame");
+    let active = coordinator.active().expect("structural tree was committed");
+    assert_eq!(active.tree().root().children.len(), 4);
+    assert_eq!(
+        active
+            .tree()
+            .root()
+            .children
+            .iter()
+            .filter(|child| child.kind == NodeKind::View)
+            .count(),
+        4,
+        "For, Show and Switch stay transparent: their row and branch roots are direct Column children"
+    );
 }
 
 #[test]
-fn empty_view_builds_as_a_decoration_block() {
-    let mut build = ViewBuild::new();
-    let view = render_empty_view(&mut build).expect("empty view");
-    assert_eq!(view.node().kind, tela_contract::NodeKind::View);
-    assert!(view.node().children.is_empty());
-    let tree = UiTree::new(view.node().clone()).expect("empty view tree");
-    assert!(tree.keys().iter().any(|key| key.0 == "view.empty"));
+fn sibling_for_components_namespace_equal_business_keys() {
+    let rows = vec![RowValue {
+        id: 7,
+        label: "same-id".to_owned(),
+    }];
+    let mut coordinator = FrameCoordinator::<AppAction>::new();
+    let mut build = coordinator.begin_build();
+    let root = render_adjacent_collections(&mut build, rows.clone(), rows)
+        .expect("two structural components assemble");
+    let resolved = coordinator
+        .prepare(root)
+        .expect("collection scopes prevent key collision")
+        .resolve(|_| Ok::<_, ()>(empty_frame()))
+        .expect("adjacent collection tree resolves");
+    coordinator
+        .commit(resolved)
+        .expect("current collection frame");
+
+    let active = coordinator.active().expect("collection frame committed");
+    assert_eq!(active.tree().root().children.len(), 2);
+    let unique_keys = active
+        .tree()
+        .keys()
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique_keys.len(), active.tree().keys().len());
 }
