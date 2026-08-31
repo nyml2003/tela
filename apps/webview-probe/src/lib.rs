@@ -7,10 +7,10 @@
 
 #![warn(missing_docs)]
 
+use std::rc::Rc;
 use tela_app_runtime::{
     AppController, Application, ApplicationConfig, ControllerOutcome, FrameContext,
 };
-use std::rc::Rc;
 
 use tela_contract::{
     BorderRadius, Color, Fill, IdentityConcern, Insets, InteractConcern, KeyStrategy,
