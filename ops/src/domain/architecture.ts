@@ -64,6 +64,12 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-ui-dsl',
     'tela-ui-foundation',
   ],
+  'tela-webview-probe': [
+    'tela-app-runtime',
+    'tela-contract',
+    'tela-core',
+    'tela-ui-dsl',
+  ],
   'tela-bridge': ['postcard', 'serde', 'tela-utils'],
   'tela-bundle': ['hex', 'serde', 'serde_json', 'sha2', 'tela-app-abi', 'zip'],
   'tela-core': ['tela-contract'],
@@ -127,6 +133,15 @@ const ALLOWED_NORMAL: AllowedDeps = {
     'tela-icon-resources',
     'tela-target-webview',
     'tela-text-resources',
+    'wasm-bindgen',
+  ],
+  'tela-product-webview-probe': [
+    'tela-app-abi',
+    'tela-contract',
+    'tela-icon-resources',
+    'tela-target-webview',
+    'tela-text-resources',
+    'tela-webview-probe',
     'wasm-bindgen',
   ],
   'tela-product-ios': [
@@ -307,6 +322,7 @@ const ALLOWED_DEV: AllowedDeps = {
     'tela-icon-resources',
     'tela-text-resources',
   ],
+  'tela-webview-probe': ['tela-app-session', 'tela-icon-resources', 'tela-text-resources'],
   'tela-desktop-demo': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
   'tela-desktop-runtime': ['serde_json', 'tela-app-abi'],
   'tela-win32-editor': ['tela-icon-resources', 'tela-render-raster', 'tela-text-resources'],
@@ -344,6 +360,7 @@ const APPLICATION_CRATES = new Set([
   'tela-desktop-demo',
   'tela-mobile-demo',
   'tela-speed-gear',
+  'tela-webview-probe',
   'tela-win32-probe',
 ]);
 const PRODUCT_CRATES = new Set([
@@ -353,6 +370,7 @@ const PRODUCT_CRATES = new Set([
   'tela-product-ios',
   'tela-product-mobile-guest',
   'tela-product-speed-gear',
+  'tela-product-webview-probe',
   'tela-product-win32-agent',
   'tela-product-win32-probe',
 ]);

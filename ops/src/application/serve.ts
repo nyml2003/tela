@@ -23,6 +23,9 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
     && (await fs.exists(workspace.webviewHostWasmPath()));
   const hasAgentWasm = (await fs.exists(workspace.agentDemoGluePath()))
     && (await fs.exists(workspace.agentDemoWasmPath()));
+  const hasCardPage = await fs.exists(`${workspace.distDir}/card.html`);
+  const hasCardWasm = (await fs.exists(workspace.webviewProbeGluePath()))
+    && (await fs.exists(workspace.webviewProbeWasmPath()));
   if (!hasBrowserPage && !hasAgentPage && !hasDesktopSdkBundle && !hasMobileSdkBundle) {
     reporter.fail(`缺少 ${workspace.distDir}/index.html、${workspace.distDir}/agent.html、${desktopBundle.indexPath()} 和 ${mobileBundle.indexPath()}`);
     reporter.info('请先运行: ops build agent-demo、ops build webview 或 ops build bundle');
@@ -35,6 +38,12 @@ export async function runServe(deps: ServeDeps, preferredPort: number): Promise<
     reporter.info(`http://127.0.0.1:${result.port}/agent.html`);
   } else if (hasAgentPage) {
     reporter.warn('Agent 页面构建不完整：还需要 tela_agent_demo.js 与 Wasm；运行 ops build agent-demo。');
+  }
+  if (hasCardPage && hasCardWasm) {
+    reporter.info('Tela WebView Probe（静态单 Wasm，hover 缩放卡片）：');
+    reporter.info(`http://127.0.0.1:${result.port}/card.html`);
+  } else if (hasCardPage) {
+    reporter.warn('Card 页面构建不完整：还需要 tela_webview_probe.js 与 Wasm；运行 ops build webview-probe。');
   }
   if (hasBrowserPage && hasDesktopSdkBundle && hasWebviewShell) {
     reporter.info('可用页面（URL 单独一行，点击直达）：');

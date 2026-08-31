@@ -16,10 +16,10 @@ pub(crate) struct RasterizedText {
 
 /// 将一段 `TextContent` 栅格化为紧贴墨迹的透明 RGBA8。
 ///
-/// `baseline_y` 与 `wrap_width` 是文字几何盒局部的逻辑坐标；共享文字层收到的坐标则已
-/// 乘入设备缩放，保证它与 Raster 对同一 `DrawPayload::Text::baseline_y` 的解释相同。字形
-/// 可以溢出布局盒，所以返回的偏移允许为负数；调用方必须把它用于纹理 quad，而不是把墨迹
-/// 强行塞回 `DrawCommand::geometry`。
+/// `baseline_y` 与 `wrap_width` 是文字几何盒局部的逻辑坐标；共享文字层收到的基线已乘入
+/// 设备缩放，`wrap_width` 则保持逻辑像素与布局测量逐位一致（避免分数 DPR 下的 ulp 折行
+/// 偏差）。字形可以溢出布局盒，所以返回的偏移允许为负数；调用方必须把它用于纹理 quad，
+/// 而不是把墨迹强行塞回 `DrawCommand::geometry`。
 pub(crate) fn rasterize(
     text: &TextContent,
     baseline_y: f32,
@@ -30,7 +30,7 @@ pub(crate) fn rasterize(
         origin_x: 0.0,
         baseline_y: baseline_y * scale,
         scale,
-        wrap_width: wrap_width * scale,
+        wrap_width,
     };
     let bounds = glyph_ink_bounds(text, options)?;
     let width = bounds.width;

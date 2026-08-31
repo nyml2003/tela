@@ -78,7 +78,11 @@ pub struct GlyphRasterOptions {
     pub baseline_y: f32,
     /// 逻辑坐标到物理像素的缩放，例如设备像素比。
     pub scale: f32,
-    /// 物理像素中的折行宽度；无效值表示不折行。
+    /// 逻辑像素中的折行宽度；无效值表示不折行。
+    ///
+    /// 折行判定与布局测量共用逻辑坐标空间，不做 `× scale` / `÷ scale` 往返：f32 往返在
+    /// 分数 DPR 下产生 ulp 误差，而自动宽度文本的布局盒恰好等于最宽行宽，任何 ulp
+    /// 偏移都会让渲染侧比测量多折一行（007-4.0 同一度量）。
     pub wrap_width: f32,
 }
 
@@ -255,8 +259,9 @@ pub fn glyph_ink_metrics(text: &TextContent) -> Option<GlyphInkMetrics> {
 
 /// 按受控字体生成字形覆盖事件。
 ///
-/// `GlyphRasterOptions` 的坐标已经是物理像素；回调可依据自己的纹理边界或 clip 丢弃事件。
-/// 文本与图标字体、未知 `TextStyleRef` 回退、em 缩放和折行规则都由这里统一定义。
+/// `GlyphRasterOptions` 的位置坐标（`origin_x`/`baseline_y`）是物理像素；`wrap_width`
+/// 保持逻辑像素，与布局测量逐位一致。回调可依据自己的纹理边界或 clip 丢弃事件。文本
+/// 与图标字体、未知 `TextStyleRef` 回退、em 缩放和折行规则都由这里统一定义。
 pub fn rasterize_glyphs(
     text: &TextContent,
     options: GlyphRasterOptions,
@@ -283,9 +288,10 @@ pub fn rasterize_glyphs(
     // Layout measures at logical scale. Keep the line-break comparison in exactly that coordinate
     // space, then scale already-decided pen positions for rasterization. Recomputing advances at
     // `glyph_scale` can differ by an ulp at fractional DPI and make an exact-fit final glyph wrap.
+    // `wrap_width` is likewise passed in logical pixels and used as-is for the same reason.
     let logical = font.as_scaled(logical_scale);
     let scaled = font.as_scaled(glyph_scale);
-    let wrap_width = normalized_wrap_width(Some(options.wrap_width / options.scale));
+    let wrap_width = normalized_wrap_width(Some(options.wrap_width));
     let line_height = text.line_height * options.scale;
     let mut logical_pen_x = 0.0f32;
     let mut baseline_y = options.baseline_y;
@@ -337,6 +343,7 @@ mod tests {
     use super::{
         GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, glyph_ink_metrics, rasterize_glyphs,
     };
+    use crate::measure_text;
 
     fn text(text_style: TextStyleRef, value: &str) -> TextContent {
         TextContent {
@@ -345,6 +352,59 @@ mod tests {
             font_size: 20.0,
             line_height: 24.0,
             color: Color::WHITE,
+        }
+    }
+
+    #[test]
+    fn exact_fit_wrap_survives_fractional_device_scales() {
+        // 自动宽度文本的布局盒恰好等于测量出的最宽行宽，折行判定永远处在精确边界上。
+        // 测量在逻辑空间判定；渲染若把折行宽度 ×scale 再 ÷scale 往返，f32 的 ulp 误差
+        // 会让渲染侧比测量多折一行（行高/墨迹高度与布局盒对不上）。
+        let samples = [
+            "Tela Webview Probe",
+            "hover the card to scale",
+            "设计示例文本与标点",
+            "mixed 中英 width 123",
+        ];
+        for value in samples {
+            let content = text(TextStyleRef::body(), value);
+            let metrics = measure_text(&TextMeasureRequest {
+                text: value,
+                text_style: &TextStyleRef::body(),
+                font_size: content.font_size,
+                line_height: content.line_height,
+                max_width: None,
+            });
+            assert_eq!(metrics.line_count, 1, "样本必须先按单行测量");
+            for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+                let mut min_y = i32::MAX;
+                let mut max_y = i32::MIN;
+                rasterize_glyphs(
+                    &content,
+                    GlyphRasterOptions {
+                        origin_x: 0.0,
+                        baseline_y: 1000.0 * scale,
+                        scale,
+                        // 布局盒 = 测量宽度：折行判定的精确边界。
+                        wrap_width: metrics.width,
+                    },
+                    |event| {
+                        if let GlyphRasterEvent::Coverage { y, coverage, .. } = event
+                            && coverage > 0.0
+                        {
+                            min_y = min_y.min(y);
+                            max_y = max_y.max(y.saturating_add(1));
+                        }
+                    },
+                );
+                assert!(min_y <= max_y, "{value:?} 在 scale={scale} 未产生任何墨迹");
+                let ink_height = (max_y - min_y) as f32 / scale;
+                assert!(
+                    ink_height <= content.line_height,
+                    "{value:?} 在 scale={scale} 渲染出超过一行的墨迹高度 {ink_height:.3}（行高 {:.1}）",
+                    content.line_height
+                );
+            }
         }
     }
 

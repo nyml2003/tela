@@ -500,9 +500,12 @@ pub async fn start_gpu(canvas: HtmlCanvasElement) -> Result<(), JsValue> {
     device.on_uncaptured_error(std::sync::Arc::new(|error| {
         web_sys::console::error_1(&JsValue::from_str(&format!("tela WebView WGPU: {error}")));
     }));
-    let config = surface
+    let mut config = surface
         .get_default_config(&adapter, canvas.width().max(1), canvas.height().max(1))
         .ok_or_else(|| js_error("WebGPU surface has no default configuration"))?;
+    // The retained present path copies the backing texture into the canvas texture. The browser
+    // grants CopyDst on the canvas only when the configuration requests it (macOS parity).
+    config.usage |= wgpu::TextureUsages::COPY_DST;
     let format = config.format;
     surface.configure(&device, &config);
     let renderer = tela_render_wgpu::WgpuRenderer::new(

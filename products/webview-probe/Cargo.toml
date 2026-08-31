@@ -1,0 +1,21 @@
+[package]
+name = "tela-product-webview-probe"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Static single-Wasm Tela Webview Probe web product"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tela-app-abi = { path = "../../crates/delivery/app-abi" }
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-target-webview = { path = "../../crates/targets/webview" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+tela-webview-probe = { path = "../../apps/webview-probe" }
+wasm-bindgen = "0.2"
+
+[lints]
+workspace = true

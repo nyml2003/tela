@@ -11,7 +11,7 @@ export type BuildProfile = 'dev' | 'release';
 export type BundleChannel = 'desktop' | 'mobile' | 'cc';
 
 /** 显式产品闭包。`core` 是纯 Rust library 闭包，不是虚构的 GUI Target。 */
-export type ProductId = 'core' | 'webview' | 'agent-demo' | 'android' | 'ios' | 'win32' | 'win32-editor' | 'win32-probe' | 'win32-agent' | 'speed-gear' | 'macos';
+export type ProductId = 'core' | 'webview' | 'agent-demo' | 'webview-probe' | 'android' | 'ios' | 'win32' | 'win32-editor' | 'win32-probe' | 'win32-agent' | 'speed-gear' | 'macos';
 
 export type DeliveryRoute = 'none' | 'dynamic-bundle' | 'static-link';
 
@@ -71,6 +71,12 @@ export interface WorkspacePaths {
   agentDemoGluePath(): string;
   /** wasm-bindgen generated Agent product WebAssembly module. */
   agentDemoWasmPath(): string;
+  /** Statically linked WebView probe product WASM artifact. */
+  webviewProbeArtifactPath(profile: BuildProfile): string;
+  /** wasm-bindgen generated WebView probe product glue. */
+  webviewProbeGluePath(): string;
+  /** wasm-bindgen generated WebView probe product WebAssembly module. */
+  webviewProbeWasmPath(): string;
   win32DistDir(): string;
   win32DistPath(): string;
   win32ArtifactPath(profile: BuildProfile): string;
@@ -128,6 +134,7 @@ export const DESKTOP_GUEST_CRATE = 'tela-product-desktop-guest';
 export const MOBILE_GUEST_CRATE = 'tela-product-mobile-guest';
 export const WEBVIEW_TARGET_CRATE = 'tela-target-webview';
 export const AGENT_DEMO_PRODUCT_CRATE = 'tela-product-agent-demo';
+export const WEBVIEW_PROBE_PRODUCT_CRATE = 'tela-product-webview-probe';
 export const ANDROID_TARGET_CRATE = 'tela-target-android';
 export const IOS_PRODUCT_CRATE = 'tela-product-ios';
 export const WIN32_TARGET_CRATE = 'tela-target-win32';
@@ -173,6 +180,15 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       renderer: 'tela-render-wgpu',
       target: WEBVIEW_TARGET_CRATE,
       packages: [AGENT_DEMO_PRODUCT_CRATE],
+    },
+    'webview-probe': {
+      id: 'webview-probe',
+      root: productRoot('webview-probe'),
+      application: 'tela-webview-probe',
+      delivery: 'static-link',
+      renderer: 'tela-render-wgpu',
+      target: WEBVIEW_TARGET_CRATE,
+      packages: [WEBVIEW_PROBE_PRODUCT_CRATE],
     },
     android: {
       id: 'android',
@@ -313,6 +329,16 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     },
     agentDemoWasmPath() {
       return `${distDir}/tela_agent_demo_bg.wasm`;
+    },
+    webviewProbeArtifactPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/wasm32-unknown-unknown/${dir}/tela_product_webview_probe.wasm`;
+    },
+    webviewProbeGluePath() {
+      return `${distDir}/tela_webview_probe.js`;
+    },
+    webviewProbeWasmPath() {
+      return `${distDir}/tela_webview_probe_bg.wasm`;
     },
     win32DistDir() {
       return `${distDir}/win32`;

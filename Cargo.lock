@@ -2481,6 +2481,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-product-webview-probe"
+version = "0.1.0"
+dependencies = [
+ "tela-app-abi",
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-target-webview",
+ "tela-text-resources",
+ "tela-webview-probe",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "tela-product-win32-editor"
 version = "0.1.0"
 dependencies = [
@@ -2679,6 +2692,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tela-webview-probe"
+version = "0.1.0"
+dependencies = [
+ "tela-app-runtime",
+ "tela-app-session",
+ "tela-contract",
+ "tela-core",
+ "tela-icon-resources",
+ "tela-text-resources",
+ "tela-ui-dsl",
 ]
 
 [[package]]

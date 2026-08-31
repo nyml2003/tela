@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const distDir = fileURLToPath(new URL('../../dist', import.meta.url));
 const publicDir = fileURLToPath(new URL('./public', import.meta.url));
 const assetDir = join(distDir, 'assets/tela-web');
-const entries = { app: 'src/main.ts', agent: 'src/agent.ts', rawgpu: 'src/rawgpu.ts' };
+const entries = { app: 'src/main.ts', agent: 'src/agent.ts', card: 'src/card.ts', rawgpu: 'src/rawgpu.ts' };
 
 await mkdir(distDir, { recursive: true });
 await rm(assetDir, { recursive: true, force: true });
@@ -16,6 +16,8 @@ await Promise.all([
   cp(join(publicDir, 'index.html'), join(distDir, 'index.html')),
   cp(join(publicDir, 'agent.html'), join(distDir, 'agent.html')),
   cp(join(publicDir, 'agent-bootstrap.js'), join(distDir, 'agent-bootstrap.js')),
+  cp(join(publicDir, 'card.html'), join(distDir, 'card.html')),
+  cp(join(publicDir, 'card-bootstrap.js'), join(distDir, 'card-bootstrap.js')),
   cp(join(publicDir, 'rawgpu.html'), join(distDir, 'rawgpu.html')),
 ]);
 

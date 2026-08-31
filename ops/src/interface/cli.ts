@@ -3,7 +3,7 @@
 // 运行时零第三方依赖：Node 24 原生执行 TS（type stripping，erasableSyntaxOnly）。
 // 用法：
 //   ops check                    五道验证门（fmt/clippy/test/WGPU visual/arch）
-//   ops build <core|webview|frontend|bundle|android|ios|win32|win32-editor|win32-probe|speed-gear|macos> [--release]  构建显式产品闭包
+//   ops build <core|webview|agent-demo|webview-probe|frontend|bundle|android|ios|win32|win32-editor|win32-probe|speed-gear|macos> [--release]  构建显式产品闭包
 //   ops verify bundle [desktop|mobile] [--build]  验证已发布的应用 guest
 //   ops serve [port]             开发静态服务器（默认 8000）
 import { parseArgs } from 'node:util';
@@ -19,6 +19,7 @@ import { HttpServerPort } from '../infrastructure/server.ts';
 import { runCheck } from '../application/check.ts';
 import { runBuildWebview } from '../application/build-webview.ts';
 import { runBuildAgentDemo } from '../application/build-agent-demo.ts';
+import { runBuildWebviewProbe } from '../application/build-webview-probe.ts';
 import { runBuildCore } from '../application/build-core.ts';
 import { runBuildFrontend } from '../application/build-frontend.ts';
 import { runBuildBundle } from '../application/build-bundle.ts';
@@ -44,7 +45,7 @@ const USAGE = `tela-ops — tela 开发运维工作流（DDD 分层，运行时�
 
 用法:
   ops check                   五道验证门（fmt / clippy / test / WGPU visual / arch）
-  ops build <core|webview|agent-demo|frontend|bundle [desktop|mobile|cc]|android|ios|win32|win32-editor|win32-probe|win32-agent|speed-gear|macos|cc|relay|agent> [--release]
+  ops build <core|webview|agent-demo|webview-probe|frontend|bundle [desktop|mobile|cc]|android|ios|win32|win32-editor|win32-probe|win32-agent|speed-gear|macos|cc|relay|agent> [--release]
                               每次显式选择一个产品或其受控子产物。bundle desktop/mobile 是
                               两个独立 product guest；webview/win32/macos 先构建 desktop guest，android 先构建 mobile guest，
                               ios 静态链接独立 mobile app，构建无签名 iPhone ARM64 UIKit/Metal App。
@@ -106,7 +107,7 @@ async function main(): Promise<number> {
     }
     case 'build': {
       if (target === undefined || target === 'all') {
-        reporter.fail('ops build 需要显式产品目标（core | webview | agent-demo | android | ios | win32 | win32-editor | win32-probe | win32-agent | speed-gear | macos | cc | relay | agent）。');
+        reporter.fail('ops build 需要显式产品目标（core | webview | agent-demo | webview-probe | android | ios | win32 | win32-editor | win32-probe | win32-agent | speed-gear | macos | cc | relay | agent）。');
         reporter.info('浏览器产品使用 ops build webview；交付 guest 可单独使用 ops build bundle [desktop|mobile]。');
         return 1;
       }
@@ -138,6 +139,14 @@ async function main(): Promise<number> {
         } else if (t === 'agent-demo') {
           const cargo = new CargoPort(processPort, workspace);
           const result = await runBuildAgentDemo(
+            { cargo, process: processPort, fs, reporter, workspace },
+          );
+          if (!result.ok) return 1;
+          const frontend = await runBuildFrontend({ process: processPort, reporter, workspace });
+          if (!frontend.ok) return 1;
+        } else if (t === 'webview-probe') {
+          const cargo = new CargoPort(processPort, workspace);
+          const result = await runBuildWebviewProbe(
             { cargo, process: processPort, fs, reporter, workspace },
           );
           if (!result.ok) return 1;
@@ -274,7 +283,7 @@ async function main(): Promise<number> {
           );
           if (!result.ok) return 1;
         } else {
-          reporter.fail(`未知构建目标: ${t}（core | webview | agent-demo | frontend | bundle | android | ios | win32 | win32-editor | win32-probe | win32-agent | speed-gear | macos | cc | relay | agent）`);
+          reporter.fail(`未知构建目标: ${t}（core | webview | agent-demo | webview-probe | frontend | bundle | android | ios | win32 | win32-editor | win32-probe | win32-agent | speed-gear | macos | cc | relay | agent）`);
           return 1;
         }
       }

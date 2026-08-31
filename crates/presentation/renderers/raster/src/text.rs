@@ -29,8 +29,7 @@ pub(crate) fn draw_text(canvas: &mut Canvas<'_>, input: TextDrawInput<'_>) {
     if input.clip.w <= 0 || input.clip.h <= 0 {
         return;
     }
-    // 折行宽度换算到像素空间（pen 累计为 scale 后的值）。
-    let wrap_width = input.logical.w * input.scale;
+    // 折行宽度保持逻辑像素：与布局测量逐位一致（pen 的折行累计也发生在逻辑空间）。
     #[cfg(feature = "std")]
     {
         crate::text_std::draw_text_std(
@@ -40,7 +39,7 @@ pub(crate) fn draw_text(canvas: &mut Canvas<'_>, input: TextDrawInput<'_>) {
             input.text,
             input.baseline_y,
             input.scale,
-            wrap_width,
+            input.logical.w,
         );
     }
     #[cfg(not(feature = "std"))]
@@ -52,7 +51,7 @@ pub(crate) fn draw_text(canvas: &mut Canvas<'_>, input: TextDrawInput<'_>) {
             input.text,
             input.baseline_y,
             input.scale,
-            wrap_width,
+            input.logical.w,
         );
     }
 }

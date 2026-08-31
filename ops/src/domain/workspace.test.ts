@@ -15,6 +15,9 @@ test('路径模型从仓库根派生，并把原生输入放在产品根', () =>
   assert.equal(workspace.agentDemoArtifactPath('release'), '/repo/target/wasm32-unknown-unknown/release/tela_product_agent_demo.wasm');
   assert.equal(workspace.agentDemoGluePath(), '/repo/dist/tela_agent_demo.js');
   assert.equal(workspace.agentDemoWasmPath(), '/repo/dist/tela_agent_demo_bg.wasm');
+  assert.equal(workspace.webviewProbeArtifactPath('release'), '/repo/target/wasm32-unknown-unknown/release/tela_product_webview_probe.wasm');
+  assert.equal(workspace.webviewProbeGluePath(), '/repo/dist/tela_webview_probe.js');
+  assert.equal(workspace.webviewProbeWasmPath(), '/repo/dist/tela_webview_probe_bg.wasm');
 
   const desktop = workspace.bundle('desktop');
   assert.equal(desktop.guestCrate, 'tela-product-desktop-guest');
@@ -73,6 +76,16 @@ test('六个产品显式选择自身的应用、交付、renderer 与 Target', (
     renderer: 'tela-render-wgpu',
     target: 'tela-target-webview',
     packages: ['tela-product-agent-demo'],
+  });
+
+  assert.deepEqual(workspace.product('webview-probe'), {
+    id: 'webview-probe',
+    root: '/repo/products/webview-probe',
+    application: 'tela-webview-probe',
+    delivery: 'static-link',
+    renderer: 'tela-render-wgpu',
+    target: 'tela-target-webview',
+    packages: ['tela-product-webview-probe'],
   });
 
   const ios = workspace.product('ios');
