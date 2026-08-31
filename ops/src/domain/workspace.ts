@@ -11,7 +11,7 @@ export type BuildProfile = 'dev' | 'release';
 export type BundleChannel = 'desktop' | 'mobile' | 'cc';
 
 /** 显式产品闭包。`core` 是纯 Rust library 闭包，不是虚构的 GUI Target。 */
-export type ProductId = 'core' | 'webview' | 'agent-demo' | 'android' | 'ios' | 'win32' | 'win32-editor' | 'win32-agent' | 'speed-gear' | 'macos';
+export type ProductId = 'core' | 'webview' | 'agent-demo' | 'android' | 'ios' | 'win32' | 'win32-editor' | 'win32-probe' | 'win32-agent' | 'speed-gear' | 'macos';
 
 export type DeliveryRoute = 'none' | 'dynamic-bundle' | 'static-link';
 
@@ -77,6 +77,9 @@ export interface WorkspacePaths {
   win32EditorDistDir(): string;
   win32EditorDistPath(): string;
   win32EditorArtifactPath(profile: BuildProfile): string;
+  win32ProbeDistDir(): string;
+  win32ProbeDistPath(): string;
+  win32ProbeArtifactPath(profile: BuildProfile): string;
   win32AgentDistDir(): string;
   win32AgentDistPath(): string;
   win32AgentArtifactPath(profile: BuildProfile): string;
@@ -129,6 +132,7 @@ export const ANDROID_TARGET_CRATE = 'tela-target-android';
 export const IOS_PRODUCT_CRATE = 'tela-product-ios';
 export const WIN32_TARGET_CRATE = 'tela-target-win32';
 export const WIN32_EDITOR_CRATE = 'tela-product-win32-editor';
+export const WIN32_PROBE_CRATE = 'tela-product-win32-probe';
 export const WIN32_AGENT_CRATE = 'tela-product-win32-agent';
 export const SPEED_GEAR_CRATE = 'tela-product-speed-gear';
 export const SPEED_GEAR_HOOK_CRATE = 'tela-speed-gear-hook';
@@ -204,6 +208,14 @@ export function resolveWorkspace(root: string): WorkspacePaths {
       delivery: 'static-link',
       target: WIN32_TARGET_CRATE,
       packages: [WIN32_EDITOR_CRATE],
+    },
+    'win32-probe': {
+      id: 'win32-probe',
+      root: productRoot('win32-probe'),
+      application: 'tela-win32-probe',
+      delivery: 'static-link',
+      target: WIN32_TARGET_CRATE,
+      packages: [WIN32_PROBE_CRATE],
     },
     'win32-agent': {
       id: 'win32-agent',
@@ -321,6 +333,16 @@ export function resolveWorkspace(root: string): WorkspacePaths {
     win32EditorArtifactPath(profile) {
       const dir = profile === 'release' ? 'release' : 'debug';
       return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-win32-editor-host.exe`;
+    },
+    win32ProbeDistDir() {
+      return `${distDir}/win32-probe`;
+    },
+    win32ProbeDistPath() {
+      return `${distDir}/win32-probe/tela-win32-probe-host.exe`;
+    },
+    win32ProbeArtifactPath(profile) {
+      const dir = profile === 'release' ? 'release' : 'debug';
+      return `${root}/target/x86_64-pc-windows-gnu/${dir}/tela-win32-probe-host.exe`;
     },
     win32AgentDistDir() {
       return `${distDir}/win32-agent`;

@@ -1,6 +1,9 @@
 //! Unified Win32 target for bundle-backed and in-process Tela applications.
 
 #![deny(unsafe_code)]
+// Win32 callbacks use an extern ABI and cannot unwind. Production target code must represent
+// every absent value and fallible operation explicitly instead of aborting the process.
+#![deny(clippy::expect_used, clippy::unwrap_used)]
 #![warn(missing_docs)]
 
 #[cfg(target_os = "windows")]

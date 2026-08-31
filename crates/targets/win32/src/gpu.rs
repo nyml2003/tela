@@ -10,7 +10,7 @@ use raw_window_handle::{
     Win32WindowHandle,
 };
 use tela_contract::{FrameDamage, RenderPlan};
-use tela_render_wgpu::{WgpuRenderer, renderer::RetainedFrameTarget};
+use tela_render_wgpu::WgpuRenderer;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -61,7 +61,6 @@ pub struct GpuSession {
     /// Presentation configuration.
     pub config: wgpu::SurfaceConfiguration,
     renderer: WgpuRenderer,
-    backing: RetainedFrameTarget,
     /// 设备丢失回调的跨线程报告槽与代际号。
     device_loss: Arc<Mutex<Option<DeviceLossReport>>>,
     generation: u64,
@@ -167,7 +166,7 @@ impl GpuSession {
             init_started.elapsed().as_micros()
         );
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: capabilities.formats[0],
             width: width.max(1),
             height: height.max(1),
@@ -178,7 +177,6 @@ impl GpuSession {
             color_space: wgpu::SurfaceColorSpace::Srgb,
         };
         surface.configure(renderer.device(), &config);
-        let backing = renderer.retained_target(config.width, config.height);
         gpu_trace!(
             "tela-win32-trace: event=gpu_init stage=surface_configured elapsed_us={} physical={}x{}",
             init_started.elapsed().as_micros(),
@@ -201,7 +199,6 @@ impl GpuSession {
                 surface,
                 config,
                 renderer,
-                backing,
                 device_loss,
                 generation,
             });
@@ -239,7 +236,6 @@ impl GpuSession {
             surface,
             config,
             renderer,
-            backing,
             device_loss,
             generation,
         })
@@ -288,15 +284,29 @@ impl GpuSession {
             wgpu::CurrentSurfaceTexture::Occluded => return Ok(RenderOutcome::Occluded),
             wgpu::CurrentSurfaceTexture::Validation => return Ok(RenderOutcome::Validation),
         };
-        self.renderer.render_retained_frame(
-            frame,
-            damage,
-            &mut self.backing,
+        // Surface textures are only valid for the present currently in progress. Rendering the
+        // complete published plan directly avoids relying on COPY_DST support for a Win32
+        // swapchain image, which is not uniform across drivers/compositors. The retained target
+        // remains an optimization for targets that have a verified copy path; native correctness
+        // takes precedence here.
+        let view = texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_render stage=begin commands={} damage_flags={:?} damage_rects={} physical={}x{}",
+            frame.command_count(),
+            damage.flags,
+            damage.rects.len(),
             self.config.width,
             self.config.height,
         );
         self.renderer
-            .copy_retained_to_texture(&self.backing, &texture.texture);
+            .render_frame(frame, &view, self.config.width, self.config.height);
+        gpu_trace!(
+            "tela-win32-trace: event=gpu_render stage=encoded stats={:?} diagnostics={}",
+            self.renderer.last_stats(),
+            self.renderer.last_diagnostics(),
+        );
         self.renderer.present(texture);
         Ok(RenderOutcome::Presented { suboptimal })
     }

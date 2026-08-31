@@ -257,6 +257,7 @@ pub fn build_dispatcher(
 }
 
 #[cfg(all(test, target_os = "windows"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tela_bridge::{BridgeEvent, BridgeRequest, BridgeResult, VersionPolicy};

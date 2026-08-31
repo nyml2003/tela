@@ -331,19 +331,23 @@ impl WindowState {
     }
 
     fn dispatch_viewport(&mut self, metrics: ClientMetrics) -> Result<(), String> {
-        // A frame from the previous client geometry must not route input after this point.
-        if let Some(session) = self.session.as_mut() {
-            session.invalidate_presented();
-        }
         self.bridge_metrics.replace(WindowMetrics {
             width: (metrics.width as f32 / metrics.dpi_scale) as u32,
             height: (metrics.height as f32 / metrics.dpi_scale) as u32,
             dpr: metrics.dpi_scale,
         });
-        self.dispatch_guest(AppEvent::Viewport {
+        let outcome = self.dispatch_guest(AppEvent::Viewport {
             width: metrics.width as f32 / metrics.dpi_scale,
             height: metrics.height as f32 / metrics.dpi_scale,
         })?;
+        // Only revoke input ownership after a new candidate exists. A duplicate WM_SIZE or a
+        // transient publish failure must leave the last presented frame renderable and must never
+        // create a frame-less gap inside the Win32 callback.
+        if outcome.publish_requested {
+            if let Some(session) = self.session.as_mut() {
+                session.invalidate_presented();
+            }
+        }
         Ok(())
     }
 
@@ -554,11 +558,18 @@ impl WindowState {
         if !self.lifecycle.can_render() {
             return Ok(RenderOutcome::Occluded);
         }
-        let (frame, damage) = self
-            .session
-            .as_ref()
-            .map(|session| (session.frame().clone(), session.frame_damage().clone()))
-            .ok_or_else(|| "render without a resolved UI frame".to_owned())?;
+        let (frame, damage) = {
+            let Some(session) = self.session.as_mut() else {
+                return Ok(RenderOutcome::Occluded);
+            };
+            // A previous candidate may have failed to publish. Rendering is the retry point, but
+            // it is still valid for no frame to be available after a rejected or invalidated one.
+            session.flush();
+            let Some((frame, damage)) = session.render_inputs() else {
+                return Ok(RenderOutcome::Occluded);
+            };
+            (frame.clone(), damage.clone())
+        };
         let gpu = self
             .gpu
             .as_mut()

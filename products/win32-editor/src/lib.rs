@@ -84,3 +84,152 @@ pub fn run() -> Result<(), String> {
         NativeWindowOptions::new(APP_NAME).size(960, 640),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use tela_app_runtime::{Application, ApplicationConfig};
+    use tela_app_session::ApplicationSession;
+    use tela_bridge::BridgeDispatcher;
+    use tela_contract::{Color, UiResourceSet, Viewport};
+    use tela_icon_resources::MaterialIconFontProvider;
+    use tela_render_wgpu::WgpuRenderer;
+    use tela_text_resources::{CONTROLLED_FONT_CATALOG, ControlledTextMeasurer};
+    use tela_win32_editor::{EditorController, FOCUS_APPEARANCE};
+
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 180;
+
+    static TEST_RESOURCES: UiResourceSet<ControlledTextMeasurer, MaterialIconFontProvider> =
+        UiResourceSet::new(ControlledTextMeasurer, MaterialIconFontProvider)
+            .with_fonts(CONTROLLED_FONT_CATALOG);
+
+    fn device_and_queue() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("an offscreen WGPU adapter is required for the visual regression");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("tela win32 editor visual regression"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: Default::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("create offscreen WGPU device")
+    }
+
+    fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
+        let bytes_per_row = WIDTH * 4;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tela win32 editor visual readback"),
+            size: (bytes_per_row * HEIGHT) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("wait for visual readback");
+        let mapped = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("map visual readback");
+        let result = mapped.to_vec();
+        drop(mapped);
+        buffer.unmap();
+        result
+    }
+
+    #[test]
+    #[ignore = "requires nix develop .#render-wgpu; runs the assembled editor through WGPU"]
+    fn editor_first_frame_reaches_a_direct_wgpu_target() {
+        let mut application = Application::new(
+            &TEST_RESOURCES,
+            EditorController::new(&TEST_RESOURCES, BridgeDispatcher::new()),
+            ApplicationConfig {
+                initial_viewport: Viewport {
+                    width: WIDTH as f32,
+                    height: HEIGHT as f32,
+                },
+                focus_appearance: Some(FOCUS_APPEARANCE),
+                ..ApplicationConfig::default()
+            },
+        );
+        let publication = ApplicationSession::publish(&mut application)
+            .expect("assemble the editor's first published frame");
+
+        let (device, queue) = device_and_queue();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tela win32 editor direct target"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = WgpuRenderer::new(
+            device.clone(),
+            queue.clone(),
+            wgpu::TextureFormat::Rgba8Unorm,
+            Color::WHITE,
+        );
+        renderer.render_frame(&publication.frame, &view, WIDTH, HEIGHT);
+        assert!(
+            renderer.last_stats().draw_calls > 0,
+            "the assembled editor frame must encode draw calls"
+        );
+
+        let pixels = pixels(&device, &queue, &texture);
+        let top_band_has_non_white_pixel = (0..34).any(|y| {
+            (0..WIDTH).any(|x| {
+                let index = ((y * WIDTH + x) * 4) as usize;
+                pixels[index] < 250 || pixels[index + 1] < 250 || pixels[index + 2] < 250
+            })
+        });
+        assert!(
+            top_band_has_non_white_pixel,
+            "the editor title bar must produce visible pixels on a direct WGPU target"
+        );
+    }
+}

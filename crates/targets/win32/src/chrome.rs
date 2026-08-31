@@ -5,12 +5,13 @@
 
 #![allow(unsafe_code)]
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, HTCAPTION, HTCLIENT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, ShowWindow,
-    WINDOW_STYLE, WM_CLOSE, WM_NCHITTEST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_THICKFRAME,
+    DefWindowProcW, GetClientRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT,
+    HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    ShowWindow, WINDOW_STYLE, WM_CLOSE, WM_NCHITTEST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 
 use tela_contract::HitRole;
@@ -50,6 +51,22 @@ pub fn hit_test(
     if chrome != WindowChrome::CustomTitleBar || default.0 != HTCLIENT as isize {
         return default;
     }
+    // A popup-style custom chrome has no system caption. Some Windows/DWM combinations also
+    // report HTCLIENT over its thick-frame edge, so preserve resize semantics explicitly instead
+    // of depending on DefWindowProcW to infer them from the borderless style.
+    if !unsafe { IsZoomed(hwnd) }.as_bool() {
+        let mut rect = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut rect) }.is_ok() {
+            let packed = lparam.0 as u32;
+            let (x, y) = crate::input::client_point(packed);
+            let mut point = POINT { x, y };
+            if unsafe { ScreenToClient(hwnd, &mut point) }.as_bool()
+                && let Some(hit) = resize_hit(point, rect, dpi_scale)
+            {
+                return LRESULT(hit);
+            }
+        }
+    }
     // 自绘标题栏：客户区顶部拖动带内、未命中交互节点 → HT_CAPTION（系统免费提供
     // 拖动、双击最大化、右键菜单）；按钮区保持 HTCLIENT。
     let packed = lparam.0 as u32;
@@ -66,6 +83,29 @@ pub fn hit_test(
     } else {
         HTCLIENT as isize
     })
+}
+
+/// Maps a physical client coordinate to a Win32 resize hit code for a custom title bar.
+///
+/// The incoming pointer and client rect are already physical pixels; only the border thickness
+/// is scaled from a stable logical 8 px affordance.
+fn resize_hit(point: POINT, rect: RECT, dpi_scale: f32) -> Option<isize> {
+    let edge = (8.0 * dpi_scale).round().clamp(4.0, 16.0) as i32;
+    let left = point.x < rect.left + edge;
+    let right = point.x >= rect.right - edge;
+    let top = point.y < rect.top + edge;
+    let bottom = point.y >= rect.bottom - edge;
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(HTTOPLEFT as isize),
+        (_, true, true, _) => Some(HTTOPRIGHT as isize),
+        (true, _, _, true) => Some(HTBOTTOMLEFT as isize),
+        (_, true, _, true) => Some(HTBOTTOMRIGHT as isize),
+        (true, _, _, _) => Some(HTLEFT as isize),
+        (_, true, _, _) => Some(HTRIGHT as isize),
+        (_, _, true, _) => Some(HTTOP as isize),
+        (_, _, _, true) => Some(HTBOTTOM as isize),
+        _ => None,
+    }
 }
 
 /// 执行一条自绘 chrome 的窗口命令（最小化/最大化-还原/关闭）。

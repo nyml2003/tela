@@ -2481,6 +2481,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "tela-product-win32-editor"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "tela-app-runtime",
+ "tela-app-session",
+ "tela-bridge",
+ "tela-contract",
+ "tela-desktop-runtime",
+ "tela-icon-resources",
+ "tela-render-wgpu",
+ "tela-target-win32",
+ "tela-text-resources",
+ "tela-utils",
+ "tela-win32-editor",
+ "wgpu",
+]
+
+[[package]]
+name = "tela-product-win32-probe"
+version = "0.1.0"
+dependencies = [
+ "tela-app-runtime",
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-target-win32",
+ "tela-text-resources",
+ "tela-win32-probe",
+]
+
+[[package]]
 name = "tela-render-canvas"
 version = "0.1.0"
 dependencies = [
@@ -2648,6 +2679,34 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tela-win32-editor"
+version = "0.1.0"
+dependencies = [
+ "tela-app-runtime",
+ "tela-app-session",
+ "tela-bridge",
+ "tela-contract",
+ "tela-core",
+ "tela-icon-resources",
+ "tela-text-resources",
+ "tela-ui-dsl",
+ "tela-ui-foundation",
+]
+
+[[package]]
+name = "tela-win32-probe"
+version = "0.1.0"
+dependencies = [
+ "tela-app-runtime",
+ "tela-app-session",
+ "tela-contract",
+ "tela-icon-resources",
+ "tela-text-resources",
+ "tela-ui-dsl",
+ "tela-ui-foundation",
 ]
 
 [[package]]

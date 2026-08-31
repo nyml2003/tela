@@ -1,0 +1,24 @@
+[package]
+name = "tela-product-win32-probe"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Minimal Win32 surface diagnostic product assembly"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tela-app-runtime = { path = "../../crates/delivery/app-runtime" }
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-target-win32 = { path = "../../crates/targets/win32" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+tela-win32-probe = { path = "../../apps/win32-probe" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tela-win32-probe-host"
+path = "src/main.rs"

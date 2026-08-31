@@ -18,6 +18,13 @@ tela-target-win32 = { path = "../../crates/targets/win32" }
 tela-text-resources = { path = "../../crates/presentation/resources/text" }
 tela-win32-editor = { path = "../../apps/win32-editor", features = ["app-runtime"] }
 
+[dev-dependencies]
+pollster = "0.4"
+tela-app-session = { path = "../../crates/delivery/app-session" }
+tela-bridge = { path = "../../crates/delivery/bridge", features = ["host"] }
+tela-render-wgpu = { path = "../../crates/presentation/renderers/wgpu" }
+wgpu = "30"
+
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"

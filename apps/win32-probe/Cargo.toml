@@ -1,0 +1,21 @@
+[package]
+name = "tela-win32-probe"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Minimal Win32 surface diagnostic application"
+
+[dependencies]
+tela-app-runtime = { path = "../../crates/delivery/app-runtime" }
+tela-contract = { path = "../../crates/kernel/contract" }
+tela-ui-dsl = { path = "../../crates/ui/dsl" }
+tela-ui-foundation = { path = "../../crates/ui/foundation" }
+
+[dev-dependencies]
+tela-app-session = { path = "../../crates/delivery/app-session" }
+tela-icon-resources = { path = "../../crates/presentation/resources/icons" }
+tela-text-resources = { path = "../../crates/presentation/resources/text" }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"

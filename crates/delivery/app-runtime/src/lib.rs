@@ -855,8 +855,15 @@ impl<A: Clone + 'static, C: AppController<A>> Application<A, C> {
             } else {
                 None
             };
+            // A Host-only candidate may reuse the active tree only when no ordinary explicit
+            // source edge is dirty. `prepare_presentation_dirty` and retained re-entry already
+            // claim the narrow cases above; any remaining dirty source belongs to a component
+            // assembly and must fall back to the rooted candidate. Otherwise a concurrent Host
+            // projection (for example window maximization) would snapshot the new source
+            // version without ever letting a hand-written UiSpec consume it.
             let host_projection = if presentation.is_none()
                 && retained.is_none()
+                && dirty.is_empty()
                 && memo_enabled
                 && self.host_projection_invalidated
             {
@@ -2054,7 +2061,10 @@ mod tests {
         PointerPhase, Size, TextMeasureRequest, TextMeasurer, TextMetrics, UpdateMode,
     };
     use tela_ui_dsl::prelude::{Column, Text};
-    use tela_ui_dsl::{Body, Children, DslComponent, ViewChild, ViewSite, signal, ui};
+    use tela_ui_dsl::{
+        Body, Children, ComponentAssembleContext, ComponentOutcome, DslComponent, UiSpec,
+        ViewChild, ViewSite, signal, ui,
+    };
 
     static TEST_RESOURCES: TestResources = TestResources;
 
@@ -2167,6 +2177,76 @@ mod tests {
                         maximized={ctx.window_maximized_signal.clone()}
                     />
                 </Column>
+            })
+        }
+
+        fn handle_action(&mut self, _action: ()) -> ControllerOutcome {
+            ControllerOutcome::changed(false)
+        }
+    }
+
+    /// A deliberately hand-written spec with an ordinary explicit Host watch. Unlike derive
+    /// components it has no retained evaluator, so it must exercise the rooted fallback when a
+    /// Host projection and its source invalidation arrive together.
+    struct ManualHostWatchProbe;
+    struct ManualHostWatchProbeSpec;
+
+    #[derive(Clone, Default)]
+    struct ManualHostWatchProbeProps {
+        maximized: Option<Signal<bool>>,
+    }
+
+    impl DslComponent for ManualHostWatchProbe {
+        type UiSpec<A: 'static> = ManualHostWatchProbeSpec;
+    }
+
+    impl<A: 'static> UiSpec<A> for ManualHostWatchProbeSpec {
+        type Props = ManualHostWatchProbeProps;
+        type State = ();
+        type Event = ();
+        type Output = ();
+
+        fn assemble<'a>(
+            context: &mut ComponentAssembleContext<'_, A>,
+            props: Self::Props,
+            _state: &Self::State,
+            _children: Children<'a, A>,
+        ) -> ViewResult<ViewOutput<A>> {
+            let source = props
+                .maximized
+                .expect("the test probe always receives the Host maximized source");
+            let value = source.get();
+            let site = context.site();
+            let build = context.build();
+            let watch = build.watch_source(&source, site);
+            let output = ui!(build {
+                <Text value={format!("manual-window={value}")} />
+            })?;
+            Ok(output.attach_watches(vec![watch]))
+        }
+
+        fn handle(
+            _state: &mut Self::State,
+            _props: &Self::Props,
+            _event: Self::Event,
+        ) -> ComponentOutcome<Self::Output> {
+            ComponentOutcome::Consumed
+        }
+    }
+
+    struct ManualHostWatchController {
+        render_count: usize,
+    }
+
+    impl AppController<()> for ManualHostWatchController {
+        fn render(
+            &mut self,
+            build: &mut ViewBuild<()>,
+            ctx: &FrameContext,
+        ) -> ViewResult<ViewOutput<()>> {
+            self.render_count += 1;
+            ui!(build {
+                <ManualHostWatchProbe maximized={ctx.window_maximized_signal.clone()} />
             })
         }
 
@@ -2344,6 +2424,14 @@ mod tests {
         (application, writer)
     }
 
+    fn manual_host_watch_app() -> Application<(), ManualHostWatchController> {
+        Application::new(
+            &TEST_RESOURCES,
+            ManualHostWatchController { render_count: 0 },
+            ApplicationConfig::default(),
+        )
+    }
+
     fn ensure_and_present(application: &mut Application<FixtureAction, FixtureController>) {
         assert!(application.ensure_frame());
         application.frame_presented();
@@ -2474,6 +2562,31 @@ mod tests {
         assert!(tree_contains_text(
             application.active().expect("updated frame").0.root(),
             "probe=2 window=true"
+        ));
+    }
+
+    #[test]
+    fn ordinary_manual_host_watch_uses_rooted_candidate_before_host_projection() {
+        let mut application = manual_host_watch_app();
+        assert!(application.ensure_frame());
+        application.frame_presented();
+        assert!(tree_contains_text(
+            application.active().expect("initial frame").0.root(),
+            "manual-window=false"
+        ));
+        let renders_before = application.controller().render_count;
+
+        assert!(application.set_window_maximized(true));
+        assert!(application.ensure_frame());
+        assert_eq!(
+            application.controller().render_count,
+            renders_before + 1,
+            "an ordinary explicit watch must not be hidden by a simultaneous Host-only projection"
+        );
+        application.frame_presented();
+        assert!(tree_contains_text(
+            application.active().expect("updated frame").0.root(),
+            "manual-window=true"
         ));
     }
 

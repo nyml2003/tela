@@ -1,20 +1,17 @@
-//! Editor application controller: domain state (route/settings/document/icon signals), DSL
-//! action handling and the About page build info (queried
-//! through the in-process bridge dispatcher, static-path semantics, see docs/桥/000 §7.3).
+//! Win32 editor application boundary.
 //!
-//! Frame lifecycle, input dispatch and the shell protocol live in the cross-application
-//! session runtime `tela_app_runtime::Application`; this module only implements
-//! `AppController` with editor domain logic.
+//! The controller deliberately owns no UI state. `EditorApp` owns the candidate component
+//! state and exposes only typed window commands. This keeps HostInput routing and state
+//! mutation inside the component tree, while the controller remains the one-way shell-effect
+//! boundary.
 
 use tela_app_runtime::{AppController, ControllerOutcome, FrameContext};
 use tela_app_session::AppEffect;
-#[cfg(test)]
-use tela_app_session::ApplicationSession;
 use tela_bridge::{BridgeDispatcher, BridgeEvent, BridgeRequest, BridgeResult, VersionPolicy};
-use tela_contract::{FocusAppearance, TextStyleRef, UiResources};
-use tela_ui_dsl::{Signal, ViewBuild, ViewOutput, ViewResult};
+use tela_contract::{FocusAppearance, TextStyleRef, UiResources, WindowCommand};
+use tela_ui_dsl::{ViewBuild, ViewOutput, ViewResult, ui};
 
-use crate::presentation::render_root;
+use crate::presentation::{EditorApp, EditorOutput};
 
 /// 焦点高亮外观（产品装配 `ApplicationConfig` 时注入）。
 pub const FOCUS_APPEARANCE: FocusAppearance = FocusAppearance {
@@ -59,25 +56,14 @@ pub enum IconCategory {
     Media,
 }
 
-/// DSL 产生的应用动作。
+/// 编辑器的应用级动作。
+///
+/// 页面、设置和文本编辑都是 `EditorApp` 的私有候选 State，不会离开组件树。只有必须由
+/// Win32 壳执行的窗口命令才成为应用动作。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditorAction {
-    /// 切换到某个页面。
-    Navigate(Route),
-    /// 设置字体大小（点）。
-    SetFontSize(u32),
-    /// 设置行距。
-    SetLineHeight(u32),
-    /// 设置编辑区字体。
-    SetFont(TextStyleRef),
-    /// 编辑器输入绑定值变化。
-    EditorInput(String),
-    /// 图标页搜索值变化。
-    IconSearch(String),
-    /// 图标页分类变化。
-    SetIconCategory(IconCategory),
-    /// 自绘标题栏窗口命令（会话转发给壳消费执行）。
-    Window(tela_contract::WindowCommand),
+    /// 自绘标题栏请求由宿主执行的窗口命令。
+    Window(WindowCommand),
 }
 
 /// 应用设置（内存态，不持久化）。
@@ -101,90 +87,21 @@ impl Default for EditorSettings {
     }
 }
 
-/// 编辑器域控制器：信号状态 + 渲染 + 动作处理。
+/// 编辑器应用的壳边界。
 ///
-/// 由 `tela_app_runtime::Application<EditorAction, EditorController>` 驱动；控制器
-/// 不感知窗口、消息循环或壳协议。
+/// 它只负责构造根业务组件、注入 Host-owned read-only signals，并在最终 Output 已经过
+/// `presented` 提交后把窗口命令交给应用会话释放为 effect。
 pub struct EditorController {
     resources: &'static dyn UiResources,
-    route: Signal<Route>,
-    settings: Signal<EditorSettings>,
-    document: Signal<String>,
-    icon_query: Signal<String>,
-    icon_category: Signal<IconCategory>,
-    /// 恒定数据节点：构造期一次查询后永不变（有身份、永不脏）。
-    about_cache: Signal<Vec<(String, String)>>,
+    about_rows: Vec<(String, String)>,
 }
 
 impl EditorController {
     /// 创建编辑器控制器；关于页构建信息在构造时经桥一次查询并缓存。
     pub fn new(resources: &'static dyn UiResources, mut bridge: BridgeDispatcher) -> Self {
-        let about_cache = Signal::new(query_about_rows(&mut bridge));
         Self {
             resources,
-            route: Signal::new(Route::Editor),
-            settings: Signal::new(EditorSettings::default()),
-            document: Signal::new(
-                "欢迎使用 Tela 文本编辑器\n\n在上方选择设置可调整字体大小与行距。\n".to_owned(),
-            ),
-            icon_query: Signal::new(String::new()),
-            icon_category: Signal::new(IconCategory::All),
-            about_cache,
-        }
-    }
-
-    fn handle_action(&mut self, action: EditorAction) -> bool {
-        match action {
-            EditorAction::Navigate(route) => {
-                if self.route.get() == route {
-                    return false;
-                }
-                self.route.set(route);
-                true
-            }
-            EditorAction::SetFontSize(size) => {
-                let mut settings = self.settings.get();
-                settings.font_size = size;
-                self.settings.set(settings);
-                true
-            }
-            EditorAction::SetLineHeight(height) => {
-                let mut settings = self.settings.get();
-                settings.line_height = height;
-                self.settings.set(settings);
-                true
-            }
-            EditorAction::SetFont(font) => {
-                let mut settings = self.settings.get();
-                if settings.font == font {
-                    return false;
-                }
-                settings.font = font;
-                self.settings.set(settings);
-                true
-            }
-            EditorAction::EditorInput(value) => {
-                if self.document.get() == value {
-                    return false;
-                }
-                self.document.set(value);
-                true
-            }
-            EditorAction::IconSearch(value) => {
-                if self.icon_query.get() == value {
-                    return false;
-                }
-                self.icon_query.set(value);
-                true
-            }
-            EditorAction::SetIconCategory(category) => {
-                if self.icon_category.get() == category {
-                    return false;
-                }
-                self.icon_category.set(category);
-                true
-            }
-            EditorAction::Window(_) => true,
+            about_rows: query_about_rows(&mut bridge),
         }
     }
 }
@@ -195,34 +112,30 @@ impl AppController<EditorAction> for EditorController {
         build: &mut ViewBuild<EditorAction>,
         ctx: &FrameContext,
     ) -> ViewResult<ViewOutput<EditorAction>> {
-        render_root(
-            build,
-            ctx.viewport,
-            ctx.viewport_signal.clone(),
-            ctx.window_maximized,
-            self.route.get(),
-            self.settings.clone(),
-            self.document.clone(),
-            self.about_cache.clone(),
-            self.icon_query.get(),
-            self.icon_category.get(),
-            self.resources.icon_provider(),
-            self.resources.fonts(),
-            ctx.hover_key.as_ref(),
-            ctx.pressed_key.as_ref(),
-        )
+        ui!(build {
+            <EditorApp
+                key={"editor.app"}
+                viewport={ctx.viewport_signal.clone()}
+                window_maximized={ctx.window_maximized_signal.clone()}
+                resources={self.resources}
+                about_rows={self.about_rows.clone()}
+                @output={editor_output_to_action}
+            />
+        })
     }
 
     fn handle_action(&mut self, action: EditorAction) -> ControllerOutcome {
-        let effect = match &action {
-            EditorAction::Window(command) => Some(AppEffect::Window(*command)),
-            _ => None,
-        };
-        let changed = self.handle_action(action);
-        effect.map_or_else(
-            || ControllerOutcome::changed(changed),
-            ControllerOutcome::with_effect,
-        )
+        match action {
+            EditorAction::Window(command) => {
+                ControllerOutcome::with_effect(AppEffect::Window(command))
+            }
+        }
+    }
+}
+
+fn editor_output_to_action(output: EditorOutput) -> EditorAction {
+    match output {
+        EditorOutput::Window(command) => EditorAction::Window(command),
     }
 }
 
@@ -240,8 +153,8 @@ fn query_about_rows(bridge: &mut BridgeDispatcher) -> Vec<(String, String)> {
             Some(BridgeEvent::Response {
                 result: BridgeResult::Ok(bytes),
                 ..
-            }) => decode_about_payload(&capability, &bytes).unwrap_or_else(|| "—".to_owned()),
-            _ => "—".to_owned(),
+            }) => decode_about_payload(&capability, &bytes).unwrap_or_else(|| "-".to_owned()),
+            _ => "-".to_owned(),
         };
         rows.push((label.to_owned(), value));
     }
@@ -285,7 +198,11 @@ fn decode_about_payload(capability: &tela_bridge::CapabilityId, bytes: &[u8]) ->
 mod tests {
     use super::*;
     use tela_app_runtime::{Application, ApplicationConfig};
-    use tela_contract::{IconProvider, Point, PointerEvent, Viewport};
+    use tela_app_session::ApplicationSession;
+    use tela_contract::{
+        Color, ContentConcern, DrawPayload, Fill, IconProvider, Point, PointerEvent, SemanticKey,
+        UiNode, Viewport,
+    };
     use tela_icon_resources::MaterialIconFontProvider;
     use tela_text_resources::{CONTROLLED_FONT_CATALOG, ControlledTextMeasurer};
 
@@ -320,15 +237,15 @@ mod tests {
         )
     }
 
-    fn ensure_and_present(app: &mut Application<EditorAction, EditorController>) {
-        assert!(app.ensure_frame());
-        assert!(!app.frame_presented());
+    fn publish_and_present(app: &mut Application<EditorAction, EditorController>) {
+        let publication = ApplicationSession::publish(app).expect("editor publication");
+        ApplicationSession::presented(app, publication.token).expect("editor presentation");
     }
 
     fn point_for_key(app: &Application<EditorAction, EditorController>, key: &str) -> Point {
-        let (tree, frame) = app.active().expect("editor frame");
+        let (tree, frame) = app.active().expect("active editor frame");
         let node_id = tree
-            .node_id_for_key(&tela_contract::SemanticKey(key.to_owned()))
+            .node_id_for_key(&SemanticKey(key.to_owned()))
             .expect("interactive key");
         let region = frame
             .hit_regions
@@ -341,61 +258,96 @@ mod tests {
         }
     }
 
-    #[test]
-    fn frame_uses_the_default_application_profile() {
-        let mut app = app();
-        assert!(app.ensure_frame());
-        assert!(!app.frame().commands.is_empty());
-    }
-
-    #[test]
-    fn native_text_channel_accumulates_edits_before_the_next_frame_is_presented() {
-        let mut app = app();
-        ensure_and_present(&mut app);
-        let point = point_for_key(&app, "editor.page.field");
+    fn click(app: &mut Application<EditorAction, EditorController>, key: &str) {
+        let point = point_for_key(app, key);
         assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
-        assert!(app.input_focused());
+        assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
+    }
 
-        assert_eq!(app.set_input_value("第一个值".to_owned()), 1);
-        assert_eq!(app.input_value(), "第一个值");
-        assert_eq!(app.set_input_value("第一个值 + 第二次编辑".to_owned()), 1);
-        assert_eq!(app.input_value(), "第一个值 + 第二次编辑");
-        assert_eq!(app.controller().document.get(), "第一个值 + 第二次编辑");
+    fn has_key(app: &Application<EditorAction, EditorController>, key: &str) -> bool {
+        app.active()
+            .expect("active editor frame")
+            .0
+            .keys()
+            .iter()
+            .any(|candidate| candidate.0 == key)
+    }
+
+    fn subtree_contains_text(node: &UiNode, expected: &str) -> bool {
+        matches!(
+            node.content.as_ref(),
+            Some(ContentConcern::Text(text)) if text.text == expected
+        ) || node
+            .children
+            .iter()
+            .any(|child| subtree_contains_text(child, expected))
+    }
+
+    fn solid_fill_for_key(app: &Application<EditorAction, EditorController>, key: &str) -> Color {
+        let node = app
+            .active()
+            .expect("active editor frame")
+            .0
+            .shared_node_for_key(&SemanticKey(key.to_owned()))
+            .expect("keyed node");
+        match node.visual.as_ref().and_then(|visual| visual.fill.as_ref()) {
+            Some(Fill::Solid(color)) => *color,
+            other => panic!("expected solid fill for {key}, got {other:?}"),
+        }
+    }
+
+    fn subtree_texts(node: &UiNode, texts: &mut Vec<String>) {
+        if let Some(ContentConcern::Text(text)) = node.content.as_ref() {
+            texts.push(text.text.clone());
+        }
+        for child in &node.children {
+            subtree_texts(child, texts);
+        }
+    }
+
+    fn texts_for_key(app: &Application<EditorAction, EditorController>, key: &str) -> Vec<String> {
+        let node = app
+            .active()
+            .expect("active editor frame")
+            .0
+            .shared_node_for_key(&SemanticKey(key.to_owned()))
+            .expect("keyed node");
+        let mut texts = Vec::new();
+        subtree_texts(&node, &mut texts);
+        texts
     }
 
     #[test]
-    fn close_button_is_hit_testable_before_hover_state_exists() {
+    fn root_component_builds_the_default_editor_and_drag_region() {
         let mut app = app();
-        ensure_and_present(&mut app);
-        let point = {
-            let (tree, frame) = app.active().expect("editor frame");
-            let index = tree
-                .keys()
-                .iter()
-                .position(|key| key.0 == "editor.window.close")
-                .expect("close button key");
-            let node_id = tree.node_ids()[index];
-            let region = frame
-                .hit_regions
-                .iter()
-                .find(|region| region.node_id == node_id)
-                .expect("close button hit region");
-            Point {
-                x: region.rect.x + region.rect.w / 2.0,
-                y: region.rect.y + region.rect.h / 2.0,
-            }
-        };
+        publish_and_present(&mut app);
+        let (_, frame) = app.active().expect("active editor frame");
+        let materialized = frame.to_ui_frame();
+        assert!(!materialized.commands.is_empty());
+        assert!(
+            materialized.commands.iter().any(|command| {
+                matches!(
+                    &command.payload,
+                    DrawPayload::Rect {
+                        fill: Some(color),
+                        ..
+                    } if *color == Color::rgba(0.94, 0.94, 0.94, 1.0)
+                )
+            }),
+            "the title bar must contribute a visible surface command"
+        );
+        assert!(
+            materialized.commands.iter().any(|command| {
+                matches!(
+                    &command.payload,
+                    DrawPayload::Text { text, .. } if text.text.contains("编辑器")
+                )
+            }),
+            "the default editor page must contribute text commands"
+        );
+        assert!(has_key(&app, "editor.page"));
 
-        assert!(!app.hover_interactive());
-        assert!(app.hit_test_interactive_at(point));
-    }
-
-    #[test]
-    fn title_bar_exposes_a_declarative_window_drag_region() {
-        let mut app = app();
-        ensure_and_present(&mut app);
         let point = Point { x: 600.0, y: 17.0 };
-        let (_, frame) = app.active().expect("editor frame");
         let role = frame
             .hit_regions
             .iter()
@@ -411,393 +363,191 @@ mod tests {
     }
 
     #[test]
-    fn close_button_click_publishes_window_command() {
+    fn navigation_is_child_output_to_root_state_and_commits_atomically() {
         let mut app = app();
-        ensure_and_present(&mut app);
-        let point = {
-            let (tree, frame) = app.active().expect("editor frame");
-            let index = tree
-                .keys()
-                .iter()
-                .position(|key| key.0 == "editor.window.close")
-                .expect("close button key");
-            let node_id = tree.node_ids()[index];
-            let region = frame
-                .hit_regions
-                .iter()
-                .find(|region| region.node_id == node_id)
-                .expect("close button hit region");
-            Point {
-                x: region.rect.x + region.rect.w / 2.0,
-                y: region.rect.y + region.rect.h / 2.0,
-            }
-        };
+        publish_and_present(&mut app);
+        click(&mut app, "editor.nav.settings");
 
-        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
-        assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
-        assert!(app.ensure_frame());
-        let publication = ApplicationSession::publish(&mut app).expect("window publication");
+        // The existing presentation stays active until the candidate containing the root State
+        // change is acknowledged by the host.
+        assert!(!has_key(&app, "editor.settings"));
+        let publication = ApplicationSession::publish(&mut app).expect("settings publication");
+        assert!(!has_key(&app, "editor.settings"));
+        ApplicationSession::presented(&mut app, publication.token).expect("settings presentation");
+        assert!(has_key(&app, "editor.settings"));
+
+        click(&mut app, "editor.settings.font.increase");
+        publish_and_present(&mut app);
+        let (_, tree_frame) = app.active().expect("settings frame after adjustment");
+        assert!(tree_frame.command_count() > 0);
+    }
+
+    #[test]
+    fn button_hover_is_local_candidate_state_until_presented() {
+        let mut app = app();
+        publish_and_present(&mut app);
         assert_eq!(
-            publication.effects,
-            vec![AppEffect::Window(tela_contract::WindowCommand::Close)]
+            solid_fill_for_key(&app, "editor.nav.icons"),
+            tela_contract::Color::rgba(0.94, 0.94, 0.94, 1.0)
         );
+
+        let point = point_for_key(&app, "editor.nav.icons");
+        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
+        // HostInput only updates the component's candidate State. The active tree remains
+        // immutable until its candidate has been acknowledged.
+        assert_eq!(
+            solid_fill_for_key(&app, "editor.nav.icons"),
+            tela_contract::Color::rgba(0.94, 0.94, 0.94, 1.0)
+        );
+        publish_and_present(&mut app);
+        assert_eq!(
+            solid_fill_for_key(&app, "editor.nav.icons"),
+            tela_contract::Color::rgba(0.85, 0.93, 0.98, 1.0)
+        );
+    }
+
+    #[test]
+    fn rejected_candidate_does_not_leak_a_child_output_into_active_state() {
+        let mut app = app();
+        publish_and_present(&mut app);
+        click(&mut app, "editor.nav.settings");
+        let publication = ApplicationSession::publish(&mut app).expect("settings publication");
         ApplicationSession::rejected(&mut app, publication.token);
+
+        assert!(!has_key(&app, "editor.settings"));
+        assert!(has_key(&app, "editor.page"));
+        assert!(ApplicationSession::take_presented_effects(&mut app).is_empty());
     }
 
     #[test]
-    fn viewport_candidate_only_becomes_active_after_present() {
+    fn text_input_is_owned_by_the_field_and_reaches_root_candidate_state() {
         let mut app = app();
-        assert!(app.ensure_frame());
-        assert!(app.frame_is_current());
-        assert!(app.active().is_none());
-        assert!(!app.frame_presented());
-        assert!(app.set_viewport(940.0, 620.0, 1.0));
-        assert!(!app.frame_is_current());
-        assert!(app.ensure_frame());
-        assert!(app.frame_is_current());
-        assert_eq!(
-            app.frame().viewport,
-            Viewport {
-                width: 940.0,
-                height: 620.0
-            }
-        );
-        assert_ne!(
-            app.active().expect("old active frame").1.viewport,
-            app.frame().viewport
-        );
-        assert!(!app.frame_presented());
-        assert_eq!(
-            app.active().expect("presented frame").1.viewport,
-            app.frame().viewport
-        );
-    }
-
-    #[test]
-    fn window_maximized_state_invalidates_frame_and_is_idempotent() {
-        let mut app = app();
-        assert!(app.ensure_frame());
-        assert!(!app.window_maximized());
-        assert!(app.set_window_maximized(true));
-        assert!(app.window_maximized());
-        assert!(!app.frame_is_current());
-        assert!(!app.set_window_maximized(true));
-        assert!(app.ensure_frame());
-        assert!(app.frame_is_current());
-        assert!(app.set_window_maximized(false));
-        assert!(!app.window_maximized());
-        assert!(!app.frame_is_current());
-    }
-
-    #[test]
-    fn navigation_switches_pages() {
-        let mut app = app();
-        assert!(app.dispatch_action(EditorAction::Navigate(Route::Settings)));
-        assert_eq!(app.controller_mut().route.get(), Route::Settings);
-        assert!(app.dispatch_action(EditorAction::Navigate(Route::Icons)));
-        assert_eq!(app.controller_mut().route.get(), Route::Icons);
-        assert!(app.dispatch_action(EditorAction::Navigate(Route::About)));
-        assert_eq!(app.controller_mut().route.get(), Route::About);
-        assert!(!app.dispatch_action(EditorAction::Navigate(Route::About)));
-    }
-
-    #[test]
-    fn settings_navigation_click_builds_and_presents_the_settings_page() {
-        let mut app = app();
-        ensure_and_present(&mut app);
-        let point = point_for_key(&app, "editor.nav.settings");
-
-        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
+        publish_and_present(&mut app);
+        let point = point_for_key(&app, "editor.page.field");
         assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
-        assert!(app.handle_pointer(PointerEvent::mouse_up(point)) > 0);
-        assert_eq!(app.controller().route.get(), Route::Settings);
-        assert!(
-            app.ensure_frame(),
-            "settings route must produce a candidate frame"
-        );
-        assert!(!app.frame_presented());
-        assert!(
-            app.active()
-                .expect("presented settings frame")
-                .0
-                .keys()
-                .iter()
-                .any(|key| key.0 == "editor.settings"),
-            "settings page root must be present after the navigation click"
-        );
+        publish_and_present(&mut app);
+        assert!(app.input_focused());
+        assert_eq!(app.set_input_value("新的候选文稿".to_owned()), 1);
 
-        let medium_key = app
+        let publication = ApplicationSession::publish(&mut app).expect("text publication");
+        // The old tree still carries the old controlled value before acknowledgement.
+        let old_field = app
             .active()
-            .expect("presented settings frame")
+            .expect("old active editor tree")
             .0
-            .keys()
-            .iter()
-            .find(|key| key.0.contains("/@for-") && key.0.ends_with("/body-medium"))
-            .expect("medium font choice key")
-            .0
-            .clone();
-        let medium_point = point_for_key(&app, &medium_key);
-        assert!(app.handle_pointer(PointerEvent::mouse_down(medium_point)) > 0);
-        assert!(app.handle_pointer(PointerEvent::mouse_up(medium_point)) > 0);
-        assert_eq!(
-            app.controller().settings.get().font,
-            TextStyleRef::body_medium()
-        );
-    }
-
-    #[test]
-    fn icons_page_search_and_category_invalidate_the_projection() {
-        let mut app = app();
-        assert!(app.dispatch_action(EditorAction::Navigate(Route::Icons)));
-        ensure_and_present(&mut app);
-        assert!(
-            app.active()
-                .expect("icons frame")
-                .0
-                .keys()
-                .iter()
-                .any(|key| key.0 == "editor.icons")
-        );
-        assert_eq!(
-            app.active()
-                .expect("icons frame")
-                .0
-                .keys()
-                .iter()
-                .filter(|key| key.0.starts_with("editor.icons.card."))
-                .count(),
-            120
-        );
-        let scroll = app
+            .shared_node_for_key(&SemanticKey("editor.page.field".to_owned()))
+            .expect("field node");
+        assert!(!subtree_contains_text(&old_field, "新的候选文稿"));
+        ApplicationSession::presented(&mut app, publication.token).expect("text presentation");
+        let new_field = app
             .active()
-            .expect("icons frame")
-            .1
-            .scroll_bounds
-            .iter()
-            .find(|bounds| bounds.key.0 == "editor.icons.scroll")
-            .expect("icons scroll bounds");
-        assert!(
-            scroll.content_height > scroll.viewport.h + 88.0,
-            "icon cards should wrap into multiple rows: content_height={} viewport_height={}",
-            scroll.content_height,
-            scroll.viewport.h
-        );
-        assert!(app.dispatch_action(EditorAction::IconSearch("search".to_owned())));
-        assert_eq!(app.controller_mut().icon_query.get(), "search");
-        assert!(!app.frame_is_current());
-        assert!(app.dispatch_action(EditorAction::SetIconCategory(IconCategory::View)));
-        assert_eq!(app.controller_mut().icon_category.get(), IconCategory::View);
-        assert!(!app.frame_is_current());
-        assert!(app.ensure_frame());
-        assert!(app.frame_is_current());
-        assert!(!app.frame_presented());
+            .expect("new active editor tree")
+            .0
+            .shared_node_for_key(&SemanticKey("editor.page.field".to_owned()))
+            .expect("field node");
+        assert!(subtree_contains_text(&new_field, "新的候选文稿"));
+    }
+
+    #[test]
+    fn window_output_releases_its_effect_only_after_presented() {
+        let mut app = app();
+        publish_and_present(&mut app);
+        click(&mut app, "editor.window.close");
+        let publication = ApplicationSession::publish(&mut app).expect("close publication");
+
+        assert!(ApplicationSession::take_presented_effects(&mut app).is_empty());
+        ApplicationSession::presented(&mut app, publication.token).expect("close presentation");
         assert_eq!(
+            ApplicationSession::take_presented_effects(&mut app),
+            vec![AppEffect::Window(WindowCommand::Close)]
+        );
+        assert!(ApplicationSession::take_presented_effects(&mut app).is_empty());
+    }
+
+    #[test]
+    fn icon_search_uses_the_same_owned_text_input_route() {
+        let mut app = app();
+        publish_and_present(&mut app);
+        click(&mut app, "editor.nav.icons");
+        publish_and_present(&mut app);
+        assert!(has_key(&app, "editor.icons"));
+        assert!(
             app.active()
-                .expect("filtered icons frame")
-                .0
-                .keys()
-                .iter()
-                .filter(|key| key.0.starts_with("editor.icons.card."))
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    fn editor_input_updates_the_document_signal() {
-        let mut app = app();
-        assert!(
-            app.controller_mut()
-                .handle_action(EditorAction::EditorInput("hello".to_owned()))
-        );
-        assert_eq!(app.controller_mut().document.get(), "hello");
-    }
-
-    #[test]
-    fn settings_update_font_and_line_height() {
-        let mut app = app();
-        assert!(app.dispatch_action(EditorAction::SetFontSize(20)));
-        assert!(app.dispatch_action(EditorAction::SetLineHeight(160)));
-        assert!(app.dispatch_action(EditorAction::SetFont(TextStyleRef::body_medium())));
-        let settings = app.controller_mut().settings.get();
-        assert_eq!(settings.font_size, 20);
-        assert_eq!(settings.line_height, 160);
-        assert_eq!(settings.font, TextStyleRef::body_medium());
-        assert!(!app.dispatch_action(EditorAction::SetFont(TextStyleRef::body_medium())));
-        assert!(app.ensure_frame());
-        assert!(!app.frame_presented());
-        assert!(tree_contains_text_font(
-            app.active().expect("active editor tree").0.root(),
-            &TextStyleRef::body_medium(),
-            "欢迎使用 Tela 文本编辑器"
-        ));
-    }
-
-    #[test]
-    fn nav_hover_transition_requests_ticks_and_stops_after_completion() {
-        let mut app = app();
-        ensure_and_present(&mut app);
-        assert!(!app.on_animation_tick(5_000));
-        let point = point_for_key(&app, "editor.nav.settings");
-
-        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
-        assert!(app.ensure_frame());
-        assert!(app.animation_schedule().active);
-        assert!(!app.frame_presented());
-
-        assert!(app.on_animation_tick(5_070));
-        assert!(app.ensure_frame());
-        assert!(app.animation_schedule().active);
-        assert!(!app.frame_presented());
-
-        assert!(app.on_animation_tick(5_200));
-        assert!(app.ensure_frame());
-        assert!(!app.animation_schedule().active);
-    }
-
-    #[test]
-    fn pointer_projection_redraws_only_when_hover_or_pressed_state_changes() {
-        let mut app = app();
-        ensure_and_present(&mut app);
-        let point = point_for_key(&app, "editor.nav.settings");
-
-        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
-        assert!(
-            !app.frame_is_current(),
-            "hover entry must invalidate the frame"
-        );
-        ensure_and_present(&mut app);
-
-        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
-        assert!(
-            app.frame_is_current(),
-            "raw moves inside the same hover target must not redraw"
-        );
-        assert!(!app.ensure_frame());
-
-        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
-        assert!(
-            !app.frame_is_current(),
-            "pressed projection must be visible without waiting for another state change"
-        );
-    }
-
-    fn tree_contains_text_font(
-        node: &tela_contract::UiNode,
-        font: &TextStyleRef,
-        text_fragment: &str,
-    ) -> bool {
-        matches!(
-            node.content.as_ref(),
-            Some(tela_contract::ContentConcern::Text(text))
-                if &text.font == font && text.text.contains(text_fragment)
-        ) || node
-            .children
-            .iter()
-            .any(|child| tree_contains_text_font(child, font, text_fragment))
-    }
-
-    #[test]
-    fn wheel_scroll_over_the_icon_grid_applies_and_clamps() {
-        let mut app = app();
-        ensure_and_present(&mut app);
-        // 切到图标页：Material 图标网格远超滚动视口。
-        let nav = point_for_key(&app, "editor.nav.icons");
-        assert!(app.handle_pointer(PointerEvent::mouse_down(nav)) > 0);
-        assert!(app.handle_pointer(PointerEvent::mouse_up(nav)) > 0);
-        ensure_and_present(&mut app);
-
-        let (center, max_offset) = {
-            let (_tree, frame) = app.active().expect("icons frame");
-            let bounds = frame
+                .expect("icons tree")
+                .1
                 .scroll_bounds
                 .iter()
-                .find(|bounds| bounds.key.0 == "editor.icons.scroll")
-                .expect("icons scroll bounds");
-            (
-                Point {
-                    x: bounds.viewport.x + bounds.viewport.w / 2.0,
-                    y: bounds.viewport.y + bounds.viewport.h / 2.0,
-                },
-                bounds.max_offset_y,
-            )
-        };
-        assert!(max_offset > 0.0, "图标网格必须产生可滚动余量");
-
-        let scroll_key = tela_contract::SemanticKey("editor.icons.scroll".to_owned());
-        assert!(
-            app.handle_pointer(PointerEvent::new(
-                tela_contract::PointerId(0),
-                tela_contract::PointerKind::Mouse,
-                tela_contract::PointerPhase::Scroll,
-                center,
-                tela_contract::PointerButtons::NONE,
-                1,
-                Point { x: 0.0, y: 120.0 },
-            )) > 0
+                .any(|bounds| bounds.key.0 == "editor.icons.scroll")
         );
-        ensure_and_present(&mut app);
-        assert_eq!(app.view_state().scroll(&scroll_key).offset_y, 120.0);
 
-        // 过量滚动被钳制在边界内。
-        assert!(
-            app.handle_pointer(PointerEvent::new(
-                tela_contract::PointerId(0),
-                tela_contract::PointerKind::Mouse,
-                tela_contract::PointerPhase::Scroll,
-                center,
-                tela_contract::PointerButtons::NONE,
-                2,
-                Point {
-                    x: 0.0,
-                    y: max_offset * 10.0
-                },
-            )) > 0
-        );
-        ensure_and_present(&mut app);
-        assert_eq!(app.view_state().scroll(&scroll_key).offset_y, max_offset);
+        let point = point_for_key(&app, "editor.icons.search");
+        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
+        publish_and_present(&mut app);
+        assert!(app.input_focused());
+        assert_eq!(app.set_input_value("search".to_owned()), 1);
+        publish_and_present(&mut app);
+
+        let field = app
+            .active()
+            .expect("filtered icons tree")
+            .0
+            .shared_node_for_key(&SemanticKey("editor.icons.search".to_owned()))
+            .expect("search field node");
+        assert!(subtree_contains_text(&field, "search"));
     }
 
     #[test]
-    fn input_blur_commits_the_pending_draft_idempotently() {
+    fn icon_card_hover_is_owned_by_the_card_component() {
         let mut app = app();
-        ensure_and_present(&mut app);
-        let point = point_for_key(&app, "editor.page.field");
-        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
-        assert!(app.input_focused());
+        publish_and_present(&mut app);
+        click(&mut app, "editor.nav.icons");
+        publish_and_present(&mut app);
 
-        assert_eq!(app.set_input_value("未提交草稿".to_owned()), 1);
-        assert_eq!(app.controller().document.get(), "未提交草稿");
-        // blur 把局部草稿以 Commit 补交回旧目标；editor 的 EditorInput 映射把 Edit 与
-        // Commit 折叠为同一动作，值未变 → 幂等返回 0，但草稿必须保持。
-        assert_eq!(app.input_blur(), 0);
-        assert_eq!(app.controller().document.get(), "未提交草稿");
-        assert!(!app.input_is_composing());
-        // 再次 blur：通道已交还，目标仍指向输入框，同样幂等。
-        assert_eq!(app.input_blur(), 0);
-        assert_eq!(app.controller().document.get(), "未提交草稿");
+        let key = "editor.icons.card.search";
+        assert_eq!(
+            solid_fill_for_key(&app, key),
+            tela_contract::Color::rgba(1.0, 1.0, 1.0, 1.0)
+        );
+        let point = point_for_key(&app, key);
+        assert!(app.handle_pointer(PointerEvent::mouse_move(point)) > 0);
+        publish_and_present(&mut app);
+        assert_eq!(
+            solid_fill_for_key(&app, key),
+            tela_contract::Color::rgba(0.85, 0.93, 0.98, 1.0)
+        );
     }
 
     #[test]
-    fn ime_composition_blocks_raw_keys_until_it_ends() {
+    fn viewport_signal_drives_the_root_projection() {
         let mut app = app();
-        ensure_and_present(&mut app);
-        let point = point_for_key(&app, "editor.page.field");
-        assert!(app.handle_pointer(PointerEvent::mouse_down(point)) > 0);
-        assert!(app.input_focused());
+        publish_and_present(&mut app);
+        assert!(app.set_viewport(940.0, 620.0, 1.0));
+        let publication = ApplicationSession::publish(&mut app).expect("viewport publication");
+        assert_eq!(
+            publication.frame.viewport,
+            Viewport {
+                width: 940.0,
+                height: 620.0,
+            }
+        );
+        ApplicationSession::presented(&mut app, publication.token).expect("viewport presentation");
+        assert!(has_key(&app, "editor.page.field"));
+    }
 
-        // 组合开始：空值重派发对 editor 的纯值映射幂等（返回 0），但组合态已生效。
-        assert_eq!(app.composition_start(), 0);
-        assert!(app.input_is_composing());
-        let tab: u16 = 0x2b;
-        assert_eq!(app.handle_key(tab, 0, false), 0);
-        // 组合编辑照常进入草稿。
-        assert_eq!(app.set_input_value("拼音组合".to_owned()), 1);
-        assert_eq!(app.controller().document.get(), "拼音组合");
-        // 组合结束：同值 Edit 幂等，但组合态必须解除并恢复原始键派发。
-        assert_eq!(app.composition_end(), 0);
-        assert!(!app.input_is_composing());
-        assert_eq!(app.controller().document.get(), "拼音组合");
-        assert_eq!(app.handle_key(tab, 0, false), 1);
+    #[test]
+    fn maximized_host_signal_reassembles_the_window_control_icon() {
+        let mut app = app();
+        publish_and_present(&mut app);
+        let before = texts_for_key(&app, "editor.window.maximize");
+        assert!(
+            !before.is_empty(),
+            "the window control must contain its icon glyph"
+        );
+
+        assert!(app.set_window_maximized(true));
+        let publication = ApplicationSession::publish(&mut app).expect("maximize publication");
+        ApplicationSession::presented(&mut app, publication.token).expect("maximize presentation");
+        let after = texts_for_key(&app, "editor.window.maximize");
+        assert_ne!(before, after, "maximize must switch to the restore icon");
     }
 }

@@ -1,8 +1,7 @@
-//! tela-win32-editor：Win32 风格文本编辑器应用（静态 DSL 演示）。
+//! tela-win32-editor：Win32 风格文本编辑器应用。
 //!
-//! - `application`：域控制器（路由/设置/文档信号与动作处理），由
-//!   `tela-app-runtime` 的跨应用会话运行时驱动；
-//! - `presentation`：顶部导航栏 + 编辑器/设置/关于三页（`ui!` DSL）。
+//! - `application`：薄壳边界，只装配根组件并释放已提交的窗口 effect；
+//! - `presentation`：`EditorApp` 候选 State、显式 Output 和组件自有 HostInput 路由。
 
 #![warn(missing_docs)]
 
@@ -10,8 +9,6 @@
 pub mod application;
 #[cfg(any(test, feature = "app-runtime"))]
 pub mod presentation;
-#[cfg(any(test, feature = "app-runtime"))]
-pub mod ui;
 
 #[cfg(feature = "app-runtime")]
 pub use application::{EditorController, FOCUS_APPEARANCE};

@@ -271,32 +271,43 @@ pub fn rasterize_glyphs(
     }
 
     let font = font_for(&text.font);
-    let glyph_scale = em_pixel_height(font, text.font_size) * options.scale;
-    if !(glyph_scale.is_finite() && glyph_scale > 0.0) {
+    let logical_scale = em_pixel_height(font, text.font_size);
+    let glyph_scale = logical_scale * options.scale;
+    if !(logical_scale.is_finite()
+        && logical_scale > 0.0
+        && glyph_scale.is_finite()
+        && glyph_scale > 0.0)
+    {
         return;
     }
+    // Layout measures at logical scale. Keep the line-break comparison in exactly that coordinate
+    // space, then scale already-decided pen positions for rasterization. Recomputing advances at
+    // `glyph_scale` can differ by an ulp at fractional DPI and make an exact-fit final glyph wrap.
+    let logical = font.as_scaled(logical_scale);
     let scaled = font.as_scaled(glyph_scale);
-    let wrap_width = normalized_wrap_width(Some(options.wrap_width));
+    let wrap_width = normalized_wrap_width(Some(options.wrap_width / options.scale));
     let line_height = text.line_height * options.scale;
-    let mut pen_x = 0.0f32;
+    let mut logical_pen_x = 0.0f32;
     let mut baseline_y = options.baseline_y;
 
     for character in text.text.chars() {
         if character == '\n' {
-            pen_x = 0.0;
+            logical_pen_x = 0.0;
             baseline_y += line_height;
             continue;
         }
 
-        let glyph_id = scaled.glyph_id(character);
-        let advance = scaled.h_advance(glyph_id);
-        if wrap_width.is_some_and(|limit| pen_x > 0.0 && pen_x + advance > limit) {
-            pen_x = 0.0;
+        let glyph_id = logical.glyph_id(character);
+        let advance = logical.h_advance(glyph_id);
+        if wrap_width.is_some_and(|limit| logical_pen_x > 0.0 && logical_pen_x + advance > limit) {
+            logical_pen_x = 0.0;
             baseline_y += line_height;
         }
 
-        let glyph = glyph_id
-            .with_scale_and_position(glyph_scale, point(options.origin_x + pen_x, baseline_y));
+        let glyph = glyph_id.with_scale_and_position(
+            glyph_scale,
+            point(options.origin_x + logical_pen_x * options.scale, baseline_y),
+        );
         if let Some(outlined) = scaled.outline_glyph(glyph) {
             let bounds = outlined.px_bounds();
             let origin_x = bounds.min.x.floor() as i32;
@@ -310,18 +321,18 @@ pub fn rasterize_glyphs(
             });
         } else if glyph_id.0 == 0 {
             emit(GlyphRasterEvent::MissingGlyph {
-                x: (options.origin_x + pen_x).round() as i32,
+                x: (options.origin_x + logical_pen_x * options.scale).round() as i32,
                 y: (baseline_y - scaled.ascent()).round() as i32,
                 size: (text.font_size * options.scale).max(1.0).round() as i32,
             });
         }
-        pen_x += advance;
+        logical_pen_x += advance;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tela_contract::{Color, IconName, TextContent, TextStyleRef};
+    use tela_contract::{Color, IconName, TextContent, TextMeasureRequest, TextStyleRef};
 
     use super::{
         GlyphRasterEvent, GlyphRasterOptions, glyph_ink_bounds, glyph_ink_metrics, rasterize_glyphs,
@@ -586,6 +597,40 @@ mod tests {
         assert_eq!(bounds.y, -2);
         assert_eq!(bounds.width, 16);
         assert_eq!(bounds.height, 16);
+    }
+
+    #[test]
+    fn exact_logical_width_does_not_wrap_the_last_glyph_at_fractional_dpi() {
+        let content = TextContent {
+            text: "viewport: 489 x 398".to_owned(),
+            font: TextStyleRef::body(),
+            font_size: 24.0,
+            line_height: 32.0,
+            color: Color::WHITE,
+        };
+        let logical_width = crate::measure::measure_text(&TextMeasureRequest {
+            text: &content.text,
+            text_style: &content.font,
+            font_size: content.font_size,
+            line_height: content.line_height,
+            max_width: None,
+        })
+        .width;
+        let mut prefix = content.clone();
+        prefix.text.pop();
+        let options = GlyphRasterOptions {
+            origin_x: 0.0,
+            baseline_y: 48.0,
+            scale: 1.5,
+            wrap_width: logical_width * 1.5,
+        };
+        let prefix_bounds = glyph_ink_bounds(&prefix, options).expect("prefix has ink");
+        let full_bounds = glyph_ink_bounds(&content, options).expect("full text has ink");
+
+        assert!(
+            full_bounds.height <= prefix_bounds.height + 1,
+            "an exact layout width must keep the final glyph on the first line: {prefix_bounds:?} vs {full_bounds:?}"
+        );
     }
 
     #[test]

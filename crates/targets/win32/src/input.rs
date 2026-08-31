@@ -104,7 +104,10 @@ pub(crate) fn apply_character_code_unit(value: &mut String, code_unit: u16) -> b
             true
         }
         0x20..=0x7e => {
-            value.push(char::from_u32(code_unit as u32).expect("ASCII character"));
+            let Some(character) = char::from_u32(code_unit as u32) else {
+                return false;
+            };
+            value.push(character);
             true
         }
         _ => false,
@@ -117,6 +120,7 @@ pub(crate) fn quantum_expired(started: Instant) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

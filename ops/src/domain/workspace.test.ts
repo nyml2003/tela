@@ -82,6 +82,16 @@ test('六个产品显式选择自身的应用、交付、renderer 与 Target', (
 
   assert.equal(workspace.product('win32').target, 'tela-target-win32');
   assert.equal(workspace.product('win32-editor').target, 'tela-target-win32');
+  assert.deepEqual(workspace.product('win32-probe'), {
+    id: 'win32-probe',
+    root: '/repo/products/win32-probe',
+    application: 'tela-win32-probe',
+    delivery: 'static-link',
+    target: 'tela-target-win32',
+    packages: ['tela-product-win32-probe'],
+  });
+  assert.equal(workspace.win32ProbeArtifactPath('release'), '/repo/target/x86_64-pc-windows-gnu/release/tela-win32-probe-host.exe');
+  assert.equal(workspace.win32ProbeDistPath(), '/repo/dist/win32-probe/tela-win32-probe-host.exe');
   assert.deepEqual(workspace.product('win32-agent'), {
     id: 'win32-agent',
     root: '/repo/products/win32-agent',

@@ -128,24 +128,15 @@ impl SessionDriver {
         self.presented = None;
     }
 
-    /// 当前应渲染的帧：候选（优先）或已呈现帧。
-    pub(crate) fn frame(&self) -> &RenderPlan {
-        &self
-            .candidate
+    /// 当前可渲染的候选（优先）或已呈现帧及其 damage。
+    ///
+    /// 首帧发布失败、几何失效与候选重试之间可以短暂没有帧。尤其不能让 Win32 的
+    /// `window_proc` 因这一正常恢复状态 panic；调用方应跳过这一次绘制并等待下一次重试。
+    pub(crate) fn render_inputs(&self) -> Option<(&RenderPlan, &FrameDamage)> {
+        self.candidate
             .as_ref()
             .or(self.presented.as_ref())
-            .expect("session frame must be published")
-            .frame
-    }
-
-    /// Damage for the same candidate-or-presented publication returned by [`Self::frame`].
-    pub(crate) fn frame_damage(&self) -> &FrameDamage {
-        &self
-            .candidate
-            .as_ref()
-            .or(self.presented.as_ref())
-            .expect("session frame must be published")
-            .damage
+            .map(|publication| (&publication.frame, &publication.damage))
     }
 
     /// 当前候选（优先）或已呈现帧的非绘制状态。
@@ -211,6 +202,7 @@ impl SessionDriver {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
@@ -342,11 +334,15 @@ mod tests {
         });
     }
 
+    fn current_frame(driver: &SessionDriver) -> &RenderPlan {
+        driver.render_inputs().expect("mock driver has a frame").0
+    }
+
     #[test]
     fn new_initializes_and_eagerly_publishes_the_first_frame() {
         let (driver, log) = mock_driver();
         assert_eq!(*log.borrow(), vec!["init", "publish"]);
-        assert_eq!(driver.frame().viewport.width, 16.0, "首帧已就绪");
+        assert_eq!(current_frame(&driver).viewport.width, 16.0, "首帧已就绪");
     }
 
     #[test]
@@ -409,13 +405,29 @@ mod tests {
     }
 
     #[test]
+    fn render_inputs_are_absent_after_invalidation_until_a_new_frame_is_published() {
+        let (mut driver, _log) = mock_driver();
+        driver.frame_presented();
+        driver.invalidate_presented();
+
+        assert!(
+            driver.render_inputs().is_none(),
+            "an invalidated frame is a recoverable render gap, not a panic condition"
+        );
+    }
+
+    #[test]
     fn rejected_candidate_is_republished_on_the_next_dispatch() {
         let (mut driver, log) = mock_driver();
         log.borrow_mut().clear();
         driver.frame_rejected();
         assert_eq!(*log.borrow(), vec!["rejected:7"], "候选被拒绝后等待重发布");
         dispatch_viewport(&mut driver);
-        assert_eq!(driver.frame().viewport.width, 16.0, "下一次派发恢复候选帧");
+        assert_eq!(
+            current_frame(&driver).viewport.width,
+            16.0,
+            "下一次派发恢复候选帧"
+        );
     }
 
     #[test]
@@ -425,7 +437,7 @@ mod tests {
         let mut driver = SessionDriver::new(Box::new(mock)).expect("mock driver");
         dispatch_viewport(&mut driver);
         assert_eq!(
-            driver.frame().viewport.width,
+            current_frame(&driver).viewport.width,
             16.0,
             "首次发布失败后，下一次派发时机重试成功"
         );
